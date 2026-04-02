@@ -1,0 +1,43 @@
+the idea im having is that i want to compile jai code to spirv so that it runs on gpu. the modern spirv supports almost all pointer semantics.
+the base features that the compiler will support will be very limited to abuse the modern hardware. the idea comes from the no grahics api blog post (https://www.sebastianaaltonen.com/blog/no-graphics-api)
+every graphics shader program (task + mesh + fragment) has the same binding layout, which is mostly empty but three pointers in the push constant block, one for each stage entry.
+the way it will work is that i will use the metaprogramming features of jai to offload the generation of ast to the jai compiler and from there i will do the code generation.
+
+the shader program maybe would look like this:
+JAI
+
+// this part is in a shared file. shared between cpu and gpu code
+DEFAULT_SAMPLER_INDEX :: 5; // compile time constant
+
+MeshData :: struct {
+   albedoTextureIndex: u32;
+   meshlets:      *Meshlet;   // gpu pointer (u64)
+   vertices:      *Vertex;    // gpu pointer (u64)
+   ...
+}
+
+Meshlet :: struct { ... }
+Vertex :: struct { ... }
+
+
+
+// shader file (gpu only)
+
+// or maybe i can make these a default header in the metaprogram so you dont need to write them at the top of the file.
+textures: TextureDescriptorHeap; // compiler defined type
+samplers: SamplerDescriptorHeap; // compiler defined type
+
+MeshMain :: (data: *MeshData) {
+
+   // access textures like so:
+   albedoTexture := textures[data.albedoTextureIndex]; // intrinsic subscript operator
+   sampler := samplers[DEFAULT_SAMPLER_INDEX]; // intrinsic subscript operator
+
+   albedo := sample(albedoTexture, sampler, uv);
+} @mesh // has a note "mesh" thats how i know this is the entry point for the mesh shader
+
+FragmentMain :: (data: *FragmentData) -> vec4, vec4, ... /* returns a color for each render target */ {
+
+} @fragment
+
+JAI
