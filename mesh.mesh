@@ -38,8 +38,14 @@ layout(triangles, max_vertices = 40, max_primitives = 20) out;
 layout(location = 0) out MeshOutVertex[] mOutVertex;
 layout(location = 10) perprimitiveEXT out MeshOutPrimitive[] mOutPrimitive;
 
+ivec3 DoStuff(ivec3 a) {
+    return a + a;
+}
+
 void ApilaMS() {
    SetMeshOutputsEXT(4, 2);
+
+   ivec3 x = DoStuff(ivec3(2));
 
    gl_MeshVerticesEXT[0].gl_Position = vec4(-1, -1, 0.5, 1);
    gl_MeshVerticesEXT[1].gl_Position = vec4( 1, -1, 0.5, 1);

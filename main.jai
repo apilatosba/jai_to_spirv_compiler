@@ -3,6 +3,7 @@
 #import "Math";
 #import "String";
 #import "Hash_Table";
+#import "Queue";
 
 MeshOutVertex :: struct {
    position: Vector3;
@@ -53,6 +54,43 @@ ShaderType :: enum {
    Compute;
 }
 
+FunctionType :: struct {
+   returns:    [] Type;
+   arguments:  [] Type;
+}
+
+operator == :: (a: FunctionType, b: FunctionType) -> bool {
+   return ArrayEquals(a.returns, b.returns) && ArrayEquals(a.arguments, b.arguments);
+}
+
+CompareFunctionType :: (a: FunctionType, b: FunctionType) -> bool {
+   return ArrayEquals(a.returns, b.returns) && ArrayEquals(a.arguments, b.arguments);
+}
+
+HashFunctionType :: (x: FunctionType) -> u32 {
+   #import "Hash";
+   hash: u32;
+   for x.arguments {
+      hash ^= cast,trunc(u32) fnv1a_hash(*it, size_of(type_of(it)));
+   }
+
+   for x.returns {
+      hash ^= cast,trunc(u32) fnv1a_hash(*it, size_of(type_of(it)));
+   }
+
+   return hash;
+}
+
+// == must be defined on T
+ArrayEquals :: (a: [] $T, b: [] T) -> bool {
+   if a.count != b.count return false;
+   for a {
+      if it != b[it_index] return false;
+   }
+
+   return true;
+}
+
 CompilationData :: struct {
    workgroupSize:       [3] int = .[1, 1, 1];
    intConstants:        Table(int, struct {});
@@ -62,6 +100,23 @@ CompilationData :: struct {
    identifierToSSAId:   Table(string, int);
    ssaIota:             int;
    structs:             Table(Type, struct {}, HashType);
+   functionTypes:       Table(FunctionType, struct {}, HashFunctionType, CompareFunctionType); // this data is collected when generating instructions and then written into the Types block of spirv
+   functionFrontier:    Queue(*Code_Procedure_Body);
+
+
+   HashStringArray :: (x: [] string) -> u32 {
+      #import "Hash";
+      return get_hash(x);
+   }
+
+   CompareStringArray :: (a: [] string, b: [] string) -> bool {
+      if a.count != b.count return false;
+      for a {
+         if it != b[it_index] return false;
+      }
+
+      return true;
+   }
 
    HashType :: (t: Type) -> u32 {
       #import "Hash";
@@ -69,8 +124,22 @@ CompilationData :: struct {
    }
 }
 
-// not correct since MeshOutVertex and MeshOutPrimitive are user defined and different for each shader procedure
-MeshShaderType :: #type (using intrinsics: Intrinsics, mOutVertex: *[] MeshOutVertex, mOutPrimitive: *[] MeshOutPrimitive, data: *MeshData) -> ();
+//
+// TODO:
+// create a function AssignLocationsAndComponents :: (T: Type) where T is a struct.
+// each location has 4 32bits, and each 32bits is also called a component. one location has 4 components.
+// you should assign each struct member recursively (in depth first order) to a location and a component
+// only numeric types are allowed (int or float). matrices are treated as if it was an array.
+// 32bit vectors must be entirely in a single location. for example a vec4 has to be in a single location
+// you can pack a float and a vec3 in a single location tho.
+// 64bit vectors (eg. dvec4) then goes into two locations. one 64bit takes two components
+// https://vulkan.lunarg.com/doc/view/1.4.313.0/windows/antora/guide/latest/location_component_interface.html
+//
+// implementation detail i am thinking of is have a cursor that starts at location 0, component 0, and increments as it traverses through
+// the members of a struct in depth first order.
+//
+//             - apila, 03/04/26
+//
 
 // local size is provided via notes like so: @x_y_z
 // if you omit y and/or z (or even x) they default to 1
@@ -183,112 +252,8 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
       }
    }
 
-   //
-   // is there a way to trigger jai compiler on some of the code nodes?
-   // like for example if there is a #run inside the shader code i want to let jai do the #run and return me the result of it
-   // and i will bake that result into the spirv byte code.
-   // or #bake what i want from jai is that i want jai to give me the ast of the new function with the baked arguments.
-   // are those even possible? idk
-   // or polymorphic procedures. is there a way to get the ast of polymorhped procedure?
-   // or is there a way to get the result of type_info or is_constant?
-   //
-   // i think there should be a way to get the values in a metaprogram since they are compile time constants
-   // there has to be a point where their values are calculated. the thing is how can i get that value from the compiler
-   //
-   //             - apila, 02/04/26
-   //
-   for block.statements {
-      if it.kind == {
-         case .UNINITIALIZED               ; #through;
-         case .CONTEXT                     ; #through;
-         case .DIRECTIVE_BYTES             ; #through;
-         case .ASM                         ; #through;
-         case .DIRECTIVE_BAKE              ; #through;
-         case .DIRECTIVE_LIBRARY           ; #through;
-         case .DIRECTIVE_MODIFY            ; #through;
-         case .EXPRESSION_QUERY            ; #through;
-         case .PUSH_CONTEXT                ; #through;
-         case .DIRECTIVE_PLACE             ; #through;
-         case .DIRECTIVE_LOCATION          ; #through;
-         case .DIRECTIVE_MODULE_PARAMETERS ; #through;
-         case .DIRECTIVE_SCOPE             ; #through;
-         case .DIRECTIVE_ADD_CONTEXT       ; #through;
-         case .DIRECTIVE_CONTEXT_TYPE      ;
-            assert(false, "code node kind: %. not valid.", it.kind);
 
-         case .LOOP_CONTROL                ; #through;
-         case .PROCEDURE_HEADER            ; #through;
-         case .EXTRACT                     ; #through;
-         case .MAKE_VARARGS                ; #through;
-         case .DIRECTIVE_THIS              ; #through;
-         case .DIRECTIVE_LOAD              ; #through;
-         case .DIRECTIVE_CODE              ; #through;
-         case .NOTE                        ; #through;
-         case .DIRECTIVE_COMPILE_TIME      ; #through;
-         case .PLACEHOLDER                 ; #through;
-         case .DIRECTIVE_WILDCARD          ; #through;
-         case .RESOLVED_OVERLOAD           ;
-            assert(false, "code node kind: %. idk what to do with this", it.kind);
-
-         case .DIRECTIVE_RUN               ;
-            assert(false, "do the #run outside the shader procedure to let jai compiler #run it. this compiler doesnt have #run");
-
-         case .DIRECTIVE_POKE_NAME         ;
-            assert(false, "idk what this directive is");
-
-         case .DIRECTIVE_IMPORT            ;
-            continue; // i think i should skip? idk maybe
-
-         case .TYPE_QUERY                  ;
-            // size_of, type_info
-            assert(false, "read the comment above. i need a way to get the value somehow not the code nodes");
-
-         case .DEFER                       ;
-            assert(false, "idk how to implement");
-
-         case .USING                       ;
-            // should i ignore?
-            continue;
-
-         case .DIRECTIVE_INSERT            ;
-            assert(false, "read the comment above");
-
-         case .DIRECTIVE_PROCEDURE_NAME    ;
-            assert(false, "read the comment above");
-
-         case .DIRECTIVE_EXISTS            ;
-            assert(false, "read the comment above");
-
-         case .DIRECTIVE_OVERLAY           ;
-            assert(false, "i guess i should never see this. the parsing of structs is done through Type_Info, not through code nodes");
-
-         case .BLOCK                       ;
-         
-         case .LITERAL                     ;
-         case .IDENT                       ;
-         case .UNARY_OPERATOR              ;
-         case .BINARY_OPERATOR             ;
-         case .PROCEDURE_BODY              ;
-         case .PROCEDURE_CALL              ;
-         case .WHILE                       ;
-         case .IF                          ;
-         case .CASE                        ;
-         case .RETURN                      ;
-         case .FOR                         ;
-         case .TYPE_DEFINITION             ;
-         case .TYPE_INSTANTIATION          ;
-         case .ENUM                        ;
-         case .STRUCT                      ;
-         case .COMMA_SEPARATED_ARGUMENTS   ;
-         case .DECLARATION                 ;
-         case .CAST                        ;
-         case .DIRECTIVE_THROUGH           ;
-         case .COMPOUND_DECLARATION        ;
-
-      }
-   }
-
-
+   functions := GenerateFunctions(*data, body);
 
    b: String_Builder;
    if type == {
@@ -304,7 +269,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          print_to_builder(*b, "\%% = OpExtInstImport \"GLSL.std.450\"\n", GetNextSSAId(*data));
          print_to_builder(*b, "OpMemoryModel PhysicalStorageBuffer64 GLSL450\n");
          print_to_builder(*b, "OpEntryPoint MeshEXT \%% \"%\" \%% \%% \%% \%% \%% \%% \%%\n",
-                              GetSSAId(*data, "ApilaMS"),
+                              GetSSAId(*data, header.name),
                               "ApilaMS",
                               GetSSAId(*data, "meshVerticesEXT"),
                               GetSSAId(*data, "pushData"),
@@ -315,21 +280,21 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
                               GetSSAId(*data, "samplerHeap")
          );
          print_to_builder(*b, "OpExecutionModeId \%% LocalSizeId \%% \%% \%%\n",
-                              GetSSAId(*data, "ApilaMS"),
-                              GetSSAId(*data, sprint("int32_%", data.workgroupSize[0])),
-                              GetSSAId(*data, sprint("int32_%", data.workgroupSize[1])),
-                              GetSSAId(*data, sprint("int32_%", data.workgroupSize[2]))
+                              GetSSAId(*data, header.name),
+                              GetSSAId(*data, GetInt32ConstIdentifier(data.workgroupSize[0])),
+                              GetSSAId(*data, GetInt32ConstIdentifier(data.workgroupSize[1])),
+                              GetSSAId(*data, GetInt32ConstIdentifier(data.workgroupSize[2]))
          );
          print_to_builder(*b, "OpExecutionMode \%% OutputVertices %\n",
-                              GetSSAId(*data, "ApilaMS"),
+                              GetSSAId(*data, header.name),
                               data.maxVertices
          );
          print_to_builder(*b, "OpExecutionMode \%% OutputPrimitivesEXT %\n",
-                              GetSSAId(*data, "ApilaMS"),
+                              GetSSAId(*data, header.name),
                               data.maxPrimitives
          );
          print_to_builder(*b, "OpExecutionMode \%% %\n",
-                              GetSSAId(*data, "ApilaMS"),
+                              GetSSAId(*data, header.name),
                               ToSpirvOutputTopology(data.primitiveTopology)
          );
 
@@ -351,12 +316,20 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
                               GetSSAId(*data, "MeshPerVertex")
          );
 
+         //
          // i say location 0, and location 1. but idk if this is correct. for example glsl disallows this if meshVertexOut is a struct with more than one member
          // saying that there is an overlap. slang generates a location decoration for each member of the struct seperately.
          // i wrote the spirv assembly then assembled it and it worked. so idk. also spirv-val didnt complain about anything. so im gonn keep this for now
          // but i feel like this is wrong.
          // also in the specs there is no mention of this. it just says it applies to variables or struct members.
          // this overlap thingy happens if you use matrices as well. but there is no documentation for this so idk how to handle it other than reverse engineer and find out which sucks
+         //
+         // update: https://docs.vulkan.org/spec/latest/chapters/interfaces.html#interfaces-iointerfaces-limits
+         // you can use 128 bit per location. one location has four components you can assign members to components
+         // each component 32 bit.
+         // so i cant say meshPrimitiveOut has location 1. i need to calculate its location from MeshVertexOut struct.
+         // look for an implementation in glslangValidator, they must have something similar.
+         //
          print_to_builder(*b, "OpDecorate \%% Location 0\n",
                               GetSSAId(*data, "meshVertexOut")
          );
@@ -386,7 +359,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          print_to_builder(*b, "\n; struct annotate infos\n");
          for _, s: data.structs {
             annotateInfo := GetAnnotateInfoFromStruct(s);
-            structIdentifier := GetStructIdentifier(s);
+            structIdentifier := GetIdentifierFromType(s);
             print_to_builder(*b, "OpDecorate \%% Block\n",
                                  GetSSAId(*data, structIdentifier)
             );
@@ -409,54 +382,54 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
                               GetSSAId(*data, "void")
          );
          print_to_builder(*b, "\%% = OpTypeInt 32\n",
-                              GetSSAId(*data, "int32")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, "int32x2"),
-                              GetSSAId(*data, "int32")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32x2)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, "int32x3"),
-                              GetSSAId(*data, "int32")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32x3)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, "int32x4"),
-                              GetSSAId(*data, "int32")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32x4)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
          );
          print_to_builder(*b, "\%% = OpTypeFloat 32\n",
-                              GetSSAId(*data, "float")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float))
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, "float2"),
-                              GetSSAId(*data, "float")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float2)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float))
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, "float3"),
-                              GetSSAId(*data, "float")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float3)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float))
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, "float4"),
-                              GetSSAId(*data, "float")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float4)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float))
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 2\n",
-                              GetSSAId(*data, "float2x2"),
-                              GetSSAId(*data, "float2")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float2x2)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float2))
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 3\n",
-                              GetSSAId(*data, "float3x3"),
-                              GetSSAId(*data, "float3")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float3x3)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float3))
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 4\n",
-                              GetSSAId(*data, "float4x4"),
-                              GetSSAId(*data, "float4")
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float4x4)),
+                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float4))
          );
 
          // int constants
          print_to_builder(*b, "\n; int constants\n");
          for _, constant: data.intConstants {
             print_to_builder(*b, "\%% = OpConstant \%% %\n",
-                                 GetSSAId(*data, sprint("int32_%", constant)),
-                                 GetSSAId(*data, "int32"),
+                                 GetSSAId(*data, GetInt32ConstIdentifier(constant)),
+                                 GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32)),
                                  constant
             );
          }
@@ -464,13 +437,215 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
 
          // functions
          print_to_builder(*b, "\n; functions\n");
-
+         print_to_builder(*b, "%", functions);
       }
    }
 
    print("%", builder_to_string(*b));
 
    return .{};
+}
+
+GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> string {
+   b: String_Builder;
+
+   // entry function is handled seperately because its parameters define the general shader interface
+   // so it actually has no parameters. other functions behave more normally
+   {
+      // entry function is always void?
+      header := body.header;
+      block := body.block;
+      functionType: FunctionType = .{
+         returns = .[],
+         arguments = .[]
+      };
+      find_or_add(*data.functionTypes, functionType);
+      functionTypeIdentifier := GetFunctionTypeIdentifier(header);
+      print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
+                           GetSSAId(data, header.name),
+                           GetSSAId(data, "void"),
+                           GetSSAId(data, functionTypeIdentifier)
+      );
+
+      GenerateInstructions(data, block, *b);
+      print_to_builder(*b, "OpFunctionEnd\n");
+   }
+
+   while data.functionFrontier.count > 0 {
+      ok, current := Dequeue(*data.functionFrontier);
+      assert(ok);
+
+      header := body.header;
+      block := body.block;
+
+      functionType: FunctionType;
+      functionType.returns = NewArray(header.returns.count, Type);
+      assert(header.returns.count <= 1, "multiple return values not supported yet");
+      for header.returns {
+         functionType.returns[it_index] = get_type(it.type);
+      }
+      functionType.arguments = NewArray(header.arguments.count, Type);
+      for header.arguments {
+         functionType.arguments[it_index] = get_type(it.type);
+      }
+
+      find_or_add(*data.functionTypes, functionType);
+
+      returnType := get_type(header.returns[0].type);
+      returnTypeIdentifier := GetIdentifierFromType(returnType);
+      functionTypeIdentifier := GetFunctionTypeIdentifier(header);
+      print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
+                           GetSSAId(data, header.name),
+                           GetSSAId(data, returnTypeIdentifier),
+                           GetSSAId(data, functionTypeIdentifier)
+      );
+
+      GenerateInstructions(data, block, *b);
+      print_to_builder(*b, "OpFunctionEnd\n");
+   }
+
+   return builder_to_string(*b);
+}
+
+// traverse AST and output the generated spirv to "b"
+GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Builder) {
+   //
+   // is there a way to trigger jai compiler on some of the code nodes?
+   // like for example if there is a #run inside the shader code i want to let jai do the #run and return me the result of it
+   // and i will bake that result into the spirv byte code.
+   // or #bake what i want from jai is that i want jai to give me the ast of the new function with the baked arguments.
+   // are those even possible? idk
+   // or polymorphic procedures. is there a way to get the ast of polymorhped procedure?
+   // or is there a way to get the result of type_info or is_constant?
+   //
+   // i think there should be a way to get the values in a metaprogram since they are compile time constants
+   // there has to be a point where their values are calculated. the thing is how can i get that value from the compiler
+   //
+   //             - apila, 02/04/26
+   //
+   if #complete node.kind == {
+      case .UNINITIALIZED               ; #through;
+      case .CONTEXT                     ; #through;
+      case .DIRECTIVE_BYTES             ; #through;
+      case .ASM                         ; #through;
+      case .DIRECTIVE_BAKE              ; #through;
+      case .DIRECTIVE_LIBRARY           ; #through;
+      case .DIRECTIVE_MODIFY            ; #through;
+      case .EXPRESSION_QUERY            ; #through;
+      case .PUSH_CONTEXT                ; #through;
+      case .DIRECTIVE_PLACE             ; #through;
+      case .DIRECTIVE_LOCATION          ; #through;
+      case .DIRECTIVE_MODULE_PARAMETERS ; #through;
+      case .DIRECTIVE_SCOPE             ; #through;
+      case .DIRECTIVE_ADD_CONTEXT       ; #through;
+      case .DIRECTIVE_CONTEXT_TYPE      ;
+         assert(false, "code node kind: %. not valid.", node.kind);
+
+      case .LOOP_CONTROL                ; #through;
+      case .PROCEDURE_HEADER            ; #through;
+      case .EXTRACT                     ; #through;
+      case .MAKE_VARARGS                ; #through;
+      case .DIRECTIVE_THIS              ; #through;
+      case .DIRECTIVE_LOAD              ; #through;
+      case .DIRECTIVE_CODE              ; #through;
+      case .NOTE                        ; #through;
+      case .DIRECTIVE_COMPILE_TIME      ; #through;
+      case .PLACEHOLDER                 ; #through;
+      case .DIRECTIVE_WILDCARD          ; #through;
+      case .RESOLVED_OVERLOAD           ;
+         assert(false, "code node kind: %. idk what to do with this", node.kind);
+
+      case .DIRECTIVE_RUN               ;
+         assert(false, "do the #run outside the shader procedure to let jai compiler #run it. this compiler doesnt have #run");
+
+      case .DIRECTIVE_POKE_NAME         ;
+         assert(false, "idk what this directive is");
+
+      case .DIRECTIVE_IMPORT            ;
+         return; // i think i should skip? idk maybe
+
+      case .TYPE_QUERY                  ;
+         // size_of, type_info
+         assert(false, "read the comment above. i need a way to get the value somehow not the code nodes");
+
+      case .DEFER                       ;
+         assert(false, "idk how to implement");
+
+      case .USING                       ;
+         // should i ignore?
+         return;
+
+      case .DIRECTIVE_INSERT            ;
+         assert(false, "read the comment above");
+
+      case .DIRECTIVE_PROCEDURE_NAME    ;
+         assert(false, "read the comment above");
+
+      case .DIRECTIVE_EXISTS            ;
+         assert(false, "read the comment above");
+
+      case .DIRECTIVE_OVERLAY           ;
+         assert(false, "i guess i should never see this. the parsing of structs is done through Type_Info, not through code nodes");
+
+      case .BLOCK                       ;
+      case .LITERAL                     ;
+      case .IDENT                       ;
+      case .UNARY_OPERATOR              ;
+      case .BINARY_OPERATOR             ;
+         cbo := cast(*Code_Binary_Operator)node;
+
+         if cbo.operator_type == {
+            case #char "+"; {
+               assert(cbo.left.type == cbo.right.type);
+
+               GenerateInstructions(data, cbo.left, b);
+               leftId := ReadLastSSAId(data);
+               GenerateInstructions(data, cbo.right, b);
+               rightId := ReadLastSSAId(data);
+
+               type := get_type(cbo.left.type);
+               identifier := GetIdentifierFromType(type);
+               if type == {
+                  case Intrinsics.Float;  #through;
+                  case Intrinsics.Float2; #through;
+                  case Intrinsics.Float3; #through;
+                  case Intrinsics.Float4;
+                     print_to_builder(b, "OpFAdd \%% \%% \%%\n",
+                                          GetSSAId(data, identifier),
+                                          leftId,
+                                          rightId
+                     );
+
+                  case Intrinsics.Int32;   #through;
+                  case Intrinsics.Int32x2; #through;
+                  case Intrinsics.Int32x3; #through;
+                  case Intrinsics.Int32x4;
+                     print_to_builder(b, "OpIAdd \%% \%% \%%\n",
+                                          GetSSAId(data, identifier),
+                                          leftId,
+                                          rightId
+                     );
+               }
+            }
+
+         }
+      case .PROCEDURE_BODY              ;
+      case .PROCEDURE_CALL              ;
+      case .WHILE                       ;
+      case .IF                          ;
+      case .CASE                        ;
+      case .RETURN                      ;
+      case .FOR                         ;
+      case .TYPE_DEFINITION             ;
+      case .TYPE_INSTANTIATION          ;
+      case .ENUM                        ;
+      case .STRUCT                      ;
+      case .COMMA_SEPARATED_ARGUMENTS   ;
+      case .DECLARATION                 ;
+      case .CAST                        ;
+      case .DIRECTIVE_THROUGH           ;
+      case .COMPOUND_DECLARATION        ;
+   }
 }
 
 StructAnnotateMemberInfo :: struct {
@@ -502,22 +677,93 @@ GetAnnotateInfoFromStruct :: (T: Type) -> StructAnnotateInfo {
    };
 }
 
-GetStructIdentifier :: (T: Type) -> string {
-   ti := cast(*Type_Info)T;
-   if (ti.type != .STRUCT) assert(false, sprint("ti.type: %, type is not struct", ti.type));
-
-   tis := cast(*Type_Info_Struct)T;
-   return tis.name;
-}
-
 MeshPerVertex :: struct {
    position:   Vector4;
    pointSize:  float;
 }
 
+ReadLastSSAId :: (using data: *CompilationData) -> int {
+   return ssaIota;
+}
+
 GetNextSSAId :: (using data: *CompilationData) -> int {
    ssaIota += 1;
    return ssaIota;
+}
+
+GetInt32ConstIdentifier :: (value: int) -> string {
+   return sprint("int32_%", value);
+}
+
+GetFunctionTypeIdentifier :: (header: *Code_Procedure_Header) -> string {
+   LoopBody :: () #expand {
+      type := get_type(`it.type);
+      typeIdentifier := GetIdentifierFromType(type);
+      print_to_builder(*b, "%", typeIdentifier);
+   }
+
+   b: String_Builder;
+   print_to_builder(*b, "FunctionType");
+
+   for header.returns {
+      LoopBody();
+   }
+
+   print_to_builder(*b, "_");
+
+   for header.arguments {
+      LoopBody();
+   }
+
+   return builder_to_string(*b);
+}
+
+GetIdentifierFromType :: (type: Type) -> string {
+   Helper :: (type: Type, b: *String_Builder) {
+      // intrinsics
+      if type == {
+         case Intrinsics.Int32    ; print_to_builder(b, "int32"); return;
+         case Intrinsics.Int32x2  ; print_to_builder(b, "int32x2"); return;
+         case Intrinsics.Int32x3  ; print_to_builder(b, "int32x3"); return;
+         case Intrinsics.Int32x4  ; print_to_builder(b, "int32x4"); return;
+         case Intrinsics.Float    ; print_to_builder(b, "float"); return;
+         case Intrinsics.Float2   ; print_to_builder(b, "float2"); return;
+         case Intrinsics.Float3   ; print_to_builder(b, "float3"); return;
+         case Intrinsics.Float4   ; print_to_builder(b, "float4"); return;
+         case Intrinsics.Float2x2 ; print_to_builder(b, "float2x2"); return;
+         case Intrinsics.Float3x3 ; print_to_builder(b, "float3x3"); return;
+         case Intrinsics.Float4x4 ; print_to_builder(b, "float4x4"); return;
+      }
+
+      ti := cast(*Type_Info)type;
+      if (ti.type == .STRUCT) {
+         tis := cast(*Type_Info_Struct)ti;
+         print_to_builder(b, tis.name);
+         return;
+      }
+
+      if (ti.type == .POINTER) {
+         tip := cast(*Type_Info_Pointer)ti;
+         print_to_builder(b, "p_");
+         innerType := get_type(tip.pointer_to);
+         Helper(innerType, b);
+         return;
+      }
+
+      if (ti.type == .ARRAY) {
+         tia := cast(*Type_Info_Array)ti;
+         print_to_builder(b, "a_");
+         innerType := get_type(tia.element_type);
+         Helper(innerType, b);
+         return;
+      }
+
+      assert(false, "type: %. this type is not supported yet. if it is builtin jai type use Intrinsics instead", type);
+   }
+
+   b: String_Builder;
+   Helper(type, *b);
+   return builder_to_string(*b);
 }
 
 // identifier rules:
@@ -527,6 +773,13 @@ GetNextSSAId :: (using data: *CompilationData) -> int {
 //    int vectors are int32x followed by size. "int32x4" is ivec4 in glsl
 //    float vectors are float followed by size. "float4" is vec4 in glsl
 //    matrices are float2x2, float3x3.
+//    function types are FunctionType followed by its signature. for example FunctionTypevoid. first the return value then arguments. the return value is either "void" or a single type
+//    identifier of functions is their jai name including entry functions. but the entry point given in OpEntryPoint is not their identifier. it is either ApilaMS, ApilaTS, ApilaFS or ApilaCS
+//
+// update on the identifier rules:
+// forms of identifiers dont matter. as long as it is unique, that is you get a unique identifier for different input config.
+// just create functions to get identifiers so it is consistent throughout the program. what the actual identifier is doesnt matter so
+// you can forget about the rules above and dont need to worry about them. just make sure you are calling a function to get an identifier
 GetSSAId :: (using data: *CompilationData, identifier: string) -> int {
    value, newlyAdded := find_or_add(*identifierToSSAId, identifier);
    if (!newlyAdded) {
