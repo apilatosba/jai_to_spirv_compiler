@@ -4,61 +4,23 @@
 #extension GL_EXT_mesh_shader : require
 #extension GL_EXT_descriptor_heap: require
 
-layout(buffer_reference) buffer FragmentData {
-    vec4 color;
-};
-
-layout(buffer_reference) buffer MeshData {
-    float offset;
-};
-
-layout(push_constant) uniform PC {
-   FragmentData taskData; // i put FragmentData but it stands for void* since there is no void*
-   MeshData meshData;
-   FragmentData fragmentData;
-};
-
-struct MeshOutVertex {
-    vec2 uv;
-    vec4 color;
-    mat2 yarrak2;
-    mat2x3 yarrak3;
-    mat3 yarrak4;
-
-};
-
-struct MeshOutPrimitive {
-    vec2 uv;
-    vec4 color;
-};
-
 layout(local_size_x = 1) in;
 layout(triangles, max_vertices = 40, max_primitives = 20) out;
 
-layout(location = 0) out MeshOutVertex[] mOutVertex;
-layout(location = 10) perprimitiveEXT out MeshOutPrimitive[] mOutPrimitive;
+struct MeshOut {
+   float a;
+   perprimitiveEXT float b;
+};
 
-ivec3 DoStuff(ivec3 a) {
-    return a + a;
-}
+layout(location = 0) out MeshOut[] mOut;
 
-void ApilaMS() {
+void main() {
    SetMeshOutputsEXT(4, 2);
-
-   ivec3 x = DoStuff(ivec3(2));
 
    gl_MeshVerticesEXT[0].gl_Position = vec4(-1, -1, 0.5, 1);
    gl_MeshVerticesEXT[1].gl_Position = vec4( 1, -1, 0.5, 1);
    gl_MeshVerticesEXT[2].gl_Position = vec4( 1,  1, 0.5, 1);
    gl_MeshVerticesEXT[3].gl_Position = vec4(-1,  1, 0.5, 1);
-   mOutVertex[0].uv = vec2(0, 0 + meshData.offset);
-   mOutVertex[1].uv = vec2(1, 0 + meshData.offset);
-   mOutVertex[2].uv = vec2(1, 1 + meshData.offset);
-   mOutVertex[3].uv = vec2(0, 1 + meshData.offset);
-
-    mOutVertex[0].color = vec4(1);
-    mOutPrimitive[0].uv = vec2(2);
-    mOutPrimitive[0].color = vec4(3);
 
    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
    gl_PrimitiveTriangleIndicesEXT[1] = uvec3(0, 2, 3);

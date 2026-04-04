@@ -20,6 +20,7 @@ layout(push_constant) uniform PC {
 };
 
 layout(location = 0) in vec2 vUv;
+layout(location = 1) perprimitiveEXT in vec2 asdsa;
 layout(location = 0) out vec4 fragColor;
 
 void main() {

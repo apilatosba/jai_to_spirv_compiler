@@ -6,8 +6,8 @@
 #import "Queue";
 
 MeshOutVertex :: struct {
-   position: Vector3;
-   color: Vector4;
+   position: Intrinsics.Float3;
+   color: Intrinsics.Float4;
 }
 MeshOutPrimitive :: struct { }
 Intrinsics :: struct {
@@ -65,16 +65,17 @@ ArrayEquals :: (a: [] $T, b: [] T) -> bool {
 }
 
 CompilationData :: struct {
-   workgroupSize:       [3] int = .[1, 1, 1];
-   intConstants:        Table(int, struct {});
-   maxVertices:         int;
-   maxPrimitives:       int;
-   primitiveTopology:   string;
-   identifierToSSAId:   Table(string, int);
-   ssaIota:             int;
-   structs:             Table(Type, struct {}, HashType);
-   functions:           Table(*Code_Procedure_Header, struct {}); // this data is collected when generating instructions and then written into the Types block of spirv
-   functionFrontier:    Queue(*Code_Procedure_Body);
+   workgroupSize:                         [3] int = .[1, 1, 1];
+   intConstants:                          Table(int, struct {});
+   maxVertices:                           int;
+   maxPrimitives:                         int;
+   primitiveTopology:                     string;
+   identifierToSSAId:                     Table(string, int);
+   ssaIota:                               int;
+   structs:                               Table(Type, struct {}, HashType);
+   functions:                             Table(*Code_Procedure_Header, struct {}); // this data is collected when generating instructions and then written into the Types block of spirv
+   functionFrontier:                      Queue(*Code_Procedure_Body);
+   locationsConsumedByPerVertexMeshOut:   int;
 
 
    HashStringArray :: (x: [] string) -> u32 {
@@ -97,8 +98,43 @@ CompilationData :: struct {
    }
 }
 
+// in depth first order
+CalculateLocationsConsumed :: (T: Type) -> int {
+   Helper :: (type: Type, accumulator: *int) {
+      if type == {
+         case Intrinsics.Int32    ; accumulator.* += 1; return;
+         case Intrinsics.Int32x2  ; accumulator.* += 1; return;
+         case Intrinsics.Int32x3  ; accumulator.* += 1; return;
+         case Intrinsics.Int32x4  ; accumulator.* += 1; return;
+         case Intrinsics.Float    ; accumulator.* += 1; return;
+         case Intrinsics.Float2   ; accumulator.* += 1; return;
+         case Intrinsics.Float3   ; accumulator.* += 1; return;
+         case Intrinsics.Float4   ; accumulator.* += 1; return;
+         case Intrinsics.Float2x2 ; accumulator.* += 2; return;
+         case Intrinsics.Float3x3 ; accumulator.* += 3; return;
+         case Intrinsics.Float4x4 ; accumulator.* += 4; return;
+      }
+
+      ti := cast(*Type_Info) type;
+      if (ti.type == .STRUCT) {
+         tis := cast(*Type_Info_Struct) ti;
+         for tis.members {
+            Helper(get_type(it.type), accumulator);
+         }
+
+         return;
+      }
+
+      // if i reached here then it means there is a member with a weird type
+      assert(false, "type: %\n", type);
+   }
+
+   result := 0;
+   Helper(T, *result);
+   return result;
+}
+
 //
-// TODO:
 // create a function AssignLocationsAndComponents :: (T: Type) where T is a struct.
 // each location has 4 32bits, and each 32bits is also called a component. one location has 4 components.
 // you should assign each struct member recursively (in depth first order) to a location and a component
@@ -111,7 +147,16 @@ CompilationData :: struct {
 // implementation detail i am thinking of is have a cursor that starts at location 0, component 0, and increments as it traverses through
 // the members of a struct in depth first order.
 //
-//             - apila, 03/04/26
+// idk the component thingy doesnt work properly even in glsl. better avoid it. maybe a driver bug. am just gonna use locations.
+// also PerPrimitiveEXT decoration, specs says, can be applied to struct members but it doesnt work.
+// so im gonna have two out variables and entire variable is gonna be decorated with PerPrimitiveEXT, the other variable will be per vertex by default.
+// my experiments show that if you dont mix the perprimitve thing and per vertex things in the same location then it is fine you can use components
+// but when you use them in the same location even if there is no component overlap it misbehaves.
+// i couldnt figure out how the usage is with the struct members so im gonna just apply this to variables and calculate the next available location for the next varaible
+// but i want to figure that one out. probably in the future if i have time.
+// the docs are conflicting too. it says PerPrimitiveEXT can only be applied to a varaible then it says it can be applied to either a variable or a struct member https://github.khronos.org/SPIRV-Registry/extensions/EXT/SPV_EXT_mesh_shader.html
+//
+//             - apila, 04/04/26
 //
 
 // local size is provided via notes like so: @x_y_z
@@ -149,6 +194,8 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
 
             userStruct := get_type(array.element_type);
             find_or_add(*data.structs, userStruct);
+
+            data.locationsConsumedByPerVertexMeshOut = CalculateLocationsConsumed(userStruct);
          }
 
          // third argument: mOutPrimitive: *[] MeshOutPrimitive. MeshOutPrimitive is user defined struct
@@ -254,9 +301,9 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          );
          print_to_builder(*b, "OpExecutionModeId \%% LocalSizeId \%% \%% \%%\n",
                               GetSSAId(*data, header.name),
-                              GetSSAId(*data, GetInt32ConstIdentifier(data.workgroupSize[0])),
-                              GetSSAId(*data, GetInt32ConstIdentifier(data.workgroupSize[1])),
-                              GetSSAId(*data, GetInt32ConstIdentifier(data.workgroupSize[2]))
+                              GetSSAId(*data, GetInt32ConstIdentifier(*data, data.workgroupSize[0])),
+                              GetSSAId(*data, GetInt32ConstIdentifier(*data, data.workgroupSize[1])),
+                              GetSSAId(*data, GetInt32ConstIdentifier(*data, data.workgroupSize[2]))
          );
          print_to_builder(*b, "OpExecutionMode \%% OutputVertices %\n",
                               GetSSAId(*data, header.name),
@@ -306,24 +353,28 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          print_to_builder(*b, "OpDecorate \%% Location 0\n",
                               GetSSAId(*data, "meshVertexOut")
          );
-         print_to_builder(*b, "OpDecorate \%% Location 1\n",
-                              GetSSAId(*data, "meshPrimitiveOut")
+         print_to_builder(*b, "OpDecorate \%% Location %\n",
+                              GetSSAId(*data, "meshPrimitiveOut"),
+                              data.locationsConsumedByPerVertexMeshOut,
          );
          print_to_builder(*b, "OpDecorate \%% PerPrimitiveEXT\n",
                               GetSSAId(*data, "meshPrimitiveOut")
          );
-         print_to_builder(*b, "OpDecorate \%% Block\n",
-                              GetSSAId(*data, "PushData")
-         );
-         print_to_builder(*b, "OpMemberDecorate \%% 0 Offset 0\n", // task data pointer
-                              GetSSAId(*data, "PushData")
-         );
-         print_to_builder(*b, "OpMemberDecorate \%% 1 Offset 8\n", // mesh data pointer
-                              GetSSAId(*data, "PushData")
-         );
-         print_to_builder(*b, "OpMemberDecorate \%% 2 Offset 16\n", // fragment data pointer
-                              GetSSAId(*data, "PushData")
-         );
+
+         // print_to_builder(*b, "OpDecorate \%% Block\n",
+         //                      GetSSAId(*data, "PushData")
+         // );
+         // print_to_builder(*b, "OpMemberDecorate \%% 0 Offset 0\n", // task data pointer
+         //                      GetSSAId(*data, "PushData")
+         // );
+         // print_to_builder(*b, "OpMemberDecorate \%% 1 Offset 8\n", // mesh data pointer
+         //                      GetSSAId(*data, "PushData")
+         // );
+         // print_to_builder(*b, "OpMemberDecorate \%% 2 Offset 16\n", // fragment data pointer
+         //                      GetSSAId(*data, "PushData")
+         // );
+         find_or_add(*data.structs, PushData);
+
          print_to_builder(*b, "OpDecorate \%% BuiltIn PrimitiveTriangleIndicesEXT\n",
                               GetSSAId(*data, "primitiveTriangleIndicesEXT")
          );
@@ -405,7 +456,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          print_to_builder(*b, "\n; int constants\n");
          for _, constant: data.intConstants {
             print_to_builder(*b, "\%% = OpConstant \%% %\n",
-                                 GetSSAId(*data, GetInt32ConstIdentifier(constant)),
+                                 GetSSAId(*data, GetInt32ConstIdentifier(*data, constant)),
                                  GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32)),
                                  constant
             );
@@ -444,6 +495,7 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       //
 
       GenerateInstructions(data, block, *b);
+      print_to_builder(*b, "OpReturn\n");
       print_to_builder(*b, "OpFunctionEnd\n");
    }
 
@@ -451,8 +503,8 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       ok, current := Dequeue(*data.functionFrontier);
       assert(ok);
 
-      header := body.header;
-      block := body.block;
+      header := current.header;
+      block := current.block;
 
       find_or_add(*data.functions, header);
 
@@ -465,6 +517,11 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       );
 
       GenerateInstructions(data, block, *b);
+
+      if (header.returns.count == 0) {
+         print_to_builder(*b, "OpReturn\n");
+      }
+
       print_to_builder(*b, "OpFunctionEnd\n");
    }
 
@@ -637,6 +694,12 @@ StructAnnotateInfo :: struct {
    memberInfos: [] StructAnnotateMemberInfo;
 }
 
+PushData :: struct {
+   taskData:      *void;
+   meshData:      *void;
+   fragmentData:  *void;
+}
+
 GetAnnotateInfoFromStruct :: (T: Type) -> StructAnnotateInfo {
    ti := cast(*Type_Info)T;
    if (ti.type != .STRUCT) assert(false, sprint("ti.type: %, type is not struct", ti.type));
@@ -680,7 +743,8 @@ GetNextSSAId :: (using data: *CompilationData) -> int {
    return ssaIota;
 }
 
-GetInt32ConstIdentifier :: (value: int) -> string {
+GetInt32ConstIdentifier :: (data: *CompilationData, value: int) -> string {
+   find_or_add(*data.intConstants, value);
    return sprint("int32_%", value);
 }
 

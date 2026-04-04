@@ -26,6 +26,14 @@ struct MeshOutPrimitive {
     float4 color;
 };
 
+struct B {
+    float b;
+};
+
+struct A {
+    B b;
+};
+
 [shader("mesh")]
 [numthreads(1, 1, 1)]
 [outputtopology("triangle")]
@@ -40,10 +48,13 @@ void main(
     // Equivalent to SetMeshOutputsEXT
     SetMeshOutputCounts(4, 2);
 
+    A a;
+    a.b.b = 40;
+
     gl_Position[0] = float4(-1, -1, 0.5, 1);
     gl_Position[1] = float4( 1, -1, 0.5, 1);
-    gl_Position[2] = float4( 1,  1, 0.5, 1);
-    gl_Position[3] = float4(-1,  1, 0.5, 1);
+    gl_Position[2] = float4(1, 1, 0.5, 1);
+    gl_Position[3] = float4(-1, 1, a.b.b, 1);
 
     // Accessing buffer pointers is direct
     float offset = pc.meshData.offset;
