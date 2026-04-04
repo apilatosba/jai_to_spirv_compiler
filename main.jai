@@ -54,33 +54,6 @@ ShaderType :: enum {
    Compute;
 }
 
-FunctionType :: struct {
-   returns:    [] Type;
-   arguments:  [] Type;
-}
-
-operator == :: (a: FunctionType, b: FunctionType) -> bool {
-   return ArrayEquals(a.returns, b.returns) && ArrayEquals(a.arguments, b.arguments);
-}
-
-CompareFunctionType :: (a: FunctionType, b: FunctionType) -> bool {
-   return ArrayEquals(a.returns, b.returns) && ArrayEquals(a.arguments, b.arguments);
-}
-
-HashFunctionType :: (x: FunctionType) -> u32 {
-   #import "Hash";
-   hash: u32;
-   for x.arguments {
-      hash ^= cast,trunc(u32) fnv1a_hash(*it, size_of(type_of(it)));
-   }
-
-   for x.returns {
-      hash ^= cast,trunc(u32) fnv1a_hash(*it, size_of(type_of(it)));
-   }
-
-   return hash;
-}
-
 // == must be defined on T
 ArrayEquals :: (a: [] $T, b: [] T) -> bool {
    if a.count != b.count return false;
@@ -100,7 +73,7 @@ CompilationData :: struct {
    identifierToSSAId:   Table(string, int);
    ssaIota:             int;
    structs:             Table(Type, struct {}, HashType);
-   functionTypes:       Table(FunctionType, struct {}, HashFunctionType, CompareFunctionType); // this data is collected when generating instructions and then written into the Types block of spirv
+   functions:           Table(*Code_Procedure_Header, struct {}); // this data is collected when generating instructions and then written into the Types block of spirv
    functionFrontier:    Queue(*Code_Procedure_Body);
 
 
@@ -381,6 +354,10 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          print_to_builder(*b, "\%% = OpTypeVoid\n",
                               GetSSAId(*data, "void")
          );
+         print_to_builder(*b, "\%% = OpTypeFunction \%%\n",
+                              GetSSAId(*data, GetEmptyFunctionIdentifier()),
+                              GetSSAId(*data, "void")
+         );
          print_to_builder(*b, "\%% = OpTypeInt 32\n",
                               GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
          );
@@ -455,17 +432,16 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       // entry function is always void?
       header := body.header;
       block := body.block;
-      functionType: FunctionType = .{
-         returns = .[],
-         arguments = .[]
-      };
-      find_or_add(*data.functionTypes, functionType);
-      functionTypeIdentifier := GetFunctionTypeIdentifier(header);
       print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
                            GetSSAId(data, header.name),
                            GetSSAId(data, "void"),
-                           GetSSAId(data, functionTypeIdentifier)
+                           GetSSAId(data, GetEmptyFunctionIdentifier())
       );
+
+      //
+      // not adding this function type to CompilationData.functions since entry function is handled seperately
+      //    - apila, 04/04/26
+      //
 
       GenerateInstructions(data, block, *b);
       print_to_builder(*b, "OpFunctionEnd\n");
@@ -478,21 +454,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       header := body.header;
       block := body.block;
 
-      functionType: FunctionType;
-      functionType.returns = NewArray(header.returns.count, Type);
-      assert(header.returns.count <= 1, "multiple return values not supported yet");
-      for header.returns {
-         functionType.returns[it_index] = get_type(it.type);
-      }
-      functionType.arguments = NewArray(header.arguments.count, Type);
-      for header.arguments {
-         functionType.arguments[it_index] = get_type(it.type);
-      }
+      find_or_add(*data.functions, header);
 
-      find_or_add(*data.functionTypes, functionType);
-
-      returnType := get_type(header.returns[0].type);
-      returnTypeIdentifier := GetIdentifierFromType(returnType);
+      returnTypeIdentifier := GetReturnTypeIdentifier(header);
       functionTypeIdentifier := GetFunctionTypeIdentifier(header);
       print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
                            GetSSAId(data, header.name),
@@ -507,8 +471,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
    return builder_to_string(*b);
 }
 
-// traverse AST and output the generated spirv to "b"
-GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Builder) {
+// traverse AST and output the generated spirv to "b".
+// returns ssaId if the "node" is something that has an id, if not then output is ignored.
+GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Builder) -> ssaId: int {
    //
    // is there a way to trigger jai compiler on some of the code nodes?
    // like for example if there is a #run inside the shader code i want to let jai do the #run and return me the result of it
@@ -562,7 +527,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          assert(false, "idk what this directive is");
 
       case .DIRECTIVE_IMPORT            ;
-         return; // i think i should skip? idk maybe
+         return 0; // i think i should skip? idk maybe
 
       case .TYPE_QUERY                  ;
          // size_of, type_info
@@ -573,7 +538,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
 
       case .USING                       ;
          // should i ignore?
-         return;
+         return 0;
 
       case .DIRECTIVE_INSERT            ;
          assert(false, "read the comment above");
@@ -587,7 +552,15 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
       case .DIRECTIVE_OVERLAY           ;
          assert(false, "i guess i should never see this. the parsing of structs is done through Type_Info, not through code nodes");
 
+      // idk if this implementation is correct or do i need to do some other stuff.
+      // right now it behaves as if there is no block
       case .BLOCK                       ;
+         cb := cast(*Code_Block)node;
+         for cb.statements {
+            GenerateInstructions(data, it, b);
+         }
+         return 0;
+
       case .LITERAL                     ;
       case .IDENT                       ;
       case .UNARY_OPERATOR              ;
@@ -598,10 +571,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
             case #char "+"; {
                assert(cbo.left.type == cbo.right.type);
 
-               GenerateInstructions(data, cbo.left, b);
-               leftId := ReadLastSSAId(data);
-               GenerateInstructions(data, cbo.right, b);
-               rightId := ReadLastSSAId(data);
+               leftId := GenerateInstructions(data, cbo.left, b);
+               rightId := GenerateInstructions(data, cbo.right, b);
+
+               resultSSAId := GetNextSSAId(data);
 
                type := get_type(cbo.left.type);
                identifier := GetIdentifierFromType(type);
@@ -610,7 +583,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                   case Intrinsics.Float2; #through;
                   case Intrinsics.Float3; #through;
                   case Intrinsics.Float4;
-                     print_to_builder(b, "OpFAdd \%% \%% \%%\n",
+                     print_to_builder(b, "\%% = OpFAdd \%% \%% \%%\n",
+                                          resultSSAId,
                                           GetSSAId(data, identifier),
                                           leftId,
                                           rightId
@@ -620,12 +594,15 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                   case Intrinsics.Int32x2; #through;
                   case Intrinsics.Int32x3; #through;
                   case Intrinsics.Int32x4;
-                     print_to_builder(b, "OpIAdd \%% \%% \%%\n",
+                     print_to_builder(b, "\%% = OpIAdd \%% \%% \%%\n",
+                                          resultSSAId,
                                           GetSSAId(data, identifier),
                                           leftId,
                                           rightId
                      );
                }
+
+               return resultSSAId;
             }
 
          }
@@ -646,6 +623,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
       case .DIRECTIVE_THROUGH           ;
       case .COMPOUND_DECLARATION        ;
    }
+
+   assert(false, "node.kind: %, didnt return!", node.kind);
+   return -69;
 }
 
 StructAnnotateMemberInfo :: struct {
@@ -682,8 +662,17 @@ MeshPerVertex :: struct {
    pointSize:  float;
 }
 
-ReadLastSSAId :: (using data: *CompilationData) -> int {
-   return ssaIota;
+// i need this function since "void" is kinda special
+GetReturnTypeIdentifier :: (header: *Code_Procedure_Header) -> string {
+   assert(header.returns.count <= 1);
+
+   if (header.returns.count == 0) {
+      return "void";
+   }
+
+   // returns count must be one here as asserted above
+   returnType := get_type(header.returns[0].type);
+   return GetIdentifierFromType(returnType);
 }
 
 GetNextSSAId :: (using data: *CompilationData) -> int {
@@ -693,6 +682,22 @@ GetNextSSAId :: (using data: *CompilationData) -> int {
 
 GetInt32ConstIdentifier :: (value: int) -> string {
    return sprint("int32_%", value);
+}
+
+//
+// kinda hack
+// i need this because the entry function in jai has lots of paramters but
+// they are actually not paratmers but input output global storages, so i can not get
+// the identifier name from its signature like i do with other functions
+// the entry function is always takes no arguments returns nothing. so i created this function
+// so it is consistent with other functions. that is if another function takes no arguments and returns nothing
+// their type identifier will match and i will not generate the same type twice which is illegal in spirv, so it is nice.
+//
+//          - apila, 04/04/26
+//
+GetEmptyFunctionIdentifier :: () -> string {
+   header: Code_Procedure_Header;
+   return GetFunctionTypeIdentifier(*header);
 }
 
 GetFunctionTypeIdentifier :: (header: *Code_Procedure_Header) -> string {
