@@ -4,6 +4,7 @@
 #import "String";
 #import "Hash_Table";
 #import "Queue";
+#import "Hash";
 
 MeshOutVertex :: struct {
    position: Intrinsics.Float3;
@@ -32,12 +33,43 @@ FragmentData :: struct { }
 MeshData :: struct { }
 
 MeshShader :: (using intrinsics: Intrinsics, mOutVertex: *[] MeshOutVertex, mOutPrimitive: *[] MeshOutPrimitive, data: *MeshData) {
-
+   // a := 10;
+   // a = a + a;
 } @1_1_1 @40_20 @triangles
 
 FragmentShader :: (using intrinsics: Intrinsics, mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, data: *FragmentData) -> Intrinsics.Float4 {
    anan123: int = 10;
    return .{};
+}
+
+// identifier is anything that can be given an ssa id.
+Identifier :: struct {
+   type: enum {
+      Int32Literal;
+      FloatLiteral;
+      Function;
+      _Type;
+      Void;
+      Variable;
+      BuiltinThingies;
+   };
+
+   using value: union {
+      int32Literal:     int;
+      floatLiteral:     float;
+      function:         *Code_Procedure_Header;
+      _type:            Type;
+      // _void: // Void doesnt have a value
+      variable:         *Code_Declaration;
+      builtinThingies:  enum {
+                           MeshVerticesEXTOutVariable;
+                           PushDataVariable;
+                           PrimitiveTriangleIndicesEXTOutVariable;
+                           SamplerHeapVariable;
+                           ImageHeapVariable;
+                           MeshPerVertexStruct;
+                        };
+   };
 }
 
 main :: () {
@@ -60,22 +92,59 @@ ArrayEquals :: (a: [] $T, b: [] T) -> bool {
    for a {
       if it != b[it_index] return false;
    }
-
    return true;
+}
+
+IdentifierHash :: (using identifier: Identifier) -> u32 {
+   if #complete type == {
+      case .Int32Literal; return get_hash(int32Literal);
+      case .FloatLiteral; return get_hash(floatLiteral);
+      case .Function; return get_hash(function);
+      case ._Type; return HashType(_type);
+      case .Void; return 69; // does the hash matter here?
+      case .Variable; return get_hash(variable.name);
+      case .BuiltinThingies; return get_hash(builtinThingies);
+   }
+
+   assert(false, "type: %", type);
+}
+
+IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
+   if (a.type != b.type) return false;
+
+   type := a.type;
+   if #complete type == {
+      case .Int32Literal; return a.int32Literal == b.int32Literal;
+      case .FloatLiteral; return a.floatLiteral == b.floatLiteral;
+      case .Function; return a.function == b.function; // if they point to the same code node
+      case ._Type; return a._type == b._type;
+      case .Void; return true;
+      case .Variable; return a.variable == b.variable; // two variables are equal if they have the same declaration
+      case .BuiltinThingies; return a.builtinThingies == b.builtinThingies;
+   }
+
+   assert(false, "type: %", type);
+}
+
+
+HashType :: (t: Type) -> u32 {
+   #import "Hash";
+   return cast,trunc(u32) fnv1a_hash(xx *t, size_of(Type));
 }
 
 CompilationData :: struct {
    workgroupSize:                         [3] int = .[1, 1, 1];
-   intConstants:                          Table(int, struct {});
    maxVertices:                           int;
    maxPrimitives:                         int;
    primitiveTopology:                     string;
-   identifierToSSAId:                     Table(string, int);
+   identifierToSSAId:                     Table(Identifier, int, IdentifierHash, IdentifierCompare);
    ssaIota:                               int;
    structs:                               Table(Type, struct {}, HashType);
    functions:                             Table(*Code_Procedure_Header, struct {}); // this data is collected when generating instructions and then written into the Types block of spirv
    functionFrontier:                      Queue(*Code_Procedure_Body);
    locationsConsumedByPerVertexMeshOut:   int;
+   meshVertexOutVariableIdentifier:       Identifier;
+   meshPrimitiveOutVariableIdentifier:    Identifier;
 
 
    HashStringArray :: (x: [] string) -> u32 {
@@ -90,11 +159,6 @@ CompilationData :: struct {
       }
 
       return true;
-   }
-
-   HashType :: (t: Type) -> u32 {
-      #import "Hash";
-      return cast,trunc(u32) fnv1a_hash(xx *t, size_of(Type));
    }
 }
 
@@ -195,6 +259,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             userStruct := get_type(array.element_type);
             find_or_add(*data.structs, userStruct);
 
+            data.meshVertexOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[1] };
             data.locationsConsumedByPerVertexMeshOut = CalculateLocationsConsumed(userStruct);
          }
 
@@ -208,6 +273,8 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
 
             userStruct := get_type(array.element_type);
             find_or_add(*data.structs, userStruct);
+
+            data.meshPrimitiveOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[2] };
          }
 
          // fourth argument: *MeshData. MeshData is user defined struct
@@ -243,7 +310,6 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             assert(ok, "it: %, couldnt be parsed to int!", it);
 
             data.workgroupSize[it_index] = value;
-            find_or_add(*data.intConstants, value);
          }
       }
 
@@ -289,32 +355,32 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          print_to_builder(*b, "\%% = OpExtInstImport \"GLSL.std.450\"\n", GetNextSSAId(*data));
          print_to_builder(*b, "OpMemoryModel PhysicalStorageBuffer64 GLSL450\n");
          print_to_builder(*b, "OpEntryPoint MeshEXT \%% \"%\" \%% \%% \%% \%% \%% \%% \%%\n",
-                              GetSSAId(*data, header.name),
+                              GetSSAId(*data, .{ type = .Function, function = header }),
                               "ApilaMS",
-                              GetSSAId(*data, "meshVerticesEXT"),
-                              GetSSAId(*data, "pushData"),
-                              GetSSAId(*data, "primitiveTriangleIndicesEXT"),
-                              GetSSAId(*data, "meshVertexOut"),
-                              GetSSAId(*data, "meshPrimitiveOut"),
-                              GetSSAId(*data, "imageHeap"),
-                              GetSSAId(*data, "samplerHeap")
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshVerticesEXTOutVariable }),
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PushDataVariable }),
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PrimitiveTriangleIndicesEXTOutVariable }),
+                              GetSSAId(*data, data.meshVertexOutVariableIdentifier),
+                              GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .ImageHeapVariable }),
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .SamplerHeapVariable })
          );
          print_to_builder(*b, "OpExecutionModeId \%% LocalSizeId \%% \%% \%%\n",
-                              GetSSAId(*data, header.name),
-                              GetSSAId(*data, GetInt32ConstIdentifier(*data, data.workgroupSize[0])),
-                              GetSSAId(*data, GetInt32ConstIdentifier(*data, data.workgroupSize[1])),
-                              GetSSAId(*data, GetInt32ConstIdentifier(*data, data.workgroupSize[2]))
+                              GetSSAId(*data, .{ type = .Function, function = header }),
+                              GetSSAId(*data, .{ type = .Int32Literal, int32Literal = data.workgroupSize[0] }),
+                              GetSSAId(*data, .{ type = .Int32Literal, int32Literal = data.workgroupSize[1] }),
+                              GetSSAId(*data, .{ type = .Int32Literal, int32Literal = data.workgroupSize[2] })
          );
          print_to_builder(*b, "OpExecutionMode \%% OutputVertices %\n",
-                              GetSSAId(*data, header.name),
+                              GetSSAId(*data, .{ type = .Function, function = header }),
                               data.maxVertices
          );
          print_to_builder(*b, "OpExecutionMode \%% OutputPrimitivesEXT %\n",
-                              GetSSAId(*data, header.name),
+                              GetSSAId(*data, .{ type = .Function, function = header }),
                               data.maxPrimitives
          );
          print_to_builder(*b, "OpExecutionMode \%% %\n",
-                              GetSSAId(*data, header.name),
+                              GetSSAId(*data, .{ type = .Function, function = header }),
                               ToSpirvOutputTopology(data.primitiveTopology)
          );
 
@@ -327,13 +393,13 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          // annotations (decorations)
          print_to_builder(*b, "\n; annotations (decorations)\n");
          print_to_builder(*b, "OpDecorate \%% Block\n",
-                              GetSSAId(*data, "MeshPerVertex")
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshPerVertexStruct })
          );
          print_to_builder(*b, "OpMemberDecorate \%% 0 BuiltIn Position\n",
-                              GetSSAId(*data, "MeshPerVertex")
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshPerVertexStruct })
          );
          print_to_builder(*b, "OpMemberDecorate \%% 1 BuiltIn PointSize\n",
-                              GetSSAId(*data, "MeshPerVertex")
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshPerVertexStruct })
          );
 
          //
@@ -351,14 +417,14 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          // look for an implementation in glslangValidator, they must have something similar.
          //
          print_to_builder(*b, "OpDecorate \%% Location 0\n",
-                              GetSSAId(*data, "meshVertexOut")
+                              GetSSAId(*data, data.meshVertexOutVariableIdentifier)
          );
          print_to_builder(*b, "OpDecorate \%% Location %\n",
-                              GetSSAId(*data, "meshPrimitiveOut"),
+                              GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
                               data.locationsConsumedByPerVertexMeshOut,
          );
          print_to_builder(*b, "OpDecorate \%% PerPrimitiveEXT\n",
-                              GetSSAId(*data, "meshPrimitiveOut")
+                              GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier)
          );
 
          // print_to_builder(*b, "OpDecorate \%% Block\n",
@@ -376,14 +442,14 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          find_or_add(*data.structs, PushData);
 
          print_to_builder(*b, "OpDecorate \%% BuiltIn PrimitiveTriangleIndicesEXT\n",
-                              GetSSAId(*data, "primitiveTriangleIndicesEXT")
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PrimitiveTriangleIndicesEXTOutVariable })
          );
 
          // struct annotate infos
          print_to_builder(*b, "\n; struct annotate infos\n");
          for _, s: data.structs {
             annotateInfo := GetAnnotateInfoFromStruct(s);
-            structIdentifier := GetIdentifierFromType(s);
+            structIdentifier: Identifier = .{ type = ._Type, _type = s };
             print_to_builder(*b, "OpDecorate \%% Block\n",
                                  GetSSAId(*data, structIdentifier)
             );
@@ -403,65 +469,78 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          // Types, variables and constants
          print_to_builder(*b, "\n; Types, variables and constants\n");
          print_to_builder(*b, "\%% = OpTypeVoid\n",
-                              GetSSAId(*data, "void")
+                              GetSSAId(*data, .{ type = .Void })
          );
          print_to_builder(*b, "\%% = OpTypeFunction \%%\n",
-                              GetSSAId(*data, GetEmptyFunctionIdentifier()),
-                              GetSSAId(*data, "void")
+                              GetSSAId(*data, .{ type = ._Type, _type = #type () -> () }),
+                              GetSSAId(*data, .{ type = .Void })
          );
          print_to_builder(*b, "\%% = OpTypeInt 32\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32x2)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32x2 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32x3)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32x3 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32x4)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32x4 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
          );
          print_to_builder(*b, "\%% = OpTypeFloat 32\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float2)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float2 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float3)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float3 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float4)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float4 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float })
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 2\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float2x2)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float2))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float2x2 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float2 })
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 3\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float3x3)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float3))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float3x3 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float3 })
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 4\n",
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float4x4)),
-                              GetSSAId(*data, GetIdentifierFromType(Intrinsics.Float4))
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float4x4 }),
+                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float4 })
          );
 
          // int constants
          print_to_builder(*b, "\n; int constants\n");
-         for _, constant: data.intConstants {
-            print_to_builder(*b, "\%% = OpConstant \%% %\n",
-                                 GetSSAId(*data, GetInt32ConstIdentifier(*data, constant)),
-                                 GetSSAId(*data, GetIdentifierFromType(Intrinsics.Int32)),
-                                 constant
-            );
+         for ssaId, identifier: data.identifierToSSAId {
+            if identifier.type == .Int32Literal {
+               print_to_builder(*b, "\%% = OpConstant \%% %\n",
+                                    ssaId,
+                                    GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 }),
+                                    identifier.int32Literal
+               );
+            }
          }
 
+         // float constants
+         print_to_builder(*b, "\n; float constants\n");
+         for ssaId, identifier: data.identifierToSSAId {
+            if identifier.type == .FloatLiteral {
+               print_to_builder(*b, "\%% = OpConstant \%% %\n",
+                                    ssaId,
+                                    GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float }),
+                                    identifier.floatLiteral
+               );
+            }
+         }
 
          // functions
          print_to_builder(*b, "\n; functions\n");
@@ -484,9 +563,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       header := body.header;
       block := body.block;
       print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
-                           GetSSAId(data, header.name),
-                           GetSSAId(data, "void"),
-                           GetSSAId(data, GetEmptyFunctionIdentifier())
+                           GetSSAId(data, .{ type = .Function, function = header }),
+                           GetSSAId(data, .{ type = .Void }),
+                           GetSSAId(data, .{ type = ._Type, _type = #type () -> () })
       );
 
       //
@@ -509,9 +588,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       find_or_add(*data.functions, header);
 
       returnTypeIdentifier := GetReturnTypeIdentifier(header);
-      functionTypeIdentifier := GetFunctionTypeIdentifier(header);
+      functionTypeIdentifier: Identifier = .{ type = ._Type, _type = get_type(header.type) };
       print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
-                           GetSSAId(data, header.name),
+                           GetSSAId(data,  .{ type = .Function, function = header }),
                            GetSSAId(data, returnTypeIdentifier),
                            GetSSAId(data, functionTypeIdentifier)
       );
@@ -619,7 +698,24 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          return 0;
 
       case .LITERAL                     ;
+         cl := cast(*Code_Literal) node;
+         if cl.value_type == {
+            case .NUMBER;
+               if (cl.value_flags & .FLOAT) {
+                  identifier: Identifier = .{ type = .FloatLiteral, floatLiteral = xx cl._float64 };
+                  return GetSSAId(data, identifier);
+               } else {
+                  identifier: Identifier = .{ type = .Int32Literal, int32Literal = cl._s64 };
+                  return GetSSAId(data, identifier);
+               }
+
+            case; assert(false, "cl.value_type: %\n", cl.value_type);
+         }
+
       case .IDENT                       ;
+         ci := cast(*Code_Ident) node;
+         return GetSSAId(data, .{ type = .Variable, variable = ci.resolved_declaration });
+
       case .UNARY_OPERATOR              ;
       case .BINARY_OPERATOR             ;
          cbo := cast(*Code_Binary_Operator)node;
@@ -634,7 +730,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                resultSSAId := GetNextSSAId(data);
 
                type := get_type(cbo.left.type);
-               identifier := GetIdentifierFromType(type);
+               identifier: Identifier = .{ type = ._Type, _type = type };
                if type == {
                   case Intrinsics.Float;  #through;
                   case Intrinsics.Float2; #through;
@@ -662,6 +758,25 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                return resultSSAId;
             }
 
+            case #char "="; {
+               rightId := GenerateInstructions(data, cbo.right, b);
+
+               if cbo.left.kind == {
+                  case .IDENT; {
+                     leftCi := cast(*Code_Ident) cbo.left;
+                     leftId := GetSSAId(data, .{ type = .Variable, variable = leftCi.resolved_declaration } );
+                     print_to_builder(b, "OpStore \%% \%%\n",
+                                          leftId,
+                                          rightId
+                     );
+
+                     return rightId;
+                  }
+
+                  case; assert(false, "cbo.left.kind: %", cbo.left.kind);
+               }
+            }
+
          }
       case .PROCEDURE_BODY              ;
       case .PROCEDURE_CALL              ;
@@ -676,6 +791,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
       case .STRUCT                      ;
       case .COMMA_SEPARATED_ARGUMENTS   ;
       case .DECLARATION                 ;
+      
       case .CAST                        ;
       case .DIRECTIVE_THROUGH           ;
       case .COMPOUND_DECLARATION        ;
@@ -726,16 +842,16 @@ MeshPerVertex :: struct {
 }
 
 // i need this function since "void" is kinda special
-GetReturnTypeIdentifier :: (header: *Code_Procedure_Header) -> string {
+GetReturnTypeIdentifier :: (header: *Code_Procedure_Header) -> Identifier {
    assert(header.returns.count <= 1);
 
    if (header.returns.count == 0) {
-      return "void";
+      return .{ type = .Void };
    }
 
    // returns count must be one here as asserted above
    returnType := get_type(header.returns[0].type);
-   return GetIdentifierFromType(returnType);
+   return .{ type = ._Type, _type = returnType };
 }
 
 GetNextSSAId :: (using data: *CompilationData) -> int {
@@ -743,113 +859,7 @@ GetNextSSAId :: (using data: *CompilationData) -> int {
    return ssaIota;
 }
 
-GetInt32ConstIdentifier :: (data: *CompilationData, value: int) -> string {
-   find_or_add(*data.intConstants, value);
-   return sprint("int32_%", value);
-}
-
-//
-// kinda hack
-// i need this because the entry function in jai has lots of paramters but
-// they are actually not paratmers but input output global storages, so i can not get
-// the identifier name from its signature like i do with other functions
-// the entry function is always takes no arguments returns nothing. so i created this function
-// so it is consistent with other functions. that is if another function takes no arguments and returns nothing
-// their type identifier will match and i will not generate the same type twice which is illegal in spirv, so it is nice.
-//
-//          - apila, 04/04/26
-//
-GetEmptyFunctionIdentifier :: () -> string {
-   header: Code_Procedure_Header;
-   return GetFunctionTypeIdentifier(*header);
-}
-
-GetFunctionTypeIdentifier :: (header: *Code_Procedure_Header) -> string {
-   LoopBody :: () #expand {
-      type := get_type(`it.type);
-      typeIdentifier := GetIdentifierFromType(type);
-      print_to_builder(*b, "%", typeIdentifier);
-   }
-
-   b: String_Builder;
-   print_to_builder(*b, "FunctionType");
-
-   for header.returns {
-      LoopBody();
-   }
-
-   print_to_builder(*b, "_");
-
-   for header.arguments {
-      LoopBody();
-   }
-
-   return builder_to_string(*b);
-}
-
-GetIdentifierFromType :: (type: Type) -> string {
-   Helper :: (type: Type, b: *String_Builder) {
-      // intrinsics
-      if type == {
-         case Intrinsics.Int32    ; print_to_builder(b, "int32"); return;
-         case Intrinsics.Int32x2  ; print_to_builder(b, "int32x2"); return;
-         case Intrinsics.Int32x3  ; print_to_builder(b, "int32x3"); return;
-         case Intrinsics.Int32x4  ; print_to_builder(b, "int32x4"); return;
-         case Intrinsics.Float    ; print_to_builder(b, "float"); return;
-         case Intrinsics.Float2   ; print_to_builder(b, "float2"); return;
-         case Intrinsics.Float3   ; print_to_builder(b, "float3"); return;
-         case Intrinsics.Float4   ; print_to_builder(b, "float4"); return;
-         case Intrinsics.Float2x2 ; print_to_builder(b, "float2x2"); return;
-         case Intrinsics.Float3x3 ; print_to_builder(b, "float3x3"); return;
-         case Intrinsics.Float4x4 ; print_to_builder(b, "float4x4"); return;
-      }
-
-      ti := cast(*Type_Info)type;
-      if (ti.type == .STRUCT) {
-         tis := cast(*Type_Info_Struct)ti;
-         print_to_builder(b, tis.name);
-         return;
-      }
-
-      if (ti.type == .POINTER) {
-         tip := cast(*Type_Info_Pointer)ti;
-         print_to_builder(b, "p_");
-         innerType := get_type(tip.pointer_to);
-         Helper(innerType, b);
-         return;
-      }
-
-      if (ti.type == .ARRAY) {
-         tia := cast(*Type_Info_Array)ti;
-         print_to_builder(b, "a_");
-         innerType := get_type(tia.element_type);
-         Helper(innerType, b);
-         return;
-      }
-
-      assert(false, "type: %. this type is not supported yet. if it is builtin jai type use Intrinsics instead", type);
-   }
-
-   b: String_Builder;
-   Helper(type, *b);
-   return builder_to_string(*b);
-}
-
-// identifier rules:
-//    identifier of a struct is its name
-//    for int its "int32" or int followed by the bit size
-//    for float it is just "float"
-//    int vectors are int32x followed by size. "int32x4" is ivec4 in glsl
-//    float vectors are float followed by size. "float4" is vec4 in glsl
-//    matrices are float2x2, float3x3.
-//    function types are FunctionType followed by its signature. for example FunctionTypevoid. first the return value then arguments. the return value is either "void" or a single type
-//    identifier of functions is their jai name including entry functions. but the entry point given in OpEntryPoint is not their identifier. it is either ApilaMS, ApilaTS, ApilaFS or ApilaCS
-//
-// update on the identifier rules:
-// forms of identifiers dont matter. as long as it is unique, that is you get a unique identifier for different input config.
-// just create functions to get identifiers so it is consistent throughout the program. what the actual identifier is doesnt matter so
-// you can forget about the rules above and dont need to worry about them. just make sure you are calling a function to get an identifier
-GetSSAId :: (using data: *CompilationData, identifier: string) -> int {
+GetSSAId :: (using data: *CompilationData, identifier: Identifier) -> int {
    value, newlyAdded := find_or_add(*identifierToSSAId, identifier);
    if (!newlyAdded) {
       return value.*;
