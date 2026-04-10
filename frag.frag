@@ -23,10 +23,16 @@ layout(location = 0) in vec2 vUv;
 layout(location = 1) perprimitiveEXT in vec2 asdsa;
 layout(location = 0) out vec4 fragColor;
 
-void main() {
-    fragColor = texture(sampler2D(imageHeap[fragmentData.imageIndex], samplerHeap[fragmentData.samplerIndex]), vUv);
+
+void ffff() {
+    int a = 10;
+    a = a + a;
 }
 
+void main() {
+    ffff();
+    fragColor = texture(sampler2D(imageHeap[fragmentData.imageIndex], samplerHeap[fragmentData.samplerIndex]), vUv);
+}
 
 //
 // imagine you have the following available
