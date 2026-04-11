@@ -81,6 +81,7 @@ Identifier :: struct {
       pointer:          struct {
                            storageClass:  StorageClass;
                            pointerTo:     Type;
+                           untyped:       bool;
                         };
    };
 }
@@ -121,7 +122,12 @@ IdentifierHash :: (using identifier: Identifier) -> u32 {
       case .Void; return 69; // does the hash matter here?
       case .Variable; return get_hash(variable.name);
       case .BuiltinThingies; return get_hash(builtinThingies);
-      case .Pointer; return cast,trunc(u32) fnv1a_hash(*identifier, size_of(type_of(identifier)));
+      case .Pointer;
+         if (pointer.untyped) {
+            return cast,trunc(u32) fnv1a_hash(xx pointer.storageClass);
+         } else {
+            return cast,trunc(u32) fnv1a_hash(*pointer, size_of(type_of(pointer)));
+         }
    }
 
    assert(false, "type: %", type);
@@ -139,7 +145,14 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
       case .Void; return true;
       case .Variable; return a.variable == b.variable; // two variables are equal if they have the same declaration
       case .BuiltinThingies; return a.builtinThingies == b.builtinThingies;
-      case .Pointer; return a.pointer.storageClass == b.pointer.storageClass && a.pointer.pointerTo == b.pointer.pointerTo;
+      case .Pointer;
+         if (a.pointer.untyped != b.pointer.untyped) return false;
+         untyped := a.pointer.untyped; // at this point a.pointer.untyped and b.pointer.untyped has the same value
+         if (untyped) {
+            return a.pointer.storageClass == b.pointer.storageClass;
+         } else {
+            return a.pointer.storageClass == b.pointer.storageClass && a.pointer.pointerTo == b.pointer.pointerTo;
+         }
    }
 
    assert(false, "type: %", type);
@@ -498,7 +511,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
                               GetSSAId(*data, .{ type = ._Type, _type = #type () -> () }),
                               GetSSAId(*data, .{ type = .Void })
          );
-         print_to_builder(*b, "\%% = OpTypeInt 32\n",
+         print_to_builder(*b, "\%% = OpTypeInt 32 1\n",
                               GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
@@ -513,7 +526,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
                               GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32x4 }),
                               GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
          );
-         print_to_builder(*b, "\%% = OpTypeInt 64\n",
+         print_to_builder(*b, "\%% = OpTypeInt 64 1\n",
                               GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int64 })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
@@ -561,12 +574,20 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          for ssaId, identifier: data.identifierToSSAId {
             if identifier.type == .Pointer {
                storageClass := ToSpirvStorageClass(identifier.pointer.storageClass);
-               pointerToIdentifier: Identifier = .{ type = ._Type, _type = identifier.pointer.pointerTo }; // identifier of the type that the pointer points to
-               print_to_builder(*b, "\%% = OpTypePointer % \%%\n",
-                                    ssaId,
-                                    storageClass,
-                                    GetSSAId(*data, pointerToIdentifier)
-               );
+
+               if (identifier.pointer.untyped) {
+                  print_to_builder(*b, "\%% = OpTypeUntypedPointerKHR %\n",
+                                       ssaId,
+                                       storageClass
+                  );
+               } else {
+                  pointerToIdentifier: Identifier = .{ type = ._Type, _type = identifier.pointer.pointerTo }; // identifier of the type that the pointer points to
+                  print_to_builder(*b, "\%% = OpTypePointer % \%%\n",
+                                       ssaId,
+                                       storageClass,
+                                       GetSSAId(*data, pointerToIdentifier)
+                  );
+               }
             }
          }
 
@@ -610,7 +631,10 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
       }
    }
 
-   print("%", builder_to_string(*b));
+   spirvasm := builder_to_string(*b);
+   print("%", spirvasm);
+   #import "File";
+   write_entire_file("jai.spvasm", spirvasm);
 
    return .{};
 }
@@ -630,6 +654,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
                            GetSSAId(data, .{ type = .Void }),
                            GetSSAId(data, .{ type = ._Type, _type = #type () -> () })
       );
+
+      // idk what to do with the label rn
+      print_to_builder(*b, "\%% = OpLabel\n", GetNextSSAId(data));
 
       //
       // not adding this function type to CompilationData.functions since entry function is handled seperately
@@ -900,10 +927,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          }
 
          storageClass := StorageClass.Function;
-         print_to_builder(b, "\%% = OpVariable \%% %",
+         print_to_builder(b, "\%% = OpUntypedVariableKHR \%% % \%%",
                               variableSSAId,
-                              GetSSAId(data, .{ type = .Pointer, pointer = .{ storageClass = storageClass, pointerTo = variableType } }),
-                              ToSpirvStorageClass(storageClass)
+                              GetSSAId(data, .{ type = .Pointer, pointer = .{ storageClass = storageClass, pointerTo = variableType, untyped = true } }),
+                              ToSpirvStorageClass(storageClass),
+                              GetSSAId(data, .{ type = ._Type, _type = variableType })
          );
 
          if (initializerSSAId == NO_INITIALIZER) {
