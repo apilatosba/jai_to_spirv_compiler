@@ -3,12 +3,55 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_mesh_shader : require
 #extension GL_EXT_descriptor_heap: require
+#extension GL_ARB_gpu_shader_int64: require
+
+layout(descriptor_heap) uniform sampler     samplerHeap[];
+layout(descriptor_heap) uniform texture2D   imageHeap[];
+
+layout(buffer_reference) buffer FragmentData {
+    vec4 color;
+};
+
+layout(buffer_reference) buffer MeshData {
+    float offset;
+};
+
+layout(push_constant) uniform PC {
+   FragmentData taskData; // i put FragmentData but it stands for void* since there is no void*
+   MeshData meshData;
+   FragmentData fragmentData;
+};
+
+struct MeshVertexOut {
+   float x;
+   vec4 y;
+};
+
+struct MeshPrimitiveOut {
+   float q;
+   vec3 w;
+};
 
 layout(local_size_x = 1) in;
-layout(triangles, max_vertices = 40, max_primitives = 20) out;
+layout(triangles, max_vertices = 40, max_primitives = 2) out;
+
+layout(location = 0) out MeshVertexOut[] vOut;
+layout(location = 8) perprimitiveEXT out MeshPrimitiveOut[] pOut;
 
 void main() {
    SetMeshOutputsEXT(4, 2);
-   int a = 1;
-   a = a + a;
+
+   uint64_t xd = 0;
+   uint xdd = uint(xd);
+
+   gl_MeshVerticesEXT[0].gl_Position = vec4(-1, -1, 0.5, 1);
+   gl_MeshVerticesEXT[1].gl_Position = vec4( 1, -1, 0.5, 1);
+   gl_MeshVerticesEXT[2].gl_Position = vec4( 1,  1, 0.5, 1);
+   gl_MeshVerticesEXT[3].gl_Position = vec4(-1,  1, 0.5, 1);
+
+   vOut[10] = MeshVertexOut(1, vec4(12));
+   pOut[xdd] = MeshPrimitiveOut(3, vec3(4.20));
+
+   gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+   gl_PrimitiveTriangleIndicesEXT[1] = uvec3(0, 2, 3);
 }

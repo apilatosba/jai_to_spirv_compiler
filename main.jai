@@ -7,42 +7,52 @@
 #import "Hash";
 
 MeshOutVertex :: struct {
-   position: Intrinsics.Float3;
-   color: Intrinsics.Float4;
+   position: Float3;
+   color: Float4;
 }
 MeshOutPrimitive :: struct { }
-Intrinsics :: struct {
-   // builtin types
-   using types: struct {
-      Int32    :: s32; // idk. maybe not the way to do it
-      Int32x2  :: struct {};
-      Int32x3  :: struct {};
-      Int32x4  :: struct {};
 
-      Int64    :: s64; // idk. maybe not the way to do it
-      Int64x2  :: struct {};
-      Int64x3  :: struct {};
-      Int64x4  :: struct {};
+MESH_VERTICES_NAME   :: "meshVertices";
+MESH_TRIANGLES_NAME  :: "meshTriangles";
+// vvvvvv intrinsics vvvvvvvv
+Int32    :: s32; // idk. maybe not the way to do it
+Int32x2  :: struct {};
+Int32x3  :: struct {};
+Int32x4  :: struct {};
 
-      Float    :: float; // idk. maybe not the way to do it
-      Float2   :: struct {};
-      Float3   :: struct {};
-      Float4   :: struct {};
+Int64    :: s64; // idk. maybe not the way to do it
+Int64x2  :: struct {};
+Int64x3  :: struct {};
+Int64x4  :: struct {};
 
-      Float2x2 :: struct {};
-      Float3x3 :: struct {};
-      Float4x4 :: struct {};
-   };
+Float    :: float; // idk. maybe not the way to do it
+Float2   :: struct {};
+Float3   :: struct {};
+Float4   :: struct {};
+
+Float2x2 :: struct {};
+Float3x3 :: struct {};
+Float4x4 :: struct {};
+
+MeshPerVertex :: struct {
+   position:   Float4;
+   pointSize:  Float;
 }
+
+#insert #run sprint("%: [] MeshPerVertex;", MESH_VERTICES_NAME); // gl_MeshVerticesEXT
+#insert #run sprint("%: [] Int32x3;", MESH_TRIANGLES_NAME); // gl_PrimitiveTriangleIndicesEXT
+// ^^^^^^ intrinsics ^^^^^^^^^
+
+
 FragmentData :: struct { }
 MeshData :: struct { }
 
-MeshShader :: (using intrinsics: Intrinsics, mOutVertex: *[] MeshOutVertex, mOutPrimitive: *[] MeshOutPrimitive, data: *MeshData) {
+MeshShader :: (mOutVertex: *[] MeshOutVertex, mOutPrimitive: *[] MeshOutPrimitive, data: *MeshData) {
    a := 10;
    a = a + a;
 } @1_1_1 @40_20 @triangles
 
-FragmentShader :: (using intrinsics: Intrinsics, mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, data: *FragmentData) -> Intrinsics.Float4 {
+FragmentShader :: (mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, data: *FragmentData) -> Float4 {
    anan123: int = 10;
    return .{};
 }
@@ -57,7 +67,6 @@ Identifier :: struct {
       Void;
       Variable;
       BuiltinThingies;
-      Pointer;
    };
 
    using value: union {
@@ -67,7 +76,21 @@ Identifier :: struct {
                         };
       floatLiteral:     float;
       function:         *Code_Procedure_Header;
-      _type:            Type;
+      _type:            struct {
+                           type:       Type;
+
+                           // if type is pointer additional information is here
+                           pointer:    struct {
+                                          storageClass:  StorageClass;
+                                          untyped:       bool;
+                                          // TODO:
+                                          // here i also need to store the what the pointer points to as an Identifier
+                                          // and should use it in the comparison in IdentifierCompare function.
+                                          // otherwise if i have pointer to pointers program will not work.
+                                          // and in the places where i used tip.pointer_to, i should use the Identifier stored here instead.
+                                          //       - apila, 12/04/26
+                                       };
+                        };
       // _void: // Void doesnt have a value
       variable:         *Code_Declaration;
       builtinThingies:  enum {
@@ -76,18 +99,16 @@ Identifier :: struct {
                            PrimitiveTriangleIndicesEXTOutVariable;
                            SamplerHeapVariable;
                            ImageHeapVariable;
-                           MeshPerVertexStruct;
-                        };
-      pointer:          struct {
-                           storageClass:  StorageClass;
-                           pointerTo:     Type;
-                           untyped:       bool;
                         };
    };
 }
 
 StorageClass :: enum {
    Function;
+   PhysicalStorageBuffer;
+   Output;
+   PushConstant;
+   UniformConstant;
 }
 
 main :: () {
@@ -118,16 +139,18 @@ IdentifierHash :: (using identifier: Identifier) -> u32 {
       case .IntLiteral; return get_hash(intLiteral.value);
       case .FloatLiteral; return get_hash(floatLiteral);
       case .Function; return get_hash(function);
-      case ._Type; return HashType(_type);
+      case ._Type;
+         ti := cast(*Type_Info) _type.type;
+         if (ti.type == .POINTER) {
+            if (_type.pointer.untyped) {
+               return cast,trunc(u32) fnv1a_hash(xx _type.pointer.storageClass);
+            }
+         }
+
+         return cast,trunc(u32) fnv1a_hash(xx *_type.type, size_of(Type));
       case .Void; return 69; // does the hash matter here?
       case .Variable; return get_hash(variable.name);
       case .BuiltinThingies; return get_hash(builtinThingies);
-      case .Pointer;
-         if (pointer.untyped) {
-            return cast,trunc(u32) fnv1a_hash(xx pointer.storageClass);
-         } else {
-            return cast,trunc(u32) fnv1a_hash(*pointer, size_of(type_of(pointer)));
-         }
    }
 
    assert(false, "type: %", type);
@@ -141,28 +164,34 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
       case .IntLiteral; return a.intLiteral.bitSize == b.intLiteral.bitSize && a.intLiteral.value == b.intLiteral.value;
       case .FloatLiteral; return a.floatLiteral == b.floatLiteral;
       case .Function; return a.function == b.function; // if they point to the same code node
-      case ._Type; return a._type == b._type;
+      case ._Type;
+         tiA := cast(*Type_Info) a._type.type;
+         tiB := cast(*Type_Info) b._type.type;
+
+         if (tiA.type == .POINTER && tiB.type == .POINTER) {
+            tipA := cast(*Type_Info_Pointer) tiA;
+            tipB := cast(*Type_Info_Pointer) tiB;
+
+            if (a._type.pointer.untyped != b._type.pointer.untyped) return false;
+            untyped := a._type.pointer.untyped; // at this point a.pointer.untyped and b.pointer.untyped has the same value
+            if (untyped) {
+               return a._type.pointer.storageClass == b._type.pointer.storageClass;
+            } else {
+               return a._type.pointer.storageClass == b._type.pointer.storageClass && tipA.pointer_to == tipB.pointer_to;
+            }
+         } else {
+            return a._type.type == b._type.type;
+         }
+
       case .Void; return true;
       case .Variable; return a.variable == b.variable; // two variables are equal if they have the same declaration
       case .BuiltinThingies; return a.builtinThingies == b.builtinThingies;
-      case .Pointer;
-         if (a.pointer.untyped != b.pointer.untyped) return false;
-         untyped := a.pointer.untyped; // at this point a.pointer.untyped and b.pointer.untyped has the same value
-         if (untyped) {
-            return a.pointer.storageClass == b.pointer.storageClass;
-         } else {
-            return a.pointer.storageClass == b.pointer.storageClass && a.pointer.pointerTo == b.pointer.pointerTo;
-         }
    }
 
    assert(false, "type: %", type);
 }
 
 
-HashType :: (t: Type) -> u32 {
-   #import "Hash";
-   return cast,trunc(u32) fnv1a_hash(xx *t, size_of(Type));
-}
 
 CompilationData :: struct {
    workgroupSize:                         [3] int = .[1, 1, 1];
@@ -171,7 +200,6 @@ CompilationData :: struct {
    primitiveTopology:                     string;
    identifierToSSAId:                     Table(Identifier, int, IdentifierHash, IdentifierCompare);
    ssaIota:                               int;
-   structs:                               Table(Type, struct {}, HashType);
    functions:                             Table(*Code_Procedure_Header, struct {}); // this data is collected when generating instructions and then written into the Types block of spirv
    functionFrontier:                      Queue(*Code_Procedure_Body);
    locationsConsumedByPerVertexMeshOut:   int;
@@ -198,21 +226,21 @@ CompilationData :: struct {
 CalculateLocationsConsumed :: (T: Type) -> int {
    Helper :: (type: Type, accumulator: *int) {
       if type == {
-         case Intrinsics.Int32    ; accumulator.* += 1; return;
-         case Intrinsics.Int32x2  ; accumulator.* += 1; return;
-         case Intrinsics.Int32x3  ; accumulator.* += 1; return;
-         case Intrinsics.Int32x4  ; accumulator.* += 1; return;
-         case Intrinsics.Int64    ; accumulator.* += 1; return;
-         case Intrinsics.Int64x2  ; accumulator.* += 1; return;
-         case Intrinsics.Int64x3  ; accumulator.* += 2; return;
-         case Intrinsics.Int64x4  ; accumulator.* += 2; return;
-         case Intrinsics.Float    ; accumulator.* += 1; return;
-         case Intrinsics.Float2   ; accumulator.* += 1; return;
-         case Intrinsics.Float3   ; accumulator.* += 1; return;
-         case Intrinsics.Float4   ; accumulator.* += 1; return;
-         case Intrinsics.Float2x2 ; accumulator.* += 2; return;
-         case Intrinsics.Float3x3 ; accumulator.* += 3; return;
-         case Intrinsics.Float4x4 ; accumulator.* += 4; return;
+         case Int32    ; accumulator.* += 1; return;
+         case Int32x2  ; accumulator.* += 1; return;
+         case Int32x3  ; accumulator.* += 1; return;
+         case Int32x4  ; accumulator.* += 1; return;
+         case Int64    ; accumulator.* += 1; return;
+         case Int64x2  ; accumulator.* += 1; return;
+         case Int64x3  ; accumulator.* += 2; return;
+         case Int64x4  ; accumulator.* += 2; return;
+         case Float    ; accumulator.* += 1; return;
+         case Float2   ; accumulator.* += 1; return;
+         case Float3   ; accumulator.* += 1; return;
+         case Float4   ; accumulator.* += 1; return;
+         case Float2x2 ; accumulator.* += 2; return;
+         case Float3x3 ; accumulator.* += 3; return;
+         case Float4x4 ; accumulator.* += 4; return;
       }
 
       ti := cast(*Type_Info) type;
@@ -277,50 +305,51 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
    // arguments
    if type == {
       case .Mesh; {
-         // first argument: Intrinsics
+         index := 0;
+
+         // first argument: *[] MeshOutVertex. MeshOutVertex is user defined struct
          {
-            assert(header.arguments.count > 0, "not enough arguments");
-            assert(header.arguments[0].type.type == .STRUCT, "first argument must be of type Intrinsics");
-            assert(header.arguments[0].type.(*Type_Info_Struct).name == "Intrinsics", "first argument must be of type Intrinsics");
+            defer index += 1;
+
+            assert(header.arguments.count > index, "not enough arguments");
+            assert(header.arguments[index].type.type == .POINTER, "first argument wrong");
+            pointer := cast(*Type_Info_Pointer) header.arguments[index].type;
+            assert(pointer.pointer_to.type == .ARRAY, "first argument wrong");
+            array := cast(*Type_Info_Array) pointer.pointer_to;
+
+            userStruct := get_type(array.element_type);
+            // GetSSAId(*data, .{ type = ._Type, _type = userStruct });
+
+            data.meshVertexOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[index] };
+            data.locationsConsumedByPerVertexMeshOut = CalculateLocationsConsumed(userStruct);
          }
 
-         // second argument: *[] MeshOutVertex. MeshOutVertex is user defined struct
+         // second argument: mOutPrimitive: *[] MeshOutPrimitive. MeshOutPrimitive is user defined struct
          {
-            assert(header.arguments.count > 1, "not enough arguments");
-            assert(header.arguments[1].type.type == .POINTER, "second argument wrong");
-            pointer := cast(*Type_Info_Pointer) header.arguments[1].type;
+            defer index += 1;
+
+            assert(header.arguments.count > index, "not enough arguments");
+            assert(header.arguments[index].type.type == .POINTER, "second argument wrong");
+            pointer := cast(*Type_Info_Pointer) header.arguments[index].type;
             assert(pointer.pointer_to.type == .ARRAY, "second argument wrong");
             array := cast(*Type_Info_Array) pointer.pointer_to;
 
             userStruct := get_type(array.element_type);
-            find_or_add(*data.structs, userStruct);
+            // GetSSAId(*data, .{ type = ._Type, _type = userStruct });
 
-            data.meshVertexOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[1] };
-            data.locationsConsumedByPerVertexMeshOut = CalculateLocationsConsumed(userStruct);
+            data.meshPrimitiveOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[index] };
          }
 
-         // third argument: mOutPrimitive: *[] MeshOutPrimitive. MeshOutPrimitive is user defined struct
+         // third argument: *MeshData. MeshData is user defined struct
          {
-            assert(header.arguments.count > 2, "not enough arguments");
-            assert(header.arguments[2].type.type == .POINTER, "third argument wrong");
-            pointer := cast(*Type_Info_Pointer) header.arguments[2].type;
-            assert(pointer.pointer_to.type == .ARRAY, "third argument wrong");
-            array := cast(*Type_Info_Array) pointer.pointer_to;
+            defer index += 1;
 
-            userStruct := get_type(array.element_type);
-            find_or_add(*data.structs, userStruct);
-
-            data.meshPrimitiveOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[2] };
-         }
-
-         // fourth argument: *MeshData. MeshData is user defined struct
-         {
-            assert(header.arguments.count > 3, "not enoufh arguments");
-            assert(header.arguments[3].type.type == .POINTER, "fourth argument wrong");
-            pointer := cast(*Type_Info_Pointer) header.arguments[3].type;
+            assert(header.arguments.count > index, "not enoufh arguments");
+            assert(header.arguments[index].type.type == .POINTER, "third argument wrong");
+            pointer := cast(*Type_Info_Pointer) header.arguments[index].type;
 
             userStruct := get_type(pointer.pointer_to);
-            find_or_add(*data.structs, userStruct);
+            // GetSSAId(*data, .{ type = ._Type, _type = userStruct });
          }
       }
 
@@ -370,10 +399,20 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          found := array_find(PRIMITIVE_TOPOLOGIES, primitiveTopology);
          assert(found, "primitiveTopology: %, valid values: %", primitiveTopology, PRIMITIVE_TOPOLOGIES);
 
+         // https://github.com/KhronosGroup/GLSL/blob/main/extensions/ext/GLSL_EXT_mesh_shader.txt
+         // you need to implement gl_PrimitivePointIndicesEXT gl_PrimitiveLineIndicesEXT similar to you implemented triangles
+         // prolly new entries in Identifier.builtinThingies and stuff like that
+         //          - apila, 12/04/26
+         assert(primitiveTopology == "triangles");
+
          data.primitiveTopology = primitiveTopology;
       }
    }
 
+   // this adds this pointer type to the identifierToSSAId table so it gets outputted in "pointer types" section
+   // tho this is not the way to do it. some types/constants depend on each other so i need a frontier anyways
+   // so in the future i prolly want to move this in to the frontier
+   GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } });
 
    functions := GenerateFunctions(*data, body);
 
@@ -381,6 +420,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
    if type == {
       case .Mesh; {
          // first part
+         print_to_builder(*b, "OpCapability Int64\n");
          print_to_builder(*b, "OpCapability MeshShadingEXT\n");
          print_to_builder(*b, "OpCapability UntypedPointersKHR\n");
          print_to_builder(*b, "OpCapability DescriptorHeapEXT\n");
@@ -429,13 +469,13 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          // annotations (decorations)
          print_to_builder(*b, "\n; annotations (decorations)\n");
          print_to_builder(*b, "OpDecorate \%% Block\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshPerVertexStruct })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = MeshPerVertex } })
          );
          print_to_builder(*b, "OpMemberDecorate \%% 0 BuiltIn Position\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshPerVertexStruct })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = MeshPerVertex } })
          );
          print_to_builder(*b, "OpMemberDecorate \%% 1 BuiltIn PointSize\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshPerVertexStruct })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = MeshPerVertex } })
          );
 
          //
@@ -475,17 +515,32 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          // print_to_builder(*b, "OpMemberDecorate \%% 2 Offset 16\n", // fragment data pointer
          //                      GetSSAId(*data, "PushData")
          // );
-         find_or_add(*data.structs, PushData);
+         GetSSAId(*data, .{ type = ._Type, _type = .{ type = PushData } });
 
          print_to_builder(*b, "OpDecorate \%% BuiltIn PrimitiveTriangleIndicesEXT\n",
                               GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PrimitiveTriangleIndicesEXTOutVariable })
          );
+         print_to_builder(*b, "OpDecorate \%% BuiltIn ResourceHeapEXT\n",
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .ImageHeapVariable })
+         );
+         print_to_builder(*b, "OpDecorate \%% BuiltIn SamplerHeapEXT\n",
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .SamplerHeapVariable })
+         );
 
+         // idk if i need this?
+         //    apila, 12/04/26
+         //
          // struct annotate infos
          print_to_builder(*b, "\n; struct annotate infos\n");
-         for _, s: data.structs {
-            annotateInfo := GetAnnotateInfoFromStruct(s);
-            structIdentifier: Identifier = .{ type = ._Type, _type = s };
+         for ssaId, identifier: data.identifierToSSAId {
+            if (identifier.type != ._Type) continue;
+            ti := cast(*Type_Info) identifier._type.type;
+            if (ti.type != .STRUCT) continue;
+
+            if (identifier._type.type == MeshPerVertex) continue; // builtin struct handled seperately
+
+            annotateInfo := GetAnnotateInfoFromStruct(identifier._type.type);
+            structIdentifier: Identifier = .{ type = ._Type, _type = identifier._type };
             print_to_builder(*b, "OpDecorate \%% Block\n",
                                  GetSSAId(*data, structIdentifier)
             );
@@ -508,88 +563,171 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
                               GetSSAId(*data, .{ type = .Void })
          );
          print_to_builder(*b, "\%% = OpTypeFunction \%%\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = #type () -> () }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = #type () -> () } }),
                               GetSSAId(*data, .{ type = .Void })
          );
          print_to_builder(*b, "\%% = OpTypeInt 32 1\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32 } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32x2 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32x2 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32 } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32x3 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32x3 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32 } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32x4 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int32 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32x4 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32 } })
          );
          print_to_builder(*b, "\%% = OpTypeInt 64 1\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int64 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64 } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int64x2 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int64 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64x2 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64 } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int64x3 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int64 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64x3 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64 } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int64x4 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Int64 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64x4 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64 } })
          );
          print_to_builder(*b, "\%% = OpTypeFloat 32\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float2 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float2 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float3 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float3 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } })
          );
          print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float4 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float4 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } })
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 2\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float2x2 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float2 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float2x2 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float2 } })
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 3\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float3x3 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float3 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float3x3 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float3 } })
          );
          print_to_builder(*b, "\%% = OpTypeMatrix \%% 4\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float4x4 }),
-                              GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float4 })
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float4x4 } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float4 } })
          );
+
+         //
+         // so this gets processed when i am processing pointers below. meshVertices varaible type.
+         // i know i need a better way to handle dependencies but for now deal with it
+         //
+         // what i am thinking on how to implement identifier dependecies is that each identifier will be a graph node
+         // and i will have an edge from A to B if A depends on B. and i will traverse the graph until i find the first node where all its dependencies
+         // written already and then write and repeat until all nodes are written. here a node something like this struct { dependencies: [] *Node; i: Identifier; written: bool; };
+         //
+         GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .Output, untyped = true } } });
+         GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PushConstant, untyped = true } } });
+         GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } });
 
          // pointer types
          print_to_builder(*b, "\n; pointer types\n");
          for ssaId, identifier: data.identifierToSSAId {
-            if identifier.type == .Pointer {
-               storageClass := ToSpirvStorageClass(identifier.pointer.storageClass);
+            if (identifier.type != ._Type) continue;
+            ti := cast(*Type_Info) identifier._type.type;
+            if (ti.type != .POINTER) continue;
+            tip := cast(*Type_Info_Pointer) ti;
 
-               if (identifier.pointer.untyped) {
-                  print_to_builder(*b, "\%% = OpTypeUntypedPointerKHR %\n",
-                                       ssaId,
-                                       storageClass
-                  );
-               } else {
-                  pointerToIdentifier: Identifier = .{ type = ._Type, _type = identifier.pointer.pointerTo }; // identifier of the type that the pointer points to
-                  print_to_builder(*b, "\%% = OpTypePointer % \%%\n",
-                                       ssaId,
-                                       storageClass,
-                                       GetSSAId(*data, pointerToIdentifier)
-                  );
-               }
+            storageClass := ToSpirvStorageClass(identifier._type.pointer.storageClass);
+
+            if (identifier._type.pointer.untyped) {
+               print_to_builder(*b, "\%% = OpTypeUntypedPointerKHR %\n",
+                                    ssaId,
+                                    storageClass
+               );
+            } else {
+               pointerToIdentifier: Identifier; // identifier of the type that the pointer points to
+               pointerToIdentifier = .{ type = ._Type, _type = .{ type = get_type(tip.pointer_to), pointer = .{ storageClass = identifier._type.pointer.storageClass } } };
+               print_to_builder(*b, "\%% = OpTypePointer % \%%\n",
+                                    ssaId,
+                                    storageClass,
+                                    GetSSAId(*data, pointerToIdentifier)
+               );
             }
          }
+
+         // meshVertices
+         print_to_builder(*b, "\n; meshVertices\n");
+         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshVerticesEXTOutVariable }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .Output, untyped = true } } }),
+                              ToSpirvStorageClass(.Output)
+         );
+
+         // meshTriangles
+         print_to_builder(*b, "\n; meshTriangles\n");
+         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PrimitiveTriangleIndicesEXTOutVariable }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .Output, untyped = true } } }),
+                              ToSpirvStorageClass(.Output)
+         );
+
+         // mesh vertex out variable (cant be untyped because decorated with Location)
+         print_to_builder(*b, "\n; mesh vertex out variable\n");
+         meshVertexOutVariableIdentifierType := get_type(data.meshVertexOutVariableIdentifier.variable.type);
+         assert(data.meshVertexOutVariableIdentifier.variable.type.type == .POINTER);
+         print_to_builder(*b, "\%% = OpVariable \%% %\n",
+                              GetSSAId(*data, data.meshVertexOutVariableIdentifier),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = meshVertexOutVariableIdentifierType, pointer = .{ storageClass = .Output } } }),
+                              ToSpirvStorageClass(.Output)
+         );
+
+         // mesh primitive out variable (cant be untyped because decorated with Location)
+         print_to_builder(*b, "\n; mesh primitive out variable\n");
+         meshPrimitiveOutVariableIdentifierType := get_type(data.meshPrimitiveOutVariableIdentifier.variable.type);
+         assert(data.meshPrimitiveOutVariableIdentifier.variable.type.type == .POINTER);
+         print_to_builder(*b, "\%% = OpVariable \%% %\n",
+                              GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = meshPrimitiveOutVariableIdentifierType, pointer = .{ storageClass = .Output } } }),
+                              ToSpirvStorageClass(.Output)
+         );
+
+         // image and sampler heaps
+         print_to_builder(*b, "\n; image and sampler heaps\n");
+         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .ImageHeapVariable }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } }),
+                              ToSpirvStorageClass(.UniformConstant)
+         );
+         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .SamplerHeapVariable }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } }),
+                              ToSpirvStorageClass(.UniformConstant)
+         );
+
+         // push data variable
+         print_to_builder(*b, "\n; push data variable\n");
+         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
+                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PushDataVariable }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PushConstant, untyped = true } } }),
+                              ToSpirvStorageClass(.PushConstant)
+         );
+
+         // push data struct
+         print_to_builder(*b, "\n; push data struct\n");
+         print_to_builder(*b, "\%% = OpTypeStruct \%% \%% \%%\n",
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = PushData } }),
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } }), // task
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } }), // mesh
+                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } })  // fragment
+         );
+
 
          // int constants
          print_to_builder(*b, "\n; int constants\n");
@@ -598,16 +736,16 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
                intLiteralType: Type;
                #if (false) {
                } else if (identifier.intLiteral.bitSize == 32) {
-                  intLiteralType = Intrinsics.Int32;
+                  intLiteralType = Int32;
                } else if (identifier.intLiteral.bitSize == 64) {
-                  intLiteralType = Intrinsics.Int64;
+                  intLiteralType = Int64;
                } else {
                   assert(false, "identifier.intLiteral.bitSize: %, not implemented yet!", identifier.intLiteral.bitSize);
                }
 
                print_to_builder(*b, "\%% = OpConstant \%% %\n",
                                     ssaId,
-                                    GetSSAId(*data, .{ type = ._Type, _type = intLiteralType }),
+                                    GetSSAId(*data, .{ type = ._Type, _type = .{ type = intLiteralType } }),
                                     identifier.intLiteral.value
                );
             }
@@ -619,11 +757,58 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             if identifier.type == .FloatLiteral {
                print_to_builder(*b, "\%% = OpConstant \%% %\n",
                                     ssaId,
-                                    GetSSAId(*data, .{ type = ._Type, _type = Intrinsics.Float }),
+                                    GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } }),
                                     identifier.floatLiteral
                );
             }
          }
+
+         // this is wrong. dependencies are not handled
+         //       - apila, 11/04/26
+         //
+         // struct types
+         print_to_builder(*b, "\n; struct types\n");
+         for ssaId, identifier: data.identifierToSSAId {
+            if (identifier.type != ._Type) continue;
+            ti := cast(*Type_Info) identifier._type.type;
+            if (ti.type != .STRUCT) continue;
+
+            if identifier._type.type == {
+               case Int32    ; continue;
+               case Int32x2  ; continue;
+               case Int32x3  ; continue;
+               case Int32x4  ; continue;
+               case Int64    ; continue;
+               case Int64x2  ; continue;
+               case Int64x3  ; continue;
+               case Int64x4  ; continue;
+               case Float    ; continue;
+               case Float2   ; continue;
+               case Float3   ; continue;
+               case Float4   ; continue;
+               case Float2x2 ; continue;
+               case Float3x3 ; continue;
+               case Float4x4 ; continue;
+               case PushData;  continue;
+            }
+
+            print_to_builder(*b, "\%% = OpTypeStruct",
+                                 ssaId
+            );
+
+            tis := cast(*Type_Info_Struct) ti;
+            for tis.members {
+               assert(it.type.type != .POINTER, "tis.name: %, it.name: %. user defined struct has a pointer. not implemented yet!", tis.name, it.name);
+
+               memberType := get_type(it.type);
+               print_to_builder(*b, " \%%",
+                                    GetSSAId(*data, .{ type = ._Type, _type = .{ type = memberType } })
+               );
+            }
+
+            print_to_builder(*b, "  ; %\n", tis.name);
+         }
+
 
          // functions
          print_to_builder(*b, "\n; functions\n");
@@ -652,7 +837,7 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
                            GetSSAId(data, .{ type = .Function, function = header }),
                            GetSSAId(data, .{ type = .Void }),
-                           GetSSAId(data, .{ type = ._Type, _type = #type () -> () })
+                           GetSSAId(data, .{ type = ._Type, _type = .{ type = #type () -> () } })
       );
 
       // idk what to do with the label rn
@@ -678,7 +863,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       find_or_add(*data.functions, header);
 
       returnTypeIdentifier := GetReturnTypeIdentifier(header);
-      functionTypeIdentifier: Identifier = .{ type = ._Type, _type = get_type(header.type) };
+
+      assert(header.type.type != .POINTER);
+      functionTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = get_type(header.type) } };
       print_to_builder(*b, "\n; %\n", header.name);
       print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
                            GetSSAId(data,  .{ type = .Function, function = header }),
@@ -816,7 +1003,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          ci := cast(*Code_Ident) node;
          variableSSAId := GetSSAId(data, .{ type = .Variable, variable = ci.resolved_declaration });
          resultSSAId := GetNextSSAId(data);
-         variableTypeIdentifier: Identifier = .{ type = ._Type, _type = get_type(ci.resolved_declaration.type) };
+         assert(ci.resolved_declaration.type.type != .POINTER, "this means the user declared a local pointer, not implemented yet!");
+
+         variableTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = get_type(ci.resolved_declaration.type) } };
          print_to_builder(b, "\%% = OpLoad \%% \%%\n",
                               resultSSAId,
                               GetSSAId(data, variableTypeIdentifier),
@@ -839,12 +1028,14 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                resultSSAId := GetNextSSAId(data);
 
                type := get_type(cbo.left.type);
-               typeIdentifier: Identifier = .{ type = ._Type, _type = type };
+               assert(cbo.left.type.type != .POINTER, "this means a pointer is being added (only valid with integers) but for now only same types supported so this would mean two pointers are being added. doesnt make sense");
+
+               typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = type } };
                if type == {
-                  case Intrinsics.Float;  #through;
-                  case Intrinsics.Float2; #through;
-                  case Intrinsics.Float3; #through;
-                  case Intrinsics.Float4;
+                  case Float;  #through;
+                  case Float2; #through;
+                  case Float3; #through;
+                  case Float4;
                      print_to_builder(b, "\%% = OpFAdd \%% \%% \%%\n",
                                           resultSSAId,
                                           GetSSAId(data, typeIdentifier),
@@ -852,14 +1043,14 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                                           rightId
                      );
 
-                  case Intrinsics.Int32;   #through;
-                  case Intrinsics.Int32x2; #through;
-                  case Intrinsics.Int32x3; #through;
-                  case Intrinsics.Int32x4; #through;
-                  case Intrinsics.Int64;   #through;
-                  case Intrinsics.Int64x2; #through;
-                  case Intrinsics.Int64x3; #through;
-                  case Intrinsics.Int64x4;
+                  case Int32;   #through;
+                  case Int32x2; #through;
+                  case Int32x3; #through;
+                  case Int32x4; #through;
+                  case Int64;   #through;
+                  case Int64x2; #through;
+                  case Int64x3; #through;
+                  case Int64x4;
                      print_to_builder(b, "\%% = OpIAdd \%% \%% \%%\n",
                                           resultSSAId,
                                           GetSSAId(data, typeIdentifier),
@@ -910,6 +1101,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          variableSSAId := GetSSAId(data, .{ type = .Variable, variable = cd });
          variableType := get_type(cd.type);
 
+         assert(cd.type.type != .POINTER, "a pointer is declared, not implemented yet! loc: %:%", node.l0, node.c0);
+
          NO_INITIALIZER :: -1;
          initializerSSAId: int = NO_INITIALIZER;
 
@@ -929,9 +1122,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          storageClass := StorageClass.Function;
          print_to_builder(b, "\%% = OpUntypedVariableKHR \%% % \%%",
                               variableSSAId,
-                              GetSSAId(data, .{ type = .Pointer, pointer = .{ storageClass = storageClass, pointerTo = variableType, untyped = true } }),
+                              GetSSAId(data, .{ type = ._Type, _type = .{ type = *void /* doesnt matter what it points to since untyped */, pointer = .{ storageClass = storageClass, untyped = true } } }),
                               ToSpirvStorageClass(storageClass),
-                              GetSSAId(data, .{ type = ._Type, _type = variableType })
+                              GetSSAId(data, .{ type = ._Type, _type = .{ type = variableType } })
          );
 
          if (initializerSSAId == NO_INITIALIZER) {
@@ -985,11 +1178,6 @@ GetAnnotateInfoFromStruct :: (T: Type) -> StructAnnotateInfo {
    };
 }
 
-MeshPerVertex :: struct {
-   position:   Vector4;
-   pointSize:  float;
-}
-
 // i need this function since "void" is kinda special
 GetReturnTypeIdentifier :: (header: *Code_Procedure_Header) -> Identifier {
    assert(header.returns.count <= 1);
@@ -1000,7 +1188,9 @@ GetReturnTypeIdentifier :: (header: *Code_Procedure_Header) -> Identifier {
 
    // returns count must be one here as asserted above
    returnType := get_type(header.returns[0].type);
-   return .{ type = ._Type, _type = returnType };
+   assert(header.returns[0].type.type != .POINTER, "not implemented yet!");
+
+   return .{ type = ._Type, _type = .{ type = returnType } };
 }
 
 GetNextSSAId :: (using data: *CompilationData) -> int {
@@ -1035,6 +1225,10 @@ ToSpirvOutputTopology :: (topology: string) -> string {
 ToSpirvStorageClass :: (storageClass: StorageClass) -> string {
    if #complete storageClass == {
       case .Function; return "Function";
+      case .PhysicalStorageBuffer; return "PhysicalStorageBuffer";
+      case .Output; return "Output";
+      case .PushConstant; return "PushConstant";
+      case .UniformConstant; return "UniformConstant";
    }
 
    assert(false, "storageClass: %", storageClass);
