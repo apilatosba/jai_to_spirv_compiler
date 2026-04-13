@@ -6,75 +6,76 @@ OpCapability PhysicalStorageBufferAddresses
 OpExtension "SPV_EXT_mesh_shader"
 OpExtension "SPV_EXT_descriptor_heap"
 OpExtension "SPV_KHR_untyped_pointers"
-%11 = OpExtInstImport "GLSL.std.450"
+%12 = OpExtInstImport "GLSL.std.450"
 OpMemoryModel PhysicalStorageBuffer64 GLSL450
-OpEntryPoint MeshEXT %1 "ApilaMS" %12 %13 %14 %15 %16 %17 %18
-OpExecutionModeId %1 LocalSizeId %19 %19 %19
+OpEntryPoint MeshEXT %1 "ApilaMS" %13 %14 %15 %16 %17 %18 %19
+OpExecutionModeId %1 LocalSizeId %20 %20 %20
 OpExecutionMode %1 OutputVertices 40
 OpExecutionMode %1 OutputPrimitivesEXT 20
 OpExecutionMode %1 OutputTrianglesEXT
 
 ; annotations (decorations)
-OpDecorate %20 Block
-OpMemberDecorate %20 0 BuiltIn Position
-OpMemberDecorate %20 1 BuiltIn PointSize
-OpDecorate %15 Location 0
-OpDecorate %16 Location 2
-OpDecorate %16 PerPrimitiveEXT
-OpDecorate %14 BuiltIn PrimitiveTriangleIndicesEXT
-OpDecorate %17 BuiltIn ResourceHeapEXT
-OpDecorate %18 BuiltIn SamplerHeapEXT
+OpDecorate %21 Block
+OpMemberDecorate %21 0 BuiltIn Position
+OpMemberDecorate %21 1 BuiltIn PointSize
+OpDecorate %16 Location 0
+OpDecorate %17 Location 2
+OpDecorate %17 PerPrimitiveEXT
+OpDecorate %15 BuiltIn PrimitiveTriangleIndicesEXT
+OpDecorate %18 BuiltIn ResourceHeapEXT
+OpDecorate %19 BuiltIn SamplerHeapEXT
 
 ; struct annotate infos
-OpDecorate %21 Block
-OpMemberDecorate %21 0 Offset 0
-OpMemberDecorate %21 1 Offset 8
-OpMemberDecorate %21 2 Offset 16
+OpDecorate %22 Block
+OpMemberDecorate %22 0 Offset 0
+OpMemberDecorate %22 1 Offset 8
+OpMemberDecorate %22 2 Offset 16
 
 ; Types, variables and constants
-%7 = OpTypeInt 64 1
-%22 = OpTypeInt 32 1
-%23 = OpTypeVector %22 3
-%24 = OpConstant %22 20
-%25 = OpTypeArray %23 %24
-%26 = OpTypePointer Output %{_Type, (untagged union)}
-%14 = OpVariable %26 Output
+%23 = OpTypeInt 32 1
+%24 = OpTypeVector %23 3
+%25 = OpConstant %23 20
+%26 = OpTypeArray %24 %25
+%27 = OpTypePointer Output %{_Type, (untagged union)}
+%15 = OpVariable %27 Output
 %2 = OpTypeVoid
-%27 = OpTypeStruct  ; MeshOutPrimitive
-%28 = OpTypeArray %27 %24
-%29 = OpTypePointer Output %28
-%16 = OpVariable %29 Output
-%30 = OpTypeFloat 32
-%31 = OpTypeVector %30 4
-%20 = OpTypeStruct %31 %30  ; MeshPerVertex
+%28 = OpTypeStruct  ; MeshOutPrimitive
+%29 = OpTypeArray %28 %25
+%30 = OpTypePointer Output %29
+%17 = OpVariable %30 Output
+%31 = OpTypeUntypedPointerKHR UniformConstant
+%18 = OpUntypedVariableKHR %31 UniformConstant
+%19 = OpUntypedVariableKHR %31 UniformConstant
 %3 = OpTypeFunction %2
-%32 = OpTypeUntypedPointerKHR UniformConstant
-%17 = OpUntypedVariableKHR %32 UniformConstant
-%18 = OpUntypedVariableKHR %32 UniformConstant
-%6 = OpConstant %7 10
-%33 = OpConstant %22 40
-%34 = OpTypeArray %20 %33
-%35 = OpTypePointer Output %{_Type, (untagged union)}
-%12 = OpVariable %35 Output
-%36 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
-%21 = OpTypeStruct %36 %36 %36
-%37 = OpTypeUntypedPointerKHR PushConstant
-%13 = OpUntypedVariableKHR %37 PushConstant
-%19 = OpConstant %22 1
-%39 = OpTypeVector %30 3
-%38 = OpTypeStruct %39 %31  ; MeshOutVertex
-%40 = OpTypeArray %38 %33
-%41 = OpTypePointer Output %40
-%15 = OpVariable %41 Output
+%9 = OpTypeInt 64 1
+%6 = OpConstant %9 10
+%32 = OpTypeFloat 32
+%33 = OpTypeVector %32 4
+%21 = OpTypeStruct %33 %32  ; MeshPerVertex
+%34 = OpConstant %23 40
+%35 = OpTypeArray %21 %34
+%36 = OpTypePointer Output %{_Type, (untagged union)}
+%13 = OpVariable %36 Output
+%37 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
+%22 = OpTypeStruct %37 %37 %37
+%7 = OpTypePointer Function %9
+%38 = OpTypeUntypedPointerKHR PushConstant
+%14 = OpUntypedVariableKHR %38 PushConstant
+%20 = OpConstant %23 1
+%40 = OpTypeVector %32 3
+%39 = OpTypeStruct %40 %33  ; MeshOutVertex
+%41 = OpTypeArray %39 %34
+%42 = OpTypePointer Output %41
+%16 = OpVariable %42 Output
 
 ; functions
 ; main function
 %1 = OpFunction %2 None %3
 %4 = OpLabel
 %5 = OpVariable %7 Function %6
-%8 = OpLoad %7 %5
-%9 = OpLoad %7 %5
-%10 = OpIAdd %7 %8 %9
-OpStore %5 %10
+%8 = OpLoad %9 %5
+%10 = OpLoad %9 %5
+%11 = OpIAdd %9 %8 %10
+OpStore %5 %11
 OpReturn
 OpFunctionEnd

@@ -8,8 +8,16 @@
 #run {
    set_build_options_dc(.{ do_output = false });
 
-   t: Type = int;
-   y: Type = t;
+   M :: struct { }
+   tip := New(Type_Info_Pointer);
+   tip.pointer_to = cast(*Type_Info) M;
+   tip.type = .POINTER;
+   tip.runtime_size = 8;
 
-   print("%\n", y);
+   for get_type_table() {
+      print("it: %\n", it.*);
+   }
+
+   type := get_type(tip);
+   print("%\n", type);
 }
