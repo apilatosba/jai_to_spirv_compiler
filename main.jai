@@ -5,6 +5,7 @@
 #import "Hash_Table";
 #import "Queue";
 #import "Hash";
+#import "File";
 
 MeshOutVertex :: struct {
    position: Float3;
@@ -90,6 +91,14 @@ Identifier :: struct {
                                           // and in the places where i used tip.pointer_to, i should use the Identifier stored here instead.
                                           //       - apila, 12/04/26
                                        };
+
+                           // some array views in jai i want to register as fixed arrays. it would be better to be able create a Type
+                           // in the metaprogram and use it instead of this approach. even if there is a way to do it idk it (other than adding a string during compilation).
+                           // so this make sense only if array type is .VIEW
+                           array:      struct {
+                                          fixed:   bool;
+                                          size:    int;
+                                       };
                         };
       // _void: // Void doesnt have a value
       variable:         *Code_Declaration;
@@ -99,6 +108,11 @@ Identifier :: struct {
                            PrimitiveTriangleIndicesEXTOutVariable;
                            SamplerHeapVariable;
                            ImageHeapVariable;
+                           MeshVertexOutVariableType; // i have this as a builtin thingy because the declration in the function argument doesnt match its actual type (array view vs fixed array)
+                                                      // and i had to create the type dynamically or find another way to make the ssa id and different types consistent
+                                                      // but thats gonna complicated it too much. instead i can handle this seperately if i have it as builtin thingy like this.
+                                                      //             - apila, 13/04/26
+                           MeshPrimitiveOutVariableType;
                         };
    };
 }
@@ -109,6 +123,10 @@ StorageClass :: enum {
    Output;
    PushConstant;
    UniformConstant;
+   Image;
+   Workgroup;
+   StorageBuffer;
+   Uniform;
 }
 
 main :: () {
@@ -192,6 +210,10 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
 }
 
 
+IdentifierWriteStatus :: enum {
+   BeingProcessed;
+   Written;
+}
 
 CompilationData :: struct {
    workgroupSize:                         [3] int = .[1, 1, 1];
@@ -205,6 +227,9 @@ CompilationData :: struct {
    locationsConsumedByPerVertexMeshOut:   int;
    meshVertexOutVariableIdentifier:       Identifier;
    meshPrimitiveOutVariableIdentifier:    Identifier;
+   writtenIdentifiers:                    Table(Identifier, IdentifierWriteStatus, IdentifierHash, IdentifierCompare);
+   meshVertexOutUserStruct:               Type;
+   meshPrimitiveOutUserStruct:            Type;
 
 
    HashStringArray :: (x: [] string) -> u32 {
@@ -317,11 +342,9 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             assert(pointer.pointer_to.type == .ARRAY, "first argument wrong");
             array := cast(*Type_Info_Array) pointer.pointer_to;
 
-            userStruct := get_type(array.element_type);
-            // GetSSAId(*data, .{ type = ._Type, _type = userStruct });
-
+            data.meshVertexOutUserStruct = get_type(array.element_type);
             data.meshVertexOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[index] };
-            data.locationsConsumedByPerVertexMeshOut = CalculateLocationsConsumed(userStruct);
+            data.locationsConsumedByPerVertexMeshOut = CalculateLocationsConsumed(data.meshVertexOutUserStruct);
          }
 
          // second argument: mOutPrimitive: *[] MeshOutPrimitive. MeshOutPrimitive is user defined struct
@@ -334,9 +357,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             assert(pointer.pointer_to.type == .ARRAY, "second argument wrong");
             array := cast(*Type_Info_Array) pointer.pointer_to;
 
-            userStruct := get_type(array.element_type);
-            // GetSSAId(*data, .{ type = ._Type, _type = userStruct });
-
+            data.meshPrimitiveOutUserStruct = get_type(array.element_type);
             data.meshPrimitiveOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[index] };
          }
 
@@ -408,11 +429,6 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          data.primitiveTopology = primitiveTopology;
       }
    }
-
-   // this adds this pointer type to the identifierToSSAId table so it gets outputted in "pointer types" section
-   // tho this is not the way to do it. some types/constants depend on each other so i need a frontier anyways
-   // so in the future i prolly want to move this in to the frontier
-   GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } });
 
    functions := GenerateFunctions(*data, body);
 
@@ -558,257 +574,21 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
 
 
          // Types, variables and constants
+         //
+         // the reason i need a seperate array is that WriteTypeOrVariableOrConstant might modify CompilationData.identifierToSSAId
+         // i can avoid this and can make sure that all the identifiers are already added into CompilationData.identifierToSSAId before calling
+         // WriteTypeOrVariableOrConstant but there is no need. WriteTypeOrVariableOrConstant is recursive so it suffices to iterate over what has been seen so far
+         //             - apila, 13/04/26
+         //
+         typesConstantsVariables: [..] Identifier;
+         for ssaId, identifier: data.identifierToSSAId {
+            array_add(*typesConstantsVariables, identifier);
+         }
+
          print_to_builder(*b, "\n; Types, variables and constants\n");
-         print_to_builder(*b, "\%% = OpTypeVoid\n",
-                              GetSSAId(*data, .{ type = .Void })
-         );
-         print_to_builder(*b, "\%% = OpTypeFunction \%%\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = #type () -> () } }),
-                              GetSSAId(*data, .{ type = .Void })
-         );
-         print_to_builder(*b, "\%% = OpTypeInt 32 1\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32x2 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32x3 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32x4 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int32 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeInt 64 1\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64x2 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64x3 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64x4 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Int64 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeFloat 32\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 2\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float2 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 3\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float3 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } })
-         );
-         print_to_builder(*b, "\%% = OpTypeVector \%% 4\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float4 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } })
-         );
-         print_to_builder(*b, "\%% = OpTypeMatrix \%% 2\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float2x2 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float2 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeMatrix \%% 3\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float3x3 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float3 } })
-         );
-         print_to_builder(*b, "\%% = OpTypeMatrix \%% 4\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float4x4 } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float4 } })
-         );
-
-         //
-         // so this gets processed when i am processing pointers below. meshVertices varaible type.
-         // i know i need a better way to handle dependencies but for now deal with it
-         //
-         // what i am thinking on how to implement identifier dependecies is that each identifier will be a graph node
-         // and i will have an edge from A to B if A depends on B. and i will traverse the graph until i find the first node where all its dependencies
-         // written already and then write and repeat until all nodes are written. here a node something like this struct { dependencies: [] *Node; i: Identifier; written: bool; };
-         //
-         GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .Output, untyped = true } } });
-         GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PushConstant, untyped = true } } });
-         GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } });
-
-         // pointer types
-         print_to_builder(*b, "\n; pointer types\n");
-         for ssaId, identifier: data.identifierToSSAId {
-            if (identifier.type != ._Type) continue;
-            ti := cast(*Type_Info) identifier._type.type;
-            if (ti.type != .POINTER) continue;
-            tip := cast(*Type_Info_Pointer) ti;
-
-            storageClass := ToSpirvStorageClass(identifier._type.pointer.storageClass);
-
-            if (identifier._type.pointer.untyped) {
-               print_to_builder(*b, "\%% = OpTypeUntypedPointerKHR %\n",
-                                    ssaId,
-                                    storageClass
-               );
-            } else {
-               pointerToIdentifier: Identifier; // identifier of the type that the pointer points to
-               pointerToIdentifier = .{ type = ._Type, _type = .{ type = get_type(tip.pointer_to), pointer = .{ storageClass = identifier._type.pointer.storageClass } } };
-               print_to_builder(*b, "\%% = OpTypePointer % \%%\n",
-                                    ssaId,
-                                    storageClass,
-                                    GetSSAId(*data, pointerToIdentifier)
-               );
-            }
+         for typesConstantsVariables {
+            WriteTypeOrVariableOrConstant(*data, *b, it);
          }
-
-         // meshVertices
-         print_to_builder(*b, "\n; meshVertices\n");
-         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshVerticesEXTOutVariable }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .Output, untyped = true } } }),
-                              ToSpirvStorageClass(.Output)
-         );
-
-         // meshTriangles
-         print_to_builder(*b, "\n; meshTriangles\n");
-         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PrimitiveTriangleIndicesEXTOutVariable }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .Output, untyped = true } } }),
-                              ToSpirvStorageClass(.Output)
-         );
-
-         // mesh vertex out variable (cant be untyped because decorated with Location)
-         print_to_builder(*b, "\n; mesh vertex out variable\n");
-         meshVertexOutVariableIdentifierType := get_type(data.meshVertexOutVariableIdentifier.variable.type);
-         assert(data.meshVertexOutVariableIdentifier.variable.type.type == .POINTER);
-         print_to_builder(*b, "\%% = OpVariable \%% %\n",
-                              GetSSAId(*data, data.meshVertexOutVariableIdentifier),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = meshVertexOutVariableIdentifierType, pointer = .{ storageClass = .Output } } }),
-                              ToSpirvStorageClass(.Output)
-         );
-
-         // mesh primitive out variable (cant be untyped because decorated with Location)
-         print_to_builder(*b, "\n; mesh primitive out variable\n");
-         meshPrimitiveOutVariableIdentifierType := get_type(data.meshPrimitiveOutVariableIdentifier.variable.type);
-         assert(data.meshPrimitiveOutVariableIdentifier.variable.type.type == .POINTER);
-         print_to_builder(*b, "\%% = OpVariable \%% %\n",
-                              GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = meshPrimitiveOutVariableIdentifierType, pointer = .{ storageClass = .Output } } }),
-                              ToSpirvStorageClass(.Output)
-         );
-
-         // image and sampler heaps
-         print_to_builder(*b, "\n; image and sampler heaps\n");
-         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .ImageHeapVariable }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } }),
-                              ToSpirvStorageClass(.UniformConstant)
-         );
-         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .SamplerHeapVariable }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } }),
-                              ToSpirvStorageClass(.UniformConstant)
-         );
-
-         // push data variable
-         print_to_builder(*b, "\n; push data variable\n");
-         print_to_builder(*b, "\%% = OpUntypedVariableKHR \%% %\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PushDataVariable }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PushConstant, untyped = true } } }),
-                              ToSpirvStorageClass(.PushConstant)
-         );
-
-         // push data struct
-         print_to_builder(*b, "\n; push data struct\n");
-         print_to_builder(*b, "\%% = OpTypeStruct \%% \%% \%%\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = PushData } }),
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } }), // task
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } }), // mesh
-                              GetSSAId(*data, .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } })  // fragment
-         );
-
-
-         // int constants
-         print_to_builder(*b, "\n; int constants\n");
-         for ssaId, identifier: data.identifierToSSAId {
-            if identifier.type == .IntLiteral {
-               intLiteralType: Type;
-               #if (false) {
-               } else if (identifier.intLiteral.bitSize == 32) {
-                  intLiteralType = Int32;
-               } else if (identifier.intLiteral.bitSize == 64) {
-                  intLiteralType = Int64;
-               } else {
-                  assert(false, "identifier.intLiteral.bitSize: %, not implemented yet!", identifier.intLiteral.bitSize);
-               }
-
-               print_to_builder(*b, "\%% = OpConstant \%% %\n",
-                                    ssaId,
-                                    GetSSAId(*data, .{ type = ._Type, _type = .{ type = intLiteralType } }),
-                                    identifier.intLiteral.value
-               );
-            }
-         }
-
-         // float constants
-         print_to_builder(*b, "\n; float constants\n");
-         for ssaId, identifier: data.identifierToSSAId {
-            if identifier.type == .FloatLiteral {
-               print_to_builder(*b, "\%% = OpConstant \%% %\n",
-                                    ssaId,
-                                    GetSSAId(*data, .{ type = ._Type, _type = .{ type = Float } }),
-                                    identifier.floatLiteral
-               );
-            }
-         }
-
-         // this is wrong. dependencies are not handled
-         //       - apila, 11/04/26
-         //
-         // struct types
-         print_to_builder(*b, "\n; struct types\n");
-         for ssaId, identifier: data.identifierToSSAId {
-            if (identifier.type != ._Type) continue;
-            ti := cast(*Type_Info) identifier._type.type;
-            if (ti.type != .STRUCT) continue;
-
-            if identifier._type.type == {
-               case Int32    ; continue;
-               case Int32x2  ; continue;
-               case Int32x3  ; continue;
-               case Int32x4  ; continue;
-               case Int64    ; continue;
-               case Int64x2  ; continue;
-               case Int64x3  ; continue;
-               case Int64x4  ; continue;
-               case Float    ; continue;
-               case Float2   ; continue;
-               case Float3   ; continue;
-               case Float4   ; continue;
-               case Float2x2 ; continue;
-               case Float3x3 ; continue;
-               case Float4x4 ; continue;
-               case PushData;  continue;
-            }
-
-            print_to_builder(*b, "\%% = OpTypeStruct",
-                                 ssaId
-            );
-
-            tis := cast(*Type_Info_Struct) ti;
-            for tis.members {
-               assert(it.type.type != .POINTER, "tis.name: %, it.name: %. user defined struct has a pointer. not implemented yet!", tis.name, it.name);
-
-               memberType := get_type(it.type);
-               print_to_builder(*b, " \%%",
-                                    GetSSAId(*data, .{ type = ._Type, _type = .{ type = memberType } })
-               );
-            }
-
-            print_to_builder(*b, "  ; %\n", tis.name);
-         }
-
 
          // functions
          print_to_builder(*b, "\n; functions\n");
@@ -818,10 +598,511 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
 
    spirvasm := builder_to_string(*b);
    print("%", spirvasm);
-   #import "File";
    write_entire_file("jai.spvasm", spirvasm);
 
    return .{};
+}
+
+// this function is called for every identifier that exists in the shader program
+// this function writes to "Types, variables and constants" block, so if an identifier doesnt go in that block this function should ignore and skip that identifier instead of asserting.
+// i first thought that i should call this functions only on identifiers that goes into the "Types, variables and constants" block, but it is easier to let pass every identifier to this function
+// and this function just skips if an identifier doesnt go to the "Types, variables and constants" block instead of asserting false.
+//          - apila, 13/04/26
+WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, identifier: Identifier) {
+   currentStatus := table_find_pointer(*data.writtenIdentifiers, identifier);
+   if (currentStatus != null) {
+      if (false) {
+      } else if (currentStatus.* == .BeingProcessed) {
+         assert(false, "identifier: %. recursion detected. a type depends on itself.", identifier);
+      } else if (currentStatus.* == .Written) {
+         return;
+      }
+   }
+
+   status, newlyAdded := find_or_add(*data.writtenIdentifiers, identifier);
+   assert(newlyAdded);
+   status.* = .BeingProcessed;
+
+   defer {
+      status = table_find_pointer(*data.writtenIdentifiers, identifier);
+      assert(status != null);
+      status.* = .Written;
+   }
+
+   if #complete identifier.type == {
+      case .IntLiteral;
+         intLiteralType: Type;
+         #if (false) {
+         } else if (identifier.intLiteral.bitSize == 32) {
+            intLiteralType = Int32;
+         } else if (identifier.intLiteral.bitSize == 64) {
+            intLiteralType = Int64;
+         } else {
+            assert(false, "identifier.intLiteral.bitSize: %, not implemented yet!", identifier.intLiteral.bitSize);
+         }
+
+         intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = intLiteralType } };
+         WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+
+         print_to_builder(b, "\%% = OpConstant \%% %\n",
+                              GetSSAId(data, identifier),
+                              GetSSAId(data, intIdentifier),
+                              identifier.intLiteral.value
+         );
+
+      case .FloatLiteral;
+         floatIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Float } };
+         WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
+
+         print_to_builder(b, "\%% = OpConstant \%% %\n",
+                              GetSSAId(data, identifier),
+                              GetSSAId(data, floatIdentifier),
+                              identifier.floatLiteral
+         );
+      case .Function;
+         return;
+         // assert(false, "identifier: %. this is not where you write functions!", identifier);
+      case ._Type;
+         type := identifier._type.type;
+
+         // intrinsics
+         if type == {
+            case Int32    ;
+               print_to_builder(b, "\%% = OpTypeInt 32 1\n",
+                                    GetSSAId(data, identifier)
+               );
+               return;
+            case Int32x2  ;
+               intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Int32 } };
+               WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+
+               print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, intIdentifier)
+               );
+               return;
+            case Int32x3  ;
+               intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Int32 } };
+               WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+               print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, intIdentifier)
+               );
+               return;
+            case Int32x4  ;
+               intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Int32 } };
+               WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+               print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, intIdentifier)
+               );
+               return;
+            case Int64    ;
+               print_to_builder(b, "\%% = OpTypeInt 64 1\n",
+                                    GetSSAId(data, identifier)
+               );
+               return;
+            case Int64x2  ;
+               intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Int64 } };
+               WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+
+               print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, intIdentifier)
+               );
+               return;
+            case Int64x3  ;
+               intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Int64 } };
+               WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+               print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, intIdentifier)
+               );
+               return;
+            case Int64x4  ;
+               intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Int64 } };
+               WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+               print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, intIdentifier)
+               );
+               return;
+            case Float    ;
+               print_to_builder(b, "\%% = OpTypeFloat 32\n",
+                                    GetSSAId(data, identifier)
+               );
+               return;
+            case Float2   ;
+               floatIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Float } };
+               WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
+
+               print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, floatIdentifier)
+               );
+               return;
+            case Float3   ;
+               floatIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Float } };
+               WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
+               print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, floatIdentifier)
+               );
+               return;
+            case Float4   ;
+               floatIdentifier: Identifier = .{ type = ._Type, _type = .{ type = Float } };
+               WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
+               print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, floatIdentifier)
+               );
+               return;
+            case Float2x2 ;
+               float2Identifier: Identifier = .{ type = ._Type, _type = .{ type = Float2 } };
+               WriteTypeOrVariableOrConstant(data, b, float2Identifier);
+
+               print_to_builder(b, "\%% = OpTypeMatrix \%% 2\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, float2Identifier)
+               );
+               return;
+            case Float3x3 ;
+               float3Identifier: Identifier = .{ type = ._Type, _type = .{ type = Float3 } };
+               WriteTypeOrVariableOrConstant(data, b, float3Identifier);
+
+               print_to_builder(b, "\%% = OpTypeMatrix \%% 3\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, float3Identifier)
+               );
+               return;
+            case Float4x4 ;
+               float4Identifier: Identifier = .{ type = ._Type, _type = .{ type = Float4 } };
+               WriteTypeOrVariableOrConstant(data, b, float4Identifier);
+
+               print_to_builder(b, "\%% = OpTypeMatrix \%% 4\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, float4Identifier)
+               );
+               return;
+            case PushData;
+               voidStar: Identifier = .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PhysicalStorageBuffer, untyped = true } } };
+               WriteTypeOrVariableOrConstant(data, b, voidStar);
+
+               print_to_builder(b, "\%% = OpTypeStruct \%% \%% \%%\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, voidStar), // task
+                                    GetSSAId(data, voidStar), // mesh
+                                    GetSSAId(data, voidStar)  // fragment
+               );
+               return;
+         }
+
+         ti := cast(*Type_Info) type;
+         if (ti.type == .POINTER) {
+            tip := cast(*Type_Info_Pointer) ti;
+            pointer := identifier._type.pointer;
+
+            storageClass := ToSpirvStorageClass(pointer.storageClass);
+
+            if (pointer.untyped) {
+               // VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417
+               // The Storage Class of OpTypeUntypedPointerKHR must be Image, UniformConstant,Workgroup, StorageBuffer, Uniform, PushConstant, or PhysicalStorageBuffer
+               assert(pointer.storageClass == .Image || pointer.storageClass == .UniformConstant || pointer.storageClass == .Workgroup ||
+                     pointer.storageClass == .StorageBuffer || pointer.storageClass == .Uniform || pointer.storageClass == .PushConstant ||
+                     pointer.storageClass == .PhysicalStorageBuffer,
+                     "storageClass: %, type: %", storageClass, type
+               );
+
+               print_to_builder(b, "\%% = OpTypeUntypedPointerKHR %\n",
+                                    GetSSAId(data, identifier),
+                                    storageClass
+               );
+            } else {
+               pointerToIdentifier: Identifier; // identifier of the type that the pointer points to
+               pointerToIdentifier = .{ type = ._Type, _type = .{ type = get_type(tip.pointer_to), pointer = .{ storageClass = identifier._type.pointer.storageClass } } };
+               WriteTypeOrVariableOrConstant(data, b, pointerToIdentifier);
+
+               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
+                                    GetSSAId(data, identifier),
+                                    storageClass,
+                                    GetSSAId(data, pointerToIdentifier)
+               );
+            }
+
+            return;
+         }
+
+         if (ti.type == .STRUCT) {
+            tis := cast(*Type_Info_Struct) ti;
+
+            if type == {
+               case Int32    ; assert(false, "sanity check");
+               case Int32x2  ; assert(false, "sanity check");
+               case Int32x3  ; assert(false, "sanity check");
+               case Int32x4  ; assert(false, "sanity check");
+               case Int64    ; assert(false, "sanity check");
+               case Int64x2  ; assert(false, "sanity check");
+               case Int64x3  ; assert(false, "sanity check");
+               case Int64x4  ; assert(false, "sanity check");
+               case Float    ; assert(false, "sanity check");
+               case Float2   ; assert(false, "sanity check");
+               case Float3   ; assert(false, "sanity check");
+               case Float4   ; assert(false, "sanity check");
+               case Float2x2 ; assert(false, "sanity check");
+               case Float3x3 ; assert(false, "sanity check");
+               case Float4x4 ; assert(false, "sanity check");
+               case PushData;  assert(false, "sanity check");
+            }
+
+            structBuilder: String_Builder;
+
+            print_to_builder(*structBuilder, "\%% = OpTypeStruct",
+                                             GetSSAId(data, identifier)
+            );
+
+            for tis.members {
+               assert(it.type.type != .POINTER, "tis.name: %, it.name: %. user defined struct has a pointer. not implemented yet!", tis.name, it.name);
+
+               memberType := get_type(it.type);
+               memberTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = memberType } };
+               WriteTypeOrVariableOrConstant(data, b, memberTypeIdentifier);
+
+               print_to_builder(*structBuilder, " \%%",
+                                                GetSSAId(data, memberTypeIdentifier)
+               );
+            }
+
+            print_to_builder(*structBuilder, "  ; %\n", tis.name);
+
+            append_and_steal_buffers(b, *structBuilder);
+            return;
+         }
+
+         if (ti.type == .PROCEDURE) {
+            tip := cast(*Type_Info_Procedure) ti;
+
+            returnTypeIdentifier := GetReturnTypeIdentifier(tip);
+            WriteTypeOrVariableOrConstant(data, b, returnTypeIdentifier);
+
+            functionBuilder: String_Builder;
+
+            print_to_builder(*functionBuilder, "\%% = OpTypeFunction \%%",
+                                                GetSSAId(data, identifier),
+                                                GetSSAId(data, returnTypeIdentifier)
+            );
+
+            for tip.argument_types {
+               assert(it.type != .POINTER, "function takes a pointer. not implemented yet!");
+
+               argumentType := get_type(it);
+               argumentTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = argumentType } };
+               WriteTypeOrVariableOrConstant(data, b, argumentTypeIdentifier);
+
+               print_to_builder(*functionBuilder, " \%%",
+                                                   GetSSAId(data, argumentTypeIdentifier)
+               );
+            }
+
+            print_to_builder(*functionBuilder, "\n");
+            append_and_steal_buffers(b, *functionBuilder);
+            return;
+         }
+
+         if (ti.type == .ARRAY) {
+            tia := cast(*Type_Info_Array) ti;
+            array := identifier._type.array;
+
+            fixed := tia.array_type == .FIXED || (tia.array_type == .VIEW && array.fixed);
+            assert(fixed, "array type: %. .VIEW is basically a fat pointer, i will support it when i support pointers. .RESIZABLE is i think kaputt, dont use it.", tia.array_type);
+
+            if (fixed) {
+               elementType := get_type(tia.element_type);
+               assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. idk if an array of pointers", tia.element_type.type);
+               elementTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = elementType } };
+               WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
+
+               arraySize: int;
+               if (tia.array_type == .FIXED) {
+                  arraySize = tia.array_count;
+               } else {
+                  arraySize = array.size;
+               }
+
+               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value = arraySize, bitSize = 32 } };
+               WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
+
+               print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, elementTypeIdentifier),
+                                    GetSSAId(data, arraySizeIdentifier)
+               );
+            }
+
+            return;
+         }
+
+         // not every type is going to be written, so skipping some is fine. this is for debugging
+         print("WARNING    type: %. skipped!\n", type);
+
+      case .Void;
+         print_to_builder(b, "\%% = OpTypeVoid\n",
+                              GetSSAId(data, .{ type = .Void })
+         );
+
+      case .Variable;
+         if (false) {
+         } else if (IdentifierCompare(identifier, data.meshVertexOutVariableIdentifier)) {
+            meshVertexOutVariableIdentifierType := get_type(data.meshVertexOutVariableIdentifier.variable.type);
+            assert(data.meshVertexOutVariableIdentifier.variable.type.type == .POINTER);
+
+            typeIdentifier: Identifier = .{ type = .BuiltinThingies, builtinThingies = .MeshVertexOutVariableType };
+            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+            print_to_builder(b, "\%% = OpVariable \%% %\n",
+                                 GetSSAId(data, identifier),
+                                 GetSSAId(data, typeIdentifier),
+                                 ToSpirvStorageClass(.Output)
+            );
+         } else if (IdentifierCompare(identifier, data.meshPrimitiveOutVariableIdentifier)) {
+            meshPrimitiveOutVariableIdentifierType := get_type(data.meshPrimitiveOutVariableIdentifier.variable.type);
+            assert(data.meshPrimitiveOutVariableIdentifier.variable.type.type == .POINTER);
+
+            typeIdentifier: Identifier = .{ type = .BuiltinThingies, builtinThingies = .MeshPrimitiveOutVariableType };
+            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+            print_to_builder(b, "\%% = OpVariable \%% %\n",
+                                 GetSSAId(data, data.meshPrimitiveOutVariableIdentifier),
+                                 GetSSAId(data, typeIdentifier),
+                                 ToSpirvStorageClass(.Output)
+            );
+         } else {
+            // assert(false, "identifier: %. i guess all variables in \"Types, variables and constants\" block is builtin (user cant define a variable that goes in this block, i think)", identifier);
+            print("WARNING    variable: %. skipped!\n", identifier.variable.*);
+            return;
+         }
+      case .BuiltinThingies;
+         if #complete identifier.builtinThingies == {
+            case .MeshVerticesEXTOutVariable;
+               // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
+
+               // *[] MeshPerVertex
+
+               arrayIdentifier: Identifier = .{ type = ._Type, _type = .{ type = [] MeshPerVertex, array = .{ fixed = true, size = data.maxVertices } } };
+               WriteTypeOrVariableOrConstant(data, b, arrayIdentifier);
+
+               typeSSAId := GetNextSSAId(data); // ssa id of *[max vertices] MeshPerVertex output. fine to not have an identifier since only used here
+
+               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
+                                    typeSSAId,
+                                    ToSpirvStorageClass(.Output),
+                                    arrayIdentifier
+               );
+
+               print_to_builder(b, "\%% = OpVariable \%% %\n",
+                                    GetSSAId(data, identifier),
+                                    typeSSAId,
+                                    ToSpirvStorageClass(.Output)
+               );
+
+            case .PushDataVariable;
+               typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .PushConstant, untyped = true } } };
+               WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, typeIdentifier),
+                                    ToSpirvStorageClass(.PushConstant)
+               );
+
+            case .PrimitiveTriangleIndicesEXTOutVariable;
+               // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
+
+               // *[] uint3    if triangles
+               // *[] uint2    if lines
+               // *[] uint     if points
+
+               arrayIdentifier: Identifier = .{ type = ._Type, _type = .{ type = [] Int32x3, array = .{ fixed = true, size = data.maxPrimitives } } };
+               WriteTypeOrVariableOrConstant(data, b, arrayIdentifier);
+
+               typeSSAId := GetNextSSAId(data); // ssa id of *[max primitives] uint3 output. fine to not have an identifier since only used here
+
+               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
+                                    typeSSAId,
+                                    ToSpirvStorageClass(.Output),
+                                    arrayIdentifier
+               );
+
+               print_to_builder(b, "\%% = OpVariable \%% %\n",
+                                    GetSSAId(data, identifier),
+                                    typeSSAId,
+                                    ToSpirvStorageClass(.Output)
+               );
+
+            case .SamplerHeapVariable;
+               typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } };
+               WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, typeIdentifier),
+                                    ToSpirvStorageClass(.UniformConstant)
+               );
+
+            case .ImageHeapVariable;
+               typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } };
+               WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %\n",
+                                    GetSSAId(data, identifier),
+                                    GetSSAId(data, typeIdentifier),
+                                    ToSpirvStorageClass(.UniformConstant)
+               );
+
+            case .MeshVertexOutVariableType;
+               // *[] MeshVertexOut
+
+               meshVertexOutUserStructTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = data.meshVertexOutUserStruct } };
+               WriteTypeOrVariableOrConstant(data, b, meshVertexOutUserStructTypeIdentifier);
+
+               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value = data.maxVertices, bitSize = 32 } };
+               WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
+
+               arrayTypeSSAId := GetNextSSAId(data); // not having an identifier for this since it is only used here
+               print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
+                                    arrayTypeSSAId,
+                                    GetSSAId(data, meshVertexOutUserStructTypeIdentifier),
+                                    GetSSAId(data, arraySizeIdentifier)
+               );
+
+               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
+                                    GetSSAId(data, identifier),
+                                    ToSpirvStorageClass(.Output),
+                                    arrayTypeSSAId
+               );
+
+            case .MeshPrimitiveOutVariableType;
+               // *[] MeshPrimitiveOut
+
+               meshPrimitiveOutUserStructIdentifier: Identifier = .{ type = ._Type, _type = .{ type = data.meshPrimitiveOutUserStruct } };
+               WriteTypeOrVariableOrConstant(data, b, meshPrimitiveOutUserStructIdentifier);
+
+               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value = data.maxPrimitives, bitSize = 32 } };
+               WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
+
+               arrayTypeSSAId := GetNextSSAId(data); // not having an identifier for this since it is only used here
+               print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
+                                    arrayTypeSSAId,
+                                    GetSSAId(data, meshPrimitiveOutUserStructIdentifier),
+                                    GetSSAId(data, arraySizeIdentifier)
+               );
+
+               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
+                                    GetSSAId(data, identifier),
+                                    ToSpirvStorageClass(.Output),
+                                    arrayTypeSSAId
+               );
+         }
+   }
 }
 
 GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> string {
@@ -862,7 +1143,7 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
 
       find_or_add(*data.functions, header);
 
-      returnTypeIdentifier := GetReturnTypeIdentifier(header);
+      returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
 
       assert(header.type.type != .POINTER);
       functionTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = get_type(header.type) } };
@@ -1120,11 +1401,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          }
 
          storageClass := StorageClass.Function;
-         print_to_builder(b, "\%% = OpUntypedVariableKHR \%% % \%%",
+         // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
+
+         print_to_builder(b, "\%% = OpVariable \%% %",
                               variableSSAId,
-                              GetSSAId(data, .{ type = ._Type, _type = .{ type = *void /* doesnt matter what it points to since untyped */, pointer = .{ storageClass = storageClass, untyped = true } } }),
+                              GetSSAId(data, .{ type = ._Type, _type = .{ type = variableType, pointer = .{ storageClass = storageClass } } }),
                               ToSpirvStorageClass(storageClass),
-                              GetSSAId(data, .{ type = ._Type, _type = .{ type = variableType } })
          );
 
          if (initializerSSAId == NO_INITIALIZER) {
@@ -1179,17 +1461,19 @@ GetAnnotateInfoFromStruct :: (T: Type) -> StructAnnotateInfo {
 }
 
 // i need this function since "void" is kinda special
-GetReturnTypeIdentifier :: (header: *Code_Procedure_Header) -> Identifier {
-   assert(header.returns.count <= 1);
+GetReturnTypeIdentifier :: (tip: *Type_Info_Procedure) -> Identifier {
+   assert(tip.type == .PROCEDURE); // if passed via cast from *Type_Info
+   assert(tip.return_types.count <= 1);
 
-   if (header.returns.count == 0) {
+   if (tip.return_types.count == 0) {
       return .{ type = .Void };
    }
 
-   // returns count must be one here as asserted above
-   returnType := get_type(header.returns[0].type);
-   assert(header.returns[0].type.type != .POINTER, "not implemented yet!");
+   // returns count must be one here as asserted above (combined with if case)
+   tiReturn := tip.return_types[0];
+   assert(tiReturn.type != .POINTER, "not implemented yet!");
 
+   returnType := get_type(tiReturn);
    return .{ type = ._Type, _type = .{ type = returnType } };
 }
 
@@ -1229,6 +1513,10 @@ ToSpirvStorageClass :: (storageClass: StorageClass) -> string {
       case .Output; return "Output";
       case .PushConstant; return "PushConstant";
       case .UniformConstant; return "UniformConstant";
+      case .Image; return "Image";
+      case .Workgroup; return "Workgroup";
+      case .StorageBuffer; return "StorageBuffer";
+      case .Uniform; return "Uniform";
    }
 
    assert(false, "storageClass: %", storageClass);

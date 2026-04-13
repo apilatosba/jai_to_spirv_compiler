@@ -6,96 +6,75 @@ OpCapability PhysicalStorageBufferAddresses
 OpExtension "SPV_EXT_mesh_shader"
 OpExtension "SPV_EXT_descriptor_heap"
 OpExtension "SPV_KHR_untyped_pointers"
-%13 = OpExtInstImport "GLSL.std.450"
+%11 = OpExtInstImport "GLSL.std.450"
 OpMemoryModel PhysicalStorageBuffer64 GLSL450
-OpEntryPoint MeshEXT %2 "ApilaMS" %14 %15 %16 %17 %18 %19 %20
-OpExecutionModeId %2 LocalSizeId %21 %21 %21
-OpExecutionMode %2 OutputVertices 40
-OpExecutionMode %2 OutputPrimitivesEXT 20
-OpExecutionMode %2 OutputTrianglesEXT
+OpEntryPoint MeshEXT %1 "ApilaMS" %12 %13 %14 %15 %16 %17 %18
+OpExecutionModeId %1 LocalSizeId %19 %19 %19
+OpExecutionMode %1 OutputVertices 40
+OpExecutionMode %1 OutputPrimitivesEXT 20
+OpExecutionMode %1 OutputTrianglesEXT
 
 ; annotations (decorations)
-OpDecorate %22 Block
-OpMemberDecorate %22 0 BuiltIn Position
-OpMemberDecorate %22 1 BuiltIn PointSize
-OpDecorate %17 Location 0
-OpDecorate %18 Location 2
-OpDecorate %18 PerPrimitiveEXT
-OpDecorate %16 BuiltIn PrimitiveTriangleIndicesEXT
-OpDecorate %19 BuiltIn ResourceHeapEXT
-OpDecorate %20 BuiltIn SamplerHeapEXT
+OpDecorate %20 Block
+OpMemberDecorate %20 0 BuiltIn Position
+OpMemberDecorate %20 1 BuiltIn PointSize
+OpDecorate %15 Location 0
+OpDecorate %16 Location 2
+OpDecorate %16 PerPrimitiveEXT
+OpDecorate %14 BuiltIn PrimitiveTriangleIndicesEXT
+OpDecorate %17 BuiltIn ResourceHeapEXT
+OpDecorate %18 BuiltIn SamplerHeapEXT
 
 ; struct annotate infos
-OpDecorate %23 Block
-OpMemberDecorate %23 0 Offset 0
-OpMemberDecorate %23 1 Offset 8
-OpMemberDecorate %23 2 Offset 16
+OpDecorate %21 Block
+OpMemberDecorate %21 0 Offset 0
+OpMemberDecorate %21 1 Offset 8
+OpMemberDecorate %21 2 Offset 16
 
 ; Types, variables and constants
-%3 = OpTypeVoid
-%4 = OpTypeFunction %3
-%24 = OpTypeInt 32 1
-%25 = OpTypeVector %24 2
-%26 = OpTypeVector %24 3
-%27 = OpTypeVector %24 4
-%9 = OpTypeInt 64 1
-%28 = OpTypeVector %9 2
-%29 = OpTypeVector %9 3
-%30 = OpTypeVector %9 4
-%31 = OpTypeFloat 32
-%32 = OpTypeVector %31 2
-%33 = OpTypeVector %31 3
-%34 = OpTypeVector %31 4
-%35 = OpTypeMatrix %32 2
-%36 = OpTypeMatrix %33 3
-%37 = OpTypeMatrix %34 4
-
-; pointer types
-%38 = OpTypeUntypedPointerKHR Output
-%39 = OpTypeUntypedPointerKHR PushConstant
-%40 = OpTypeUntypedPointerKHR UniformConstant
-%8 = OpTypeUntypedPointerKHR Function
-%1 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
-
-; meshVertices
-%14 = OpUntypedVariableKHR %38 Output
-
-; meshTriangles
-%16 = OpUntypedVariableKHR %38 Output
-
-; mesh vertex out variable
-%17 = OpVariable %41 Output
-
-; mesh primitive out variable
-%18 = OpVariable %42 Output
-
-; image and sampler heaps
-%19 = OpUntypedVariableKHR %40 UniformConstant
-%20 = OpUntypedVariableKHR %40 UniformConstant
-
-; push data variable
-%15 = OpUntypedVariableKHR %39 PushConstant
-
-; push data struct
-%23 = OpTypeStruct %1 %1 %1
-
-; int constants
-%7 = OpConstant %9 10
-%21 = OpConstant %24 1
-
-; float constants
-
-; struct types
-%22 = OpTypeStruct %34 %31  ; MeshPerVertex
+%7 = OpTypeInt 64 1
+%22 = OpTypeInt 32 1
+%23 = OpTypeVector %22 3
+%24 = OpConstant %22 20
+%25 = OpTypeArray %23 %24
+%26 = OpTypePointer Output %{_Type, (untagged union)}
+%14 = OpVariable %26 Output
+%2 = OpTypeVoid
+%27 = OpTypeStruct  ; MeshOutPrimitive
+%28 = OpTypeArray %27 %24
+%29 = OpTypePointer Output %28
+%16 = OpVariable %29 Output
+%30 = OpTypeFloat 32
+%31 = OpTypeVector %30 4
+%20 = OpTypeStruct %31 %30  ; MeshPerVertex
+%3 = OpTypeFunction %2
+%32 = OpTypeUntypedPointerKHR UniformConstant
+%17 = OpUntypedVariableKHR %32 UniformConstant
+%18 = OpUntypedVariableKHR %32 UniformConstant
+%6 = OpConstant %7 10
+%33 = OpConstant %22 40
+%34 = OpTypeArray %20 %33
+%35 = OpTypePointer Output %{_Type, (untagged union)}
+%12 = OpVariable %35 Output
+%36 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
+%21 = OpTypeStruct %36 %36 %36
+%37 = OpTypeUntypedPointerKHR PushConstant
+%13 = OpUntypedVariableKHR %37 PushConstant
+%19 = OpConstant %22 1
+%39 = OpTypeVector %30 3
+%38 = OpTypeStruct %39 %31  ; MeshOutVertex
+%40 = OpTypeArray %38 %33
+%41 = OpTypePointer Output %40
+%15 = OpVariable %41 Output
 
 ; functions
 ; main function
-%2 = OpFunction %3 None %4
-%5 = OpLabel
-%6 = OpUntypedVariableKHR %8 Function %9 %7
-%10 = OpLoad %9 %6
-%11 = OpLoad %9 %6
-%12 = OpIAdd %9 %10 %11
-OpStore %6 %12
+%1 = OpFunction %2 None %3
+%4 = OpLabel
+%5 = OpVariable %7 Function %6
+%8 = OpLoad %7 %5
+%9 = OpLoad %7 %5
+%10 = OpIAdd %7 %8 %9
+OpStore %5 %10
 OpReturn
 OpFunctionEnd
