@@ -32,41 +32,41 @@ OpMemberDecorate %22 1 Offset 8
 OpMemberDecorate %22 2 Offset 16
 
 ; Types, variables and constants
+%9 = OpTypeInt 64 1
+%7 = OpTypePointer Function %9
 %23 = OpTypeInt 32 1
 %24 = OpTypeVector %23 3
 %25 = OpConstant %23 20
 %26 = OpTypeArray %24 %25
-%27 = OpTypePointer Output %{_Type, (untagged union)}
+%27 = OpTypePointer Output %26
 %15 = OpVariable %27 Output
+%28 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
+%22 = OpTypeStruct %28 %28 %28
 %2 = OpTypeVoid
-%28 = OpTypeStruct  ; MeshOutPrimitive
-%29 = OpTypeArray %28 %25
-%30 = OpTypePointer Output %29
-%17 = OpVariable %30 Output
-%31 = OpTypeUntypedPointerKHR UniformConstant
-%18 = OpUntypedVariableKHR %31 UniformConstant
-%19 = OpUntypedVariableKHR %31 UniformConstant
-%3 = OpTypeFunction %2
-%9 = OpTypeInt 64 1
+%29 = OpTypeStruct  ; MeshOutPrimitive
+%30 = OpTypeArray %29 %25
+%31 = OpTypePointer Output %30
+%17 = OpVariable %31 Output
+%32 = OpTypeUntypedPointerKHR UniformConstant
+%18 = OpUntypedVariableKHR %32 UniformConstant
+%19 = OpUntypedVariableKHR %32 UniformConstant
 %6 = OpConstant %9 10
-%32 = OpTypeFloat 32
-%33 = OpTypeVector %32 4
-%21 = OpTypeStruct %33 %32  ; MeshPerVertex
-%34 = OpConstant %23 40
-%35 = OpTypeArray %21 %34
-%36 = OpTypePointer Output %{_Type, (untagged union)}
-%13 = OpVariable %36 Output
-%37 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
-%22 = OpTypeStruct %37 %37 %37
-%7 = OpTypePointer Function %9
+%33 = OpTypeFloat 32
+%34 = OpTypeVector %33 4
+%21 = OpTypeStruct %34 %33  ; MeshPerVertex
+%35 = OpConstant %23 40
+%36 = OpTypeArray %21 %35
+%37 = OpTypePointer Output %36
+%13 = OpVariable %37 Output
 %38 = OpTypeUntypedPointerKHR PushConstant
-%14 = OpUntypedVariableKHR %38 PushConstant
+%14 = OpUntypedVariableKHR %38 PushConstant %22
 %20 = OpConstant %23 1
-%40 = OpTypeVector %32 3
-%39 = OpTypeStruct %40 %33  ; MeshOutVertex
-%41 = OpTypeArray %39 %34
+%40 = OpTypeVector %33 3
+%39 = OpTypeStruct %40 %34  ; MeshOutVertex
+%41 = OpTypeArray %39 %35
 %42 = OpTypePointer Output %41
 %16 = OpVariable %42 Output
+%3 = OpTypeFunction %2
 
 ; functions
 ; main function

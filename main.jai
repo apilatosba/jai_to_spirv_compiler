@@ -1005,7 +1005,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                print_to_builder(b, "\%% = OpTypePointer % \%%\n",
                                     typeSSAId,
                                     ToSpirvStorageClass(.Output),
-                                    arrayIdentifier
+                                    GetSSAId(data, arrayIdentifier)
                );
 
                print_to_builder(b, "\%% = OpVariable \%% %\n",
@@ -1018,10 +1018,14 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) *void, pointer = .{ storageClass = .PushConstant, untyped = true } } };
                WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
 
-               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %\n",
+               pushDataStructIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) PushData } };
+               WriteTypeOrVariableOrConstant(data, b, pushDataStructIdentifier);
+
+               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% % \%%\n",
                                     GetSSAId(data, identifier),
                                     GetSSAId(data, typeIdentifier),
-                                    ToSpirvStorageClass(.PushConstant)
+                                    ToSpirvStorageClass(.PushConstant),
+                                    GetSSAId(data, pushDataStructIdentifier)
                );
 
             case .PrimitiveTriangleIndicesEXTOutVariable;
@@ -1039,7 +1043,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                print_to_builder(b, "\%% = OpTypePointer % \%%\n",
                                     typeSSAId,
                                     ToSpirvStorageClass(.Output),
-                                    arrayIdentifier
+                                    GetSSAId(data, arrayIdentifier)
                );
 
                print_to_builder(b, "\%% = OpVariable \%% %\n",
