@@ -13,8 +13,9 @@ MeshOutVertex :: struct {
 }
 MeshOutPrimitive :: struct { }
 
-MESH_VERTICES_NAME   :: "meshVertices";
-MESH_TRIANGLES_NAME  :: "meshTriangles";
+MESH_VERTICES_NAME      :: "meshVertices";
+MESH_TRIANGLES_NAME     :: "meshTriangles";
+SET_MESH_OUTPUTS_NAME   :: "SetMeshOutputs";
 // vvvvvv intrinsics vvvvvvvv
 Int32    :: s32; // idk. maybe not the way to do it
 Int32x2  :: struct {};
@@ -42,6 +43,7 @@ MeshPerVertex :: struct {
 
 #insert #run sprint("%: [] MeshPerVertex;", MESH_VERTICES_NAME); // gl_MeshVerticesEXT
 #insert #run sprint("%: [] Int32x3;", MESH_TRIANGLES_NAME); // gl_PrimitiveTriangleIndicesEXT
+#insert #run sprint("%: (vertexCount: Int32, primitiveCount: Int32) -> ();", SET_MESH_OUTPUTS_NAME); // SetMeshOutputsEXT
 // ^^^^^^ intrinsics ^^^^^^^^^
 
 
@@ -49,8 +51,10 @@ FragmentData :: struct { }
 MeshData :: struct { }
 
 MeshShader :: (mOutVertex: *[] MeshOutVertex, mOutPrimitive: *[] MeshOutPrimitive, data: *MeshData) {
-   a := 10;
+   SetMeshOutputs(4, 2);
+   a: float = 10;
    a = a + a;
+   a = a - 9;
 } @1_1_1 @40_20 @triangles
 
 FragmentShader :: (mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, data: *FragmentData) -> Float4 {
@@ -95,6 +99,8 @@ Identifier :: struct {
                            // some array views in jai i want to register as fixed arrays. it would be better to be able create a Type
                            // in the metaprogram and use it instead of this approach. even if there is a way to do it idk it (other than adding a string during compilation).
                            // so this make sense only if array type is .VIEW
+                           //
+                           // i actually switched from Type to Type_Info for a similar reason. i can get rid of this but im lazy and this works so ill keep it for now.
                            array:      struct {
                                           fixed:   bool;
                                           size:    int;
@@ -1314,6 +1320,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          cbo := cast(*Code_Binary_Operator)node;
 
          if cbo.operator_type == {
+            case #char "-"; #through;
             case #char "+"; {
                assert(cbo.left.type == cbo.right.type);
 
@@ -1330,8 +1337,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                    type == cast(*Type_Info) Float2 ||
                    type == cast(*Type_Info) Float3 ||
                    type == cast(*Type_Info) Float4) {
-                  print_to_builder(b, "\%% = OpFAdd \%% \%% \%%\n",
+                  instruction := GetFloatInstructionNameFromOperatorType(cbo.operator_type);
+                  print_to_builder(b, "\%% = % \%% \%% \%%\n",
                                        resultSSAId,
+                                       instruction,
                                        GetSSAId(data, typeIdentifier),
                                        leftId,
                                        rightId
@@ -1344,8 +1353,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                           type == cast(*Type_Info) Int64x2 ||
                           type == cast(*Type_Info) Int64x3 ||
                           type == cast(*Type_Info) Int64x4) {
-                  print_to_builder(b, "\%% = OpIAdd \%% \%% \%%\n",
+                  instruction := GetIntegerInstructionNameFromOperatorType(cbo.operator_type);
+                  print_to_builder(b, "\%% = % \%% \%% \%%\n",
                                        resultSSAId,
+                                       instruction,
                                        GetSSAId(data, typeIdentifier),
                                        leftId,
                                        rightId
@@ -1379,6 +1390,29 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          }
       case .PROCEDURE_BODY              ;
       case .PROCEDURE_CALL              ;
+         cpc := cast(*Code_Procedure_Call) node;
+         procedureExpression := cpc.procedure_expression;
+         assert(procedureExpression.kind == .IDENT);
+
+         identifierExpression := cast(*Code_Ident) procedureExpression;
+         identifierName := identifierExpression.name;
+         arguments := cpc.arguments_unsorted;
+
+         if (identifierName == SET_MESH_OUTPUTS_NAME) {
+            vertexCountExpression := arguments[0].expression;
+            primitiveCountExpression := arguments[1].expression;
+
+            vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, b, additionalData = .{ literal.intLiteralBitSize = 32 });
+            primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, b, additionalData = .{ literal.intLiteralBitSize = 32 });
+
+            print_to_builder(b, "OpSetMeshOutputsEXT \%% \%%\n",
+                                 vertexCountSSAId,
+                                 primitiveCountSSAId
+            );
+
+            return -42000; // doesnt matter since OpSetMeshOutputsEXT doesnt return
+         }
+
       case .WHILE                       ;
       case .IF                          ;
       case .CASE                        ;
@@ -1440,6 +1474,22 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
 
    assert(false, "node.kind: %, didnt return!", node.kind);
    return -69;
+}
+
+GetFloatInstructionNameFromOperatorType :: (type: Operator_Type) -> string {
+   if type == {
+      case #char "+"; return "OpFAdd";
+      case #char "-"; return "OpFSub";
+      case; assert(false, "type: %", type); return "";
+   }
+}
+
+GetIntegerInstructionNameFromOperatorType :: (type: Operator_Type) -> string {
+   if type == {
+      case #char "+"; return "OpIAdd";
+      case #char "-"; return "OpISub";
+      case; assert(false, "type: %", type); return "";
+   }
 }
 
 StructAnnotateMemberInfo :: struct {
