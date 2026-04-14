@@ -25,9 +25,21 @@ layout(location = 0) out vec4 fragColor;
 
 
 void ffff() {
-    float a = 10;
-    a = a + a;
+    uint q;
+    int w;
+    float a = w;
+    a = a + q;
     a = a - 9;
+
+    float e;
+    a = e;
+
+    if (e < 3) {
+        {
+            float inner = 99;
+            e = inner;
+        }
+    }
 }
 
 void main() {

@@ -22,10 +22,20 @@ Int32x2  :: struct {};
 Int32x3  :: struct {};
 Int32x4  :: struct {};
 
+UInt32    :: u32; // idk. maybe not the way to do it
+UInt32x2  :: struct {};
+UInt32x3  :: struct {};
+UInt32x4  :: struct {};
+
 Int64    :: s64; // idk. maybe not the way to do it
 Int64x2  :: struct {};
 Int64x3  :: struct {};
 Int64x4  :: struct {};
+
+UInt64    :: u64; // idk. maybe not the way to do it
+UInt64x2  :: struct {};
+UInt64x3  :: struct {};
+UInt64x4  :: struct {};
 
 Float    :: float; // idk. maybe not the way to do it
 Float2   :: struct {};
@@ -43,7 +53,7 @@ MeshPerVertex :: struct {
 
 #insert #run sprint("%: [] MeshPerVertex;", MESH_VERTICES_NAME); // gl_MeshVerticesEXT
 #insert #run sprint("%: [] Int32x3;", MESH_TRIANGLES_NAME); // gl_PrimitiveTriangleIndicesEXT
-#insert #run sprint("%: (vertexCount: Int32, primitiveCount: Int32) -> ();", SET_MESH_OUTPUTS_NAME); // SetMeshOutputsEXT
+#insert #run sprint("%: (vertexCount: UInt32, primitiveCount: UInt32) -> ();", SET_MESH_OUTPUTS_NAME); // SetMeshOutputsEXT
 // ^^^^^^ intrinsics ^^^^^^^^^
 
 
@@ -55,6 +65,7 @@ MeshShader :: (mOutVertex: *[] MeshOutVertex, mOutPrimitive: *[] MeshOutPrimitiv
    a: float = 10;
    a = a + a;
    a = a - 9;
+   b: int;
 } @1_1_1 @40_20 @triangles
 
 FragmentShader :: (mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, data: *FragmentData) -> Float4 {
@@ -76,7 +87,11 @@ Identifier :: struct {
 
    using value: union {
       intLiteral:       struct {
-                           value:      int;
+                           unsigned:   bool;
+                           value:      union {
+                                          _s64: s64;
+                                          _u64: u64;
+                                       };
                            bitSize:    int;
                         };
       floatLiteral:     float;
@@ -160,7 +175,13 @@ ArrayEquals :: (a: [] $T, b: [] T) -> bool {
 
 IdentifierHash :: (using identifier: Identifier) -> u32 {
    if #complete type == {
-      case .IntLiteral; return get_hash(intLiteral.value);
+      case .IntLiteral;
+         if (intLiteral.unsigned) {
+            return get_hash(intLiteral.value._u64);
+         } else {
+            return get_hash(intLiteral.value._s64);
+         }
+
       case .FloatLiteral; return get_hash(floatLiteral);
       case .Function; return get_hash(function);
       case ._Type;
@@ -185,7 +206,18 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
 
    type := a.type;
    if #complete type == {
-      case .IntLiteral; return a.intLiteral.bitSize == b.intLiteral.bitSize && a.intLiteral.value == b.intLiteral.value;
+      case .IntLiteral;
+         if (a.intLiteral.bitSize != b.intLiteral.bitSize) return false;
+         if (a.intLiteral.unsigned != b.intLiteral.unsigned) return false;
+
+         unsigned := a.intLiteral.unsigned; // or b.intLiteral.unsigned they have the same value at this point
+         if (unsigned) {
+            if (a.intLiteral.value._u64 != b.intLiteral.value._u64) return false;
+         } else {
+            if (a.intLiteral.value._s64 != b.intLiteral.value._s64) return false;
+         }
+
+         return true;
       case .FloatLiteral; return a.floatLiteral == b.floatLiteral;
       case .Function; return a.function == b.function; // if they point to the same code node
       case ._Type;
@@ -228,6 +260,11 @@ CompilationData :: struct {
    primitiveTopology:                     string;
    identifierToSSAId:                     Table(Identifier, int, IdentifierHash, IdentifierCompare);
    ssaIota:                               int;
+
+   // TODO
+   // instead of having a frontier and a table generate the functions using a depth first traversel
+   // similar to how you generate types
+   //       - apila, 14/04/26
    functions:                             Table(*Code_Procedure_Header, struct {}); // this data is collected when generating instructions and then written into the Types block of spirv
    functionFrontier:                      Queue(*Code_Procedure_Body);
    locationsConsumedByPerVertexMeshOut:   int;
@@ -261,10 +298,18 @@ CalculateLocationsConsumed :: (T: Type) -> int {
          case Int32x2  ; accumulator.* += 1; return;
          case Int32x3  ; accumulator.* += 1; return;
          case Int32x4  ; accumulator.* += 1; return;
+         case UInt32   ; accumulator.* += 1; return;
+         case UInt32x2 ; accumulator.* += 1; return;
+         case UInt32x3 ; accumulator.* += 1; return;
+         case UInt32x4 ; accumulator.* += 1; return;
          case Int64    ; accumulator.* += 1; return;
          case Int64x2  ; accumulator.* += 1; return;
          case Int64x3  ; accumulator.* += 2; return;
          case Int64x4  ; accumulator.* += 2; return;
+         case UInt64   ; accumulator.* += 1; return;
+         case UInt64x2 ; accumulator.* += 1; return;
+         case UInt64x3 ; accumulator.* += 2; return;
+         case UInt64x4 ; accumulator.* += 2; return;
          case Float    ; accumulator.* += 1; return;
          case Float2   ; accumulator.* += 1; return;
          case Float3   ; accumulator.* += 1; return;
@@ -465,9 +510,9 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          );
          print_to_builder(*b, "OpExecutionModeId \%% LocalSizeId \%% \%% \%%\n",
                               GetSSAId(*data, .{ type = .Function, function = header }),
-                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ value = data.workgroupSize[0], bitSize = 32 } }),
-                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ value = data.workgroupSize[1], bitSize = 32 } }),
-                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ value = data.workgroupSize[2], bitSize = 32 } })
+                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[0], bitSize = 32 } }),
+                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[1], bitSize = 32 } }),
+                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[2], bitSize = 32 } })
          );
          print_to_builder(*b, "OpExecutionMode \%% OutputVertices %\n",
                               GetSSAId(*data, .{ type = .Function, function = header }),
@@ -640,9 +685,17 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          intLiteralType: Type;
          #if (false) {
          } else if (identifier.intLiteral.bitSize == 32) {
-            intLiteralType = Int32;
+            if (identifier.intLiteral.unsigned) {
+               intLiteralType = UInt32;
+            } else {
+               intLiteralType = Int32;
+            }
          } else if (identifier.intLiteral.bitSize == 64) {
-            intLiteralType = Int64;
+            if (identifier.intLiteral.unsigned) {
+               intLiteralType = UInt64;
+            } else {
+               intLiteralType = Int64;
+            }
          } else {
             assert(false, "identifier.intLiteral.bitSize: %, not implemented yet!", identifier.intLiteral.bitSize);
          }
@@ -650,11 +703,20 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) intLiteralType } };
          WriteTypeOrVariableOrConstant(data, b, intIdentifier);
 
-         print_to_builder(b, "\%% = OpConstant \%% %\n",
+         print_to_builder(b, "\%% = OpConstant \%%",
                               GetSSAId(data, identifier),
                               GetSSAId(data, intIdentifier),
-                              identifier.intLiteral.value
          );
+
+         if (identifier.intLiteral.unsigned) {
+            print_to_builder(b, " %\n",
+                                 identifier.intLiteral.value._u64
+            );
+         } else {
+            print_to_builder(b, " %\n",
+                                 identifier.intLiteral.value._s64
+            );
+         }
 
       case .FloatLiteral;
          floatIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) Float } };
@@ -710,6 +772,44 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             return;
          }
 
+         if (type == cast(*Type_Info) UInt32) {
+               print_to_builder(b, "\%% = OpTypeInt 32 0\n",
+                                    GetSSAId(data, identifier)
+               );
+               return;
+         }
+
+         if (type == cast(*Type_Info) UInt32x2) {
+            intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) UInt32 } };
+            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+
+            print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
+                                 GetSSAId(data, identifier),
+                                 GetSSAId(data, intIdentifier)
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) UInt32x3) {
+            intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) UInt32 } };
+            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+            print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
+                                 GetSSAId(data, identifier),
+                                 GetSSAId(data, intIdentifier)
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) UInt32x4) {
+            intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) UInt32 } };
+            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+            print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
+                                 GetSSAId(data, identifier),
+                                 GetSSAId(data, intIdentifier)
+            );
+            return;
+         }
+
          if (type == cast(*Type_Info) Int64) {
             print_to_builder(b, "\%% = OpTypeInt 64 1\n",
                                  GetSSAId(data, identifier)
@@ -740,6 +840,44 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
 
          if (type == cast(*Type_Info) Int64x4) {
             intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) Int64 } };
+            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+            print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
+                                 GetSSAId(data, identifier),
+                                 GetSSAId(data, intIdentifier)
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) UInt64) {
+            print_to_builder(b, "\%% = OpTypeInt 64 0\n",
+                                 GetSSAId(data, identifier)
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) UInt64x2) {
+            intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) UInt64 } };
+            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+
+            print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
+                                 GetSSAId(data, identifier),
+                                 GetSSAId(data, intIdentifier)
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) UInt64x3) {
+            intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) UInt64 } };
+            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
+            print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
+                                 GetSSAId(data, identifier),
+                                 GetSSAId(data, intIdentifier)
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) UInt64x4) {
+            intIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) UInt64 } };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
             print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
                                  GetSSAId(data, identifier),
@@ -944,7 +1082,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                   arraySize = array.size;
                }
 
-               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value = arraySize, bitSize = 32 } };
+               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value._s64 = arraySize, bitSize = 32, unsigned = false } };
                WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
 
                print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
@@ -1084,7 +1222,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                meshVertexOutUserStructTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = data.meshVertexOutUserStruct } };
                WriteTypeOrVariableOrConstant(data, b, meshVertexOutUserStructTypeIdentifier);
 
-               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value = data.maxVertices, bitSize = 32 } };
+               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.maxVertices, bitSize = 32 } };
                WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
 
                arrayTypeSSAId := GetNextSSAId(data); // not having an identifier for this since it is only used here
@@ -1106,7 +1244,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                meshPrimitiveOutUserStructIdentifier: Identifier = .{ type = ._Type, _type = .{ type = data.meshPrimitiveOutUserStruct } };
                WriteTypeOrVariableOrConstant(data, b, meshPrimitiveOutUserStructIdentifier);
 
-               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value = data.maxPrimitives, bitSize = 32 } };
+               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.maxPrimitives, bitSize = 32 } };
                WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
 
                arrayTypeSSAId := GetNextSSAId(data); // not having an identifier for this since it is only used here
@@ -1126,7 +1264,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
 }
 
 GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> string {
-   b: String_Builder;
+   b: String_Builder; // general builder. builder for the whole functions block (the one that comes after "Types, variables and constants")
 
    // entry function is handled seperately because its parameters define the general shader interface
    // so it actually has no parameters. other functions behave more normally
@@ -1149,7 +1287,11 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
       //    - apila, 04/04/26
       //
 
-      GenerateInstructions(data, block, *b);
+      functionBuilder: String_Builder;
+
+      GenerateInstructions(data, block, *b, *functionBuilder);
+      append_and_steal_buffers(*b, *functionBuilder);
+
       print_to_builder(*b, "OpReturn\n");
       print_to_builder(*b, "OpFunctionEnd\n");
    }
@@ -1174,7 +1316,13 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
                            GetSSAId(data, functionTypeIdentifier)
       );
 
-      GenerateInstructions(data, block, *b);
+      // All OpVariable instructions in a function must be in the first block in the function
+      // https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#LogicalLayout
+
+      functionBuilder: String_Builder;
+
+      GenerateInstructions(data, block, *b, *functionBuilder);
+      append_and_steal_buffers(*b, *functionBuilder);
 
       if (header.returns.count == 0) {
          print_to_builder(*b, "OpReturn\n");
@@ -1188,13 +1336,15 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
 
 GenerateInstructionsData :: struct {
    literal: struct {
-      intLiteralBitSize: int = 64;
+      intLiteralBitSize:   int = 64;
+      intLiteralUnsigned:  bool = false;
    };
 }
 
-// traverse AST and output the generated spirv to "b".
+// traverse AST and output the generated spirv.
 // returns ssaId if the "node" is something that has an id, if not then output is ignored.
-GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Builder, additionalData: GenerateInstructionsData = .{}) -> ssaId: int {
+// function is to be appended to general.
+GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *String_Builder, function: *String_Builder, additionalData: GenerateInstructionsData = .{}) -> ssaId: int {
    //
    // is there a way to trigger jai compiler on some of the code nodes?
    // like for example if there is a #run inside the shader code i want to let jai do the #run and return me the result of it
@@ -1278,7 +1428,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
       case .BLOCK                       ;
          cb := cast(*Code_Block)node;
          for cb.statements {
-            GenerateInstructions(data, it, b);
+            GenerateInstructions(data, it, general, function);
          }
          return 0;
 
@@ -1292,7 +1442,13 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                } else {
                   assert(additionalData.literal.intLiteralBitSize == 32 || additionalData.literal.intLiteralBitSize == 64, "additionalData.literal.intLiteralBitSize: %, not implemented yet!", additionalData.literal.intLiteralBitSize);
 
-                  identifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value = cl._s64, bitSize = additionalData.literal.intLiteralBitSize } };
+                  identifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ bitSize = additionalData.literal.intLiteralBitSize, unsigned = additionalData.literal.intLiteralUnsigned } };
+                  if (additionalData.literal.intLiteralUnsigned) {
+                     identifier.intLiteral.value._u64 = cl._u64;
+                  } else {
+                     identifier.intLiteral.value._s64 = cl._s64;
+                  }
+
                   return GetSSAId(data, identifier);
                }
 
@@ -1307,10 +1463,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          assert(ci.resolved_declaration.type.type != .POINTER, "this means the user declared a local pointer, not implemented yet!");
 
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = ci.resolved_declaration.type } };
-         print_to_builder(b, "\%% = OpLoad \%% \%%\n",
-                              resultSSAId,
-                              GetSSAId(data, variableTypeIdentifier),
-                              variableSSAId
+         print_to_builder(function, "\%% = OpLoad \%% \%%\n",
+                                    resultSSAId,
+                                    GetSSAId(data, variableTypeIdentifier),
+                                    variableSSAId
          );
 
          return resultSSAId;
@@ -1324,8 +1480,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
             case #char "+"; {
                assert(cbo.left.type == cbo.right.type);
 
-               leftId := GenerateInstructions(data, cbo.left, b);
-               rightId := GenerateInstructions(data, cbo.right, b);
+               leftId := GenerateInstructions(data, cbo.left, general, function);
+               rightId := GenerateInstructions(data, cbo.right, general, function);
 
                resultSSAId := GetNextSSAId(data);
 
@@ -1338,28 +1494,36 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                    type == cast(*Type_Info) Float3 ||
                    type == cast(*Type_Info) Float4) {
                   instruction := GetFloatInstructionNameFromOperatorType(cbo.operator_type);
-                  print_to_builder(b, "\%% = % \%% \%% \%%\n",
-                                       resultSSAId,
-                                       instruction,
-                                       GetSSAId(data, typeIdentifier),
-                                       leftId,
-                                       rightId
+                  print_to_builder(function, "\%% = % \%% \%% \%%\n",
+                                             resultSSAId,
+                                             instruction,
+                                             GetSSAId(data, typeIdentifier),
+                                             leftId,
+                                             rightId
                   );
                } else if (type == cast(*Type_Info) Int32 ||
                           type == cast(*Type_Info) Int32x2 ||
                           type == cast(*Type_Info) Int32x3 ||
                           type == cast(*Type_Info) Int32x4 ||
+                          type == cast(*Type_Info) UInt32 ||
+                          type == cast(*Type_Info) UInt32x2 ||
+                          type == cast(*Type_Info) UInt32x3 ||
+                          type == cast(*Type_Info) UInt32x4 ||
                           type == cast(*Type_Info) Int64 ||
                           type == cast(*Type_Info) Int64x2 ||
                           type == cast(*Type_Info) Int64x3 ||
-                          type == cast(*Type_Info) Int64x4) {
+                          type == cast(*Type_Info) Int64x4 ||
+                          type == cast(*Type_Info) UInt64 ||
+                          type == cast(*Type_Info) UInt64x2 ||
+                          type == cast(*Type_Info) UInt64x3 ||
+                          type == cast(*Type_Info) UInt64x4) {
                   instruction := GetIntegerInstructionNameFromOperatorType(cbo.operator_type);
-                  print_to_builder(b, "\%% = % \%% \%% \%%\n",
-                                       resultSSAId,
-                                       instruction,
-                                       GetSSAId(data, typeIdentifier),
-                                       leftId,
-                                       rightId
+                  print_to_builder(function, "\%% = % \%% \%% \%%\n",
+                                             resultSSAId,
+                                             instruction,
+                                             GetSSAId(data, typeIdentifier),
+                                             leftId,
+                                             rightId
                   );
                } else {
                   assert(false, "type: %\n", type);
@@ -1369,15 +1533,15 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
             }
 
             case #char "="; {
-               rightId := GenerateInstructions(data, cbo.right, b);
+               rightId := GenerateInstructions(data, cbo.right, general, function);
 
                if cbo.left.kind == {
                   case .IDENT; {
                      leftCi := cast(*Code_Ident) cbo.left;
                      leftId := GetSSAId(data, .{ type = .Variable, variable = leftCi.resolved_declaration } );
-                     print_to_builder(b, "OpStore \%% \%%\n",
-                                          leftId,
-                                          rightId
+                     print_to_builder(function, "OpStore \%% \%%\n",
+                                                leftId,
+                                                rightId
                      );
                   }
 
@@ -1402,12 +1566,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
             vertexCountExpression := arguments[0].expression;
             primitiveCountExpression := arguments[1].expression;
 
-            vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, b, additionalData = .{ literal.intLiteralBitSize = 32 });
-            primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, b, additionalData = .{ literal.intLiteralBitSize = 32 });
+            vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, general, function, additionalData = .{ literal = .{ intLiteralBitSize = 32, intLiteralUnsigned = true } });
+            primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, general, function, additionalData = .{ literal = .{ intLiteralBitSize = 32, intLiteralUnsigned = true } });
 
-            print_to_builder(b, "OpSetMeshOutputsEXT \%% \%%\n",
-                                 vertexCountSSAId,
-                                 primitiveCountSSAId
+            print_to_builder(function, "OpSetMeshOutputsEXT \%% \%%\n",
+                                       vertexCountSSAId,
+                                       primitiveCountSSAId
             );
 
             return -42000; // doesnt matter since OpSetMeshOutputsEXT doesnt return
@@ -1444,7 +1608,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
                   bitSizeData: GenerateInstructionsData;
                   BYTE_SIZE :: 8;
                   bitSizeData.literal.intLiteralBitSize = cd.type.runtime_size * BYTE_SIZE;
-                  initializerSSAId = GenerateInstructions(data, cd.expression, b, bitSizeData);
+                  initializerSSAId = GenerateInstructions(data, cd.expression, general, function, bitSizeData);
                }
 
                case; assert(false, "cd.expression.kind: %, not implemented yet!", cd.expression.kind);
@@ -1454,16 +1618,16 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, b: *String_Bu
          storageClass := StorageClass.Function;
          // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
 
-         print_to_builder(b, "\%% = OpVariable \%% %",
-                              variableSSAId,
-                              GetSSAId(data, .{ type = ._Type, _type = .{ type = pointerToVariableType, pointer = .{ storageClass = storageClass } } }),
-                              ToSpirvStorageClass(storageClass),
+         print_to_builder(general, "\%% = OpVariable \%% %",
+                                    variableSSAId,
+                                    GetSSAId(data, .{ type = ._Type, _type = .{ type = pointerToVariableType, pointer = .{ storageClass = storageClass } } }),
+                                    ToSpirvStorageClass(storageClass),
          );
 
          if (initializerSSAId == NO_INITIALIZER) {
-            print_to_builder(b, "\n");
+            print_to_builder(general, "\n");
          } else {
-            print_to_builder(b, " \%%\n", initializerSSAId);
+            print_to_builder(general, " \%%\n", initializerSSAId);
          }
 
          return variableSSAId;
