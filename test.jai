@@ -8,16 +8,9 @@
 #run {
    set_build_options_dc(.{ do_output = false });
 
-   M :: struct { }
-   tip := New(Type_Info_Pointer);
-   tip.pointer_to = cast(*Type_Info) M;
-   tip.type = .POINTER;
-   tip.runtime_size = 8;
+   code := #code a.b.c;
+   root := compiler_get_nodes(code);
 
-   for get_type_table() {
-      print("it: %\n", it.*);
-   }
-
-   type := get_type(tip);
-   print("%\n", type);
+   cbo := root.(*Code_Binary_Operator);
+   print("%\n", cbo.left.(*Code_Binary_Operator).right.(*Code_Ident).name);
 }

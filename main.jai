@@ -40,7 +40,7 @@ UInt64x4  :: struct {};
 Float    :: float; // idk. maybe not the way to do it
 Float2   :: struct {};
 Float3   :: struct {};
-Float4   :: struct {};
+Float4   :: struct { x: Float; y: Float; z: Float; w: Float; };
 
 Float2x2 :: struct {};
 Float3x3 :: struct {};
@@ -62,6 +62,12 @@ MeshData :: struct { }
 
 MeshShader :: (mOutVertex: *[] MeshOutVertex, mOutPrimitive: *[] MeshOutPrimitive, data: *MeshData) {
    SetMeshOutputs(4, 2);
+
+   meshVertices[0].position = .{ -1, -1, 0.5, 1 };
+   meshVertices[1].position = .{  1, -1, 0.5, 1 };
+   meshVertices[2].position = .{  1,  1, 0.5, 1 };
+   meshVertices[3].position = .{ -1,  1, 0.5, 1 };
+
    a: float = 10;
    a = a + a;
    a = a - 9;
@@ -76,6 +82,7 @@ FragmentShader :: (mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, d
 // identifier is anything that can be given an ssa id.
 Identifier :: struct {
    type: enum {
+      Invalid;
       IntLiteral;
       FloatLiteral;
       Function;
@@ -83,6 +90,7 @@ Identifier :: struct {
       Void;
       Variable;
       BuiltinThingies;
+      CompositeLiteral;
    };
 
    using value: union {
@@ -135,6 +143,10 @@ Identifier :: struct {
                                                       //             - apila, 13/04/26
                            MeshPrimitiveOutVariableType;
                         };
+      compositeLiteral: struct {
+                           type:       *Type_Info;
+                           arguments:  [] *Identifier;
+                        };
    };
 }
 
@@ -175,6 +187,7 @@ ArrayEquals :: (a: [] $T, b: [] T) -> bool {
 
 IdentifierHash :: (using identifier: Identifier) -> u32 {
    if #complete type == {
+      case .Invalid; assert(false); return 69;
       case .IntLiteral;
          if (intLiteral.unsigned) {
             return get_hash(intLiteral.value._u64);
@@ -192,10 +205,19 @@ IdentifierHash :: (using identifier: Identifier) -> u32 {
             }
          }
 
-         return cast,trunc(u32) fnv1a_hash(xx *_type.type, size_of(Type));
+         return cast,trunc(u32) fnv1a_hash(xx *_type.type, size_of(type_of(_type.type)));
       case .Void; return 69; // does the hash matter here?
       case .Variable; return get_hash(variable.name);
       case .BuiltinThingies; return get_hash(builtinThingies);
+      case .CompositeLiteral;
+         hash: u32 = 17;
+         hash = hash * 31 + get_hash(compositeLiteral.type);
+
+         for compositeLiteral.arguments {
+            hash = hash * 31 + IdentifierHash(it.*);
+         }
+
+         return hash;
    }
 
    assert(false, "type: %", type);
@@ -206,6 +228,7 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
 
    type := a.type;
    if #complete type == {
+      case .Invalid; assert(false); return false;
       case .IntLiteral;
          if (a.intLiteral.bitSize != b.intLiteral.bitSize) return false;
          if (a.intLiteral.unsigned != b.intLiteral.unsigned) return false;
@@ -242,6 +265,19 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
       case .Void; return true;
       case .Variable; return a.variable == b.variable; // two variables are equal if they have the same declaration
       case .BuiltinThingies; return a.builtinThingies == b.builtinThingies;
+      case .CompositeLiteral;
+         if (a.compositeLiteral.type != b.compositeLiteral.type) return false;
+         if (a.compositeLiteral.arguments.count != b.compositeLiteral.arguments.count) return false;
+
+         argumentCount := a.compositeLiteral.arguments.count; // or b.compositeLiteral.arguments.count, they are equal at this point
+         for 0..argumentCount - 1 {
+            identifierA := a.compositeLiteral.arguments[it].*;
+            identifierB := b.compositeLiteral.arguments[it].*;
+
+            if(!IdentifierCompare(identifierA, identifierB)) return false;
+         }
+
+         return true;
    }
 
    assert(false, "type: %", type);
@@ -648,7 +684,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
    }
 
    spirvasm := builder_to_string(*b);
-   print("%", spirvasm);
+   // print("%", spirvasm);
    write_entire_file("jai.spvasm", spirvasm);
 
    return .{};
@@ -681,6 +717,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
    }
 
    if #complete identifier.type == {
+      case .Invalid; assert(false);
       case .IntLiteral;
          intLiteralType: Type;
          #if (false) {
@@ -1260,6 +1297,29 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                                     arrayTypeSSAId
                );
          }
+
+         case .CompositeLiteral; {
+            typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = identifier.compositeLiteral.type } };
+            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+            literalBuilder: String_Builder;
+
+            print_to_builder(*literalBuilder, "\%% = OpConstantComposite \%%",
+                                             GetSSAId(data, identifier),
+                                             GetSSAId(data, typeIdentifier)
+            );
+
+            for identifier.compositeLiteral.arguments {
+               WriteTypeOrVariableOrConstant(data, b, it.*);
+               print_to_builder(*literalBuilder, " \%%",
+                                                GetSSAId(data, it.*)
+               );
+            }
+
+            print_to_builder(*literalBuilder, "\n");
+
+            append_and_steal_buffers(b, *literalBuilder);
+         }
    }
 }
 
@@ -1335,16 +1395,18 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
 }
 
 GenerateInstructionsData :: struct {
-   literal: struct {
-      intLiteralBitSize:   int = 64;
-      intLiteralUnsigned:  bool = false;
-   };
+   literal:    struct {
+                  intLiteralBitSize:   int = 64;
+                  intLiteralUnsigned:  bool = false;
+               };
+   isLValue:   bool = false; // maybe i should have two functions GenerateAddress and GenerateExpression instead of single GenerateInstructions function and a lvalue boolean like this. idk man. - apila, 15/04/26
 }
 
 // traverse AST and output the generated spirv.
 // returns ssaId if the "node" is something that has an id, if not then output is ignored.
 // function is to be appended to general.
-GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *String_Builder, function: *String_Builder, additionalData: GenerateInstructionsData = .{}) -> ssaId: int {
+// the Identifier returned doesnt always make sense if the thing returned doesnt have an identifier. for example result of an addition operation. use ssaId instead
+GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *String_Builder, function: *String_Builder, additionalData: GenerateInstructionsData = .{}) -> ssaId: int, Identifier {
    //
    // is there a way to trigger jai compiler on some of the code nodes?
    // like for example if there is a #run inside the shader code i want to let jai do the #run and return me the result of it
@@ -1398,7 +1460,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          assert(false, "idk what this directive is");
 
       case .DIRECTIVE_IMPORT            ;
-         return 0; // i think i should skip? idk maybe
+         return 0, .{}; // i think i should skip? idk maybe
 
       case .TYPE_QUERY                  ;
          // size_of, type_info
@@ -1409,7 +1471,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
       case .USING                       ;
          // should i ignore?
-         return 0;
+         return 0, .{};
 
       case .DIRECTIVE_INSERT            ;
          assert(false, "read the comment above");
@@ -1430,7 +1492,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          for cb.statements {
             GenerateInstructions(data, it, general, function);
          }
-         return 0;
+         return 0, .{};
 
       case .LITERAL                     ;
          cl := cast(*Code_Literal) node;
@@ -1438,7 +1500,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
             case .NUMBER;
                if (cl.value_flags & .FLOAT) {
                   identifier: Identifier = .{ type = .FloatLiteral, floatLiteral = xx cl._float64 };
-                  return GetSSAId(data, identifier);
+                  return GetSSAId(data, identifier), identifier;
                } else {
                   assert(additionalData.literal.intLiteralBitSize == 32 || additionalData.literal.intLiteralBitSize == 64, "additionalData.literal.intLiteralBitSize: %, not implemented yet!", additionalData.literal.intLiteralBitSize);
 
@@ -1449,33 +1511,89 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                      identifier.intLiteral.value._s64 = cl._s64;
                   }
 
-                  return GetSSAId(data, identifier);
+                  return GetSSAId(data, identifier), identifier;
                }
+
+            case .STRUCT;
+               structLiteralInfo := cl.values.struct_literal_info;
+               identifier: Identifier = .{ type = .CompositeLiteral, compositeLiteral = .{ type = cl.type } };
+               identifier.compositeLiteral.arguments = NewArray(structLiteralInfo.arguments.count, *Identifier);
+
+               assert(cl.type.type == .STRUCT);
+               tis := cast(*Type_Info_Struct) cl.type;
+
+               for structLiteralInfo.arguments {
+                  argumentAdditionalData: GenerateInstructionsData;
+
+                  // wait a minute. i think i dont need to handle the casts manually like this.
+                  // becasue there is Code_Cast user needs to cast the type manually anyways.
+                  // unless you go from 64 bit to 32 bit. idk
+                  //             - apila, 14/04/26
+                  memberType := tis.members[it_index].type;
+                  if (memberType.type == .INTEGER) {
+                     if (false) {
+                     } else if (memberType == cast(*Type_Info) Int32) {
+                        argumentAdditionalData.literal.intLiteralBitSize = 32;
+                        argumentAdditionalData.literal.intLiteralUnsigned = false;
+                     } else if (memberType == cast(*Type_Info) UInt32) {
+                        argumentAdditionalData.literal.intLiteralBitSize = 32;
+                        argumentAdditionalData.literal.intLiteralUnsigned = true;
+                     } else if (memberType == cast(*Type_Info) Int64) {
+                        argumentAdditionalData.literal.intLiteralBitSize = 64;
+                        argumentAdditionalData.literal.intLiteralUnsigned = false;
+                     } else if (memberType == cast(*Type_Info) UInt64) {
+                        argumentAdditionalData.literal.intLiteralBitSize = 64;
+                        argumentAdditionalData.literal.intLiteralUnsigned = true;
+                     }
+                  }
+
+                  _, argumentIdentifier := GenerateInstructions(data, it, general, function, argumentAdditionalData);
+                  assert(argumentIdentifier.type != .Invalid, "struct: %, index: %, loc: %:%", tis.name, it_index, node.c0, node.l0);
+                  heapCopy := New(Identifier);
+                  heapCopy.* = argumentIdentifier;
+                  identifier.compositeLiteral.arguments[it_index] = heapCopy;
+               }
+
+               return GetSSAId(data, identifier), identifier;
 
             case; assert(false, "cl.value_type: %\n", cl.value_type);
          }
 
-      // the r-value
       case .IDENT                       ;
          ci := cast(*Code_Ident) node;
-         variableSSAId := GetSSAId(data, .{ type = .Variable, variable = ci.resolved_declaration });
-         resultSSAId := GetNextSSAId(data);
          assert(ci.resolved_declaration.type.type != .POINTER, "this means the user declared a local pointer, not implemented yet!");
+
+         variableIdentifier: Identifier = .{ type = .Variable, variable = ci.resolved_declaration };
+         variableSSAId := GetSSAId(data, variableIdentifier);
+
+         if (additionalData.isLValue) {
+            return variableSSAId, variableIdentifier;
+         }
+
+         deferencedSSAId := GetNextSSAId(data);
 
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = ci.resolved_declaration.type } };
          print_to_builder(function, "\%% = OpLoad \%% \%%\n",
-                                    resultSSAId,
+                                    deferencedSSAId,
                                     GetSSAId(data, variableTypeIdentifier),
                                     variableSSAId
          );
 
-         return resultSSAId;
+         return deferencedSSAId, .{};
 
       case .UNARY_OPERATOR              ;
       case .BINARY_OPERATOR             ;
          cbo := cast(*Code_Binary_Operator)node;
 
          if cbo.operator_type == {
+            case #char ".";
+               base, indices := GetBaseAndIndices(cbo);
+               // print_to_builder(function, "\%% = OpAccessChain \%% \%%");
+
+               if (additionalData.isLValue) {
+
+               }
+               
             case #char "-"; #through;
             case #char "+"; {
                assert(cbo.left.type == cbo.right.type);
@@ -1529,26 +1647,24 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                   assert(false, "type: %\n", type);
                }
 
-               return resultSSAId;
+               return resultSSAId, .{};
             }
 
             case #char "="; {
-               rightId := GenerateInstructions(data, cbo.right, general, function);
+               assert(cbo.left.kind == .IDENT ||
+                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == #char "."),
+                     "cbo.left.kind: %", cbo.left.kind
+               );
 
-               if cbo.left.kind == {
-                  case .IDENT; {
-                     leftCi := cast(*Code_Ident) cbo.left;
-                     leftId := GetSSAId(data, .{ type = .Variable, variable = leftCi.resolved_declaration } );
-                     print_to_builder(function, "OpStore \%% \%%\n",
-                                                leftId,
-                                                rightId
-                     );
-                  }
+               rightId, rightIdentifier := GenerateInstructions(data, cbo.right, general, function);
+               leftId, _ := GenerateInstructions(data, cbo.left, general, function, .{ isLValue = true });
 
-                  case; assert(false, "cbo.left.kind: %", cbo.left.kind);
-               }
+               print_to_builder(function, "OpStore \%% \%%\n",
+                                          leftId,
+                                          rightId
+               );
 
-               return rightId;
+               return rightId, rightIdentifier;
             }
 
          }
@@ -1574,7 +1690,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                                        primitiveCountSSAId
             );
 
-            return -42000; // doesnt matter since OpSetMeshOutputsEXT doesnt return
+            return -42000, .{}; // doesnt matter since OpSetMeshOutputsEXT doesnt return
          }
 
       case .WHILE                       ;
@@ -1589,7 +1705,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
       case .COMMA_SEPARATED_ARGUMENTS   ;
       case .DECLARATION                 ;
          cd := cast(*Code_Declaration)node;
-         variableSSAId := GetSSAId(data, .{ type = .Variable, variable = cd });
+         variableIdentifier: Identifier = .{ type = .Variable, variable = cd };
+         variableSSAId := GetSSAId(data, variableIdentifier);
          variableType := cd.type;
 
          pointerToVariableType := New(Type_Info_Pointer);
@@ -1630,14 +1747,80 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
             print_to_builder(general, " \%%\n", initializerSSAId);
          }
 
-         return variableSSAId;
+         return variableSSAId, variableIdentifier;
       case .CAST                        ;
       case .DIRECTIVE_THROUGH           ;
       case .COMPOUND_DECLARATION        ;
    }
 
    assert(false, "node.kind: %, didnt return!", node.kind);
-   return -69;
+   return -69, .{};
+}
+
+// tree of a.b.c is:
+//          .
+//        /   \
+//       .     c
+//     /   \
+//    a     b
+//
+// code := #code a.b.c;
+// root := compiler_get_nodes(code);
+// root.(*Code_Binary_Operator).left.(*Code_Binary_Operator).right.(*Code_Ident).name // is "b"
+GetBaseAndIndices :: (cbo: *Code_Binary_Operator) -> base: Identifier, indices: [] int {
+   indices: [..] int;
+   current: *Code_Node = cbo;
+   while (current.kind == .BINARY_OPERATOR) {
+      currentCbo := cast(*Code_Binary_Operator) current;
+      right := currentCbo.right;
+      assert(right.kind != .BINARY_OPERATOR);
+
+      leftType := currentCbo.left.type;
+      if leftType.type == {
+         case .STRUCT;
+            tis := cast(*Type_Info_Struct) leftType;
+
+            assert(right.kind == .IDENT, "if you are accessing a struct indexer it is not yet implemented! right.kind: %, struct name: %", right.kind, tis.name);
+            rightIdentifier := cast(*Code_Ident) right;
+
+            memberIndex := GetMemberIndex(tis, rightIdentifier.name);
+            assert(memberIndex != MEMBER_DOESNT_EXIST, "not a member of struct! struct: %, member: %", tis.name, rightIdentifier.name);
+
+            array_add(*indices, memberIndex);
+            current = currentCbo.left;
+
+         case; assert(false, "not yet implemented! type: %", leftType.type);
+      }
+   }
+
+   ArrayReverse(indices);
+
+   // at the end of the loop "current" is the node of the "base"
+   assert(current.kind == .IDENT, "current.kind: %", current.kind);
+   currentIdent := cast(*Code_Ident) current;
+   base: Identifier = .{ type = .Variable, variable = currentIdent.resolved_declaration };
+
+   return base, indices;
+}
+
+ArrayReverse :: (array: [] $T) {
+   if (array.count <= 1) return;
+
+   for 0..array.count / 2 - 1 {
+      indexFromStart := it;
+      indexFromEnd := array.count - 1 - indexFromStart;
+
+      swap(*array[indexFromStart], *array[indexFromEnd]);
+   }
+}
+
+MEMBER_DOESNT_EXIST :: -1;
+GetMemberIndex :: (tis: *Type_Info_Struct, memberName: string) -> int {
+   for tis.members {
+      if (it.name == memberName) return it_index;
+   }
+
+   return MEMBER_DOESNT_EXIST;
 }
 
 GetFloatInstructionNameFromOperatorType :: (type: Operator_Type) -> string {

@@ -38,6 +38,8 @@ layout(triangles, max_vertices = 40, max_primitives = 2) out;
 layout(location = 0) out MeshVertexOut[] vOut;
 layout(location = 8) perprimitiveEXT out MeshPrimitiveOut[] pOut;
 
+const int ONE = 1;
+
 void main() {
    SetMeshOutputsEXT(4, 2);
 
@@ -45,7 +47,7 @@ void main() {
    uint xdd = uint(xd);
 
    gl_MeshVerticesEXT[0].gl_Position = vec4(-1, -1, 0.5, 1);
-   gl_MeshVerticesEXT[1].gl_Position = vec4( 1, -1, 0.5, 1);
+   gl_MeshVerticesEXT[1].gl_Position = vec4( ONE, -1, 0.5, 1);
    gl_MeshVerticesEXT[2].gl_Position = vec4( 1,  1, 0.5, 1);
    gl_MeshVerticesEXT[3].gl_Position = vec4(-1,  1, 0.5, 1);
 
