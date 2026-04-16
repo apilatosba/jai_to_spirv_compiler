@@ -5,6 +5,12 @@
 #import "Hash";
 #import "Math";
 
+#placeholder meshvertices;
+
+MeshShader :: () {
+   meshvertices[0].positon = .{ 99 };
+}
+
 #run {
    set_build_options_dc(.{ do_output = false });
 

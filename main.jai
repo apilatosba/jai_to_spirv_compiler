@@ -13,8 +13,8 @@ MeshOutVertex :: struct {
 }
 MeshOutPrimitive :: struct { }
 
-MESH_VERTICES_NAME      :: "meshVertices";
-MESH_TRIANGLES_NAME     :: "meshTriangles";
+MESH_VERTICES_NAME      :: "meshvertices";
+MESH_TRIANGLES_NAME     :: "meshtriangles";
 SET_MESH_OUTPUTS_NAME   :: "SetMeshOutputs";
 // vvvvvv intrinsics vvvvvvvv
 Int32    :: s32; // idk. maybe not the way to do it
@@ -60,13 +60,13 @@ MeshPerVertex :: struct {
 FragmentData :: struct { }
 MeshData :: struct { }
 
-MeshShader :: (mOutVertex: *[] MeshOutVertex, mOutPrimitive: *[] MeshOutPrimitive, data: *MeshData) {
+MeshShader :: (mOutVertex: [] MeshOutVertex, mOutPrimitive: [] MeshOutPrimitive, data: *MeshData) {
    SetMeshOutputs(4, 2);
 
-   meshVertices[0].position = .{ -1, -1, 0.5, 1 };
-   meshVertices[1].position = .{  1, -1, 0.5, 1 };
-   meshVertices[2].position = .{  1,  1, 0.5, 1 };
-   meshVertices[3].position = .{ -1,  1, 0.5, 1 };
+   meshvertices[0].position = .{ -1, -1, 0.5, 1 };
+   meshvertices[1].position = .{  1, -1, 0.5, 1 };
+   meshvertices[2].position = .{  1,  1, 0.5, 1 };
+   meshvertices[3].position = .{ -1,  1, 0.5, 1 };
 
    a: float = 10;
    a = a + a;
@@ -117,31 +117,24 @@ Identifier :: struct {
                                           // otherwise if i have pointer to pointers program will not work.
                                           // and in the places where i used tip.pointer_to, i should use the Identifier stored here instead.
                                           //       - apila, 12/04/26
-                                       };
-
-                           // some array views in jai i want to register as fixed arrays. it would be better to be able create a Type
-                           // in the metaprogram and use it instead of this approach. even if there is a way to do it idk it (other than adding a string during compilation).
-                           // so this make sense only if array type is .VIEW
-                           //
-                           // i actually switched from Type to Type_Info for a similar reason. i can get rid of this but im lazy and this works so ill keep it for now.
-                           array:      struct {
-                                          fixed:   bool;
-                                          size:    int;
+                                          //
+                                          // im not sure about this. you know the type situation. this doesnt work well
+                                          //       - apila, 15/04/26
+                                          //
+                                          // idk if i should keep untyped or should use *void instead. because at first i planned to make almost every pointer an untyped pointer
+                                          // even if it is declared with a type but it turns out that there are a lot of limitations to this. and maybe i should keep it because
+                                          // in push data block it is typed but still i register untyped. but that maybe doesnt matter much because it means that instead of setting
+                                          // this field to false i would just set type to *void
+                                          //          - apila, 16/04/26
+                                          //
                                        };
                         };
       // _void: // Void doesnt have a value
       variable:         *Code_Declaration;
       builtinThingies:  enum {
-                           MeshVerticesEXTOutVariable;
                            PushDataVariable;
-                           PrimitiveTriangleIndicesEXTOutVariable;
                            SamplerHeapVariable;
                            ImageHeapVariable;
-                           MeshVertexOutVariableType; // i have this as a builtin thingy because the declration in the function argument doesnt match its actual type (array view vs fixed array)
-                                                      // and i had to create the type dynamically or find another way to make the ssa id and different types consistent
-                                                      // but thats gonna complicated it too much. instead i can handle this seperately if i have it as builtin thingy like this.
-                                                      //             - apila, 13/04/26
-                           MeshPrimitiveOutVariableType;
                         };
       compositeLiteral: struct {
                            type:       *Type_Info;
@@ -165,7 +158,27 @@ StorageClass :: enum {
 main :: () {
 }
 
+meshVerticesDeclaration:   *Code_Declaration;
+meshTrianglesDeclaration:  *Code_Declaration;
 #run {
+   {
+      code := code_of(meshvertices);
+      node := compiler_get_nodes(code);
+      assert(node.kind == .IDENT);
+
+      ci := cast(*Code_Ident) node;
+      meshVerticesDeclaration = ci.resolved_declaration;
+   }
+
+   {
+      code := code_of(meshtriangles);
+      node := compiler_get_nodes(code);
+      assert(node.kind == .IDENT);
+
+      ci := cast(*Code_Ident) node;
+      meshTrianglesDeclaration = ci.resolved_declaration;
+   }
+
    CompileToSpirv(code_of(MeshShader), .Mesh);
 }
 
@@ -419,15 +432,13 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
       case .Mesh; {
          index := 0;
 
-         // first argument: *[] MeshOutVertex. MeshOutVertex is user defined struct
+         // first argument: [] MeshOutVertex. MeshOutVertex is user defined struct
          {
             defer index += 1;
 
             assert(header.arguments.count > index, "not enough arguments");
-            assert(header.arguments[index].type.type == .POINTER, "first argument wrong");
-            pointer := cast(*Type_Info_Pointer) header.arguments[index].type;
-            assert(pointer.pointer_to.type == .ARRAY, "first argument wrong");
-            array := cast(*Type_Info_Array) pointer.pointer_to;
+            assert(header.arguments[index].type.type == .ARRAY, "first argument wrong");
+            array := cast(*Type_Info_Array) header.arguments[index].type;
 
             data.meshVertexOutUserStruct = array.element_type;
             data.meshVertexOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[index] };
@@ -439,10 +450,8 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             defer index += 1;
 
             assert(header.arguments.count > index, "not enough arguments");
-            assert(header.arguments[index].type.type == .POINTER, "second argument wrong");
-            pointer := cast(*Type_Info_Pointer) header.arguments[index].type;
-            assert(pointer.pointer_to.type == .ARRAY, "second argument wrong");
-            array := cast(*Type_Info_Array) pointer.pointer_to;
+            assert(header.arguments[index].type.type == .ARRAY, "second argument wrong");
+            array := cast(*Type_Info_Array) header.arguments[index].type;
 
             data.meshPrimitiveOutUserStruct = array.element_type;
             data.meshPrimitiveOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[index] };
@@ -536,9 +545,9 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          print_to_builder(*b, "OpEntryPoint MeshEXT \%% \"%\" \%% \%% \%% \%% \%% \%% \%%\n",
                               GetSSAId(*data, .{ type = .Function, function = header }),
                               "ApilaMS",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .MeshVerticesEXTOutVariable }),
+                              GetSSAId(*data, .{ type = .Variable, variable = meshVerticesDeclaration }),
                               GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PushDataVariable }),
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PrimitiveTriangleIndicesEXTOutVariable }),
+                              GetSSAId(*data, .{ type = .Variable, variable = meshTrianglesDeclaration }),
                               GetSSAId(*data, data.meshVertexOutVariableIdentifier),
                               GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
                               GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .ImageHeapVariable }),
@@ -621,7 +630,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          GetSSAId(*data, .{ type = ._Type, _type = .{ type = cast(*Type_Info) PushData } });
 
          print_to_builder(*b, "OpDecorate \%% BuiltIn PrimitiveTriangleIndicesEXT\n",
-                              GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PrimitiveTriangleIndicesEXTOutVariable })
+                              GetSSAId(*data, .{ type = .Variable, variable = meshTrianglesDeclaration })
          );
          print_to_builder(*b, "OpDecorate \%% BuiltIn ResourceHeapEXT\n",
                               GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .ImageHeapVariable })
@@ -1101,33 +1110,21 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
 
          if (ti.type == .ARRAY) {
             tia := cast(*Type_Info_Array) ti;
-            array := identifier._type.array;
+            assert(tia.array_type == .FIXED, "array type: %. .VIEW is basically a fat pointer, i will support it when i support pointers. .RESIZABLE is i think kaputt, dont use it.", tia.array_type);
 
-            fixed := tia.array_type == .FIXED || (tia.array_type == .VIEW && array.fixed);
-            assert(fixed, "array type: %. .VIEW is basically a fat pointer, i will support it when i support pointers. .RESIZABLE is i think kaputt, dont use it.", tia.array_type);
+            elementType := tia.element_type;
+            assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. idk if an array of pointers", tia.element_type.type);
+            elementTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = elementType } };
+            WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
 
-            if (fixed) {
-               elementType := tia.element_type;
-               assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. idk if an array of pointers", tia.element_type.type);
-               elementTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = elementType } };
-               WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
+            arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx tia.array_count, bitSize = 32 } };
+            WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
 
-               arraySize: int;
-               if (tia.array_type == .FIXED) {
-                  arraySize = tia.array_count;
-               } else {
-                  arraySize = array.size;
-               }
-
-               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ value._s64 = arraySize, bitSize = 32, unsigned = false } };
-               WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
-
-               print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
-                                    GetSSAId(data, identifier),
-                                    GetSSAId(data, elementTypeIdentifier),
-                                    GetSSAId(data, arraySizeIdentifier)
-               );
-            }
+            print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
+                                 GetSSAId(data, identifier),
+                                 GetSSAId(data, elementTypeIdentifier),
+                                 GetSSAId(data, arraySizeIdentifier)
+            );
 
             return;
          }
@@ -1143,28 +1140,34 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
       case .Variable;
          if (false) {
          } else if (IdentifierCompare(identifier, data.meshVertexOutVariableIdentifier)) {
-            meshVertexOutVariableIdentifierType := get_type(data.meshVertexOutVariableIdentifier.variable.type);
-            assert(data.meshVertexOutVariableIdentifier.variable.type.type == .POINTER);
+            // [] MeshVertexOut
+            assert(data.meshVertexOutVariableIdentifier.variable.type.type == .ARRAY);
 
-            typeIdentifier: Identifier = .{ type = .BuiltinThingies, builtinThingies = .MeshVertexOutVariableType };
+            storageClass: StorageClass = .Output;
+            typeIdentifier := GetVariableTypeIdentifier(data, data.meshVertexOutVariableIdentifier);
+            pointerIdentifier := GetPointerTypeIdentifier(typeIdentifier, storageClass);
             WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+            WriteTypeOrVariableOrConstant(data, b, pointerIdentifier);
 
             print_to_builder(b, "\%% = OpVariable \%% %\n",
                                  GetSSAId(data, identifier),
-                                 GetSSAId(data, typeIdentifier),
-                                 ToSpirvStorageClass(.Output)
+                                 GetSSAId(data, pointerIdentifier),
+                                 ToSpirvStorageClass(storageClass)
             );
          } else if (IdentifierCompare(identifier, data.meshPrimitiveOutVariableIdentifier)) {
-            meshPrimitiveOutVariableIdentifierType := get_type(data.meshPrimitiveOutVariableIdentifier.variable.type);
-            assert(data.meshPrimitiveOutVariableIdentifier.variable.type.type == .POINTER);
+            // [] MeshPrimitiveOut
+            assert(data.meshPrimitiveOutVariableIdentifier.variable.type.type == .ARRAY);
 
-            typeIdentifier: Identifier = .{ type = .BuiltinThingies, builtinThingies = .MeshPrimitiveOutVariableType };
+            storageClass: StorageClass = .Output;
+            typeIdentifier := GetVariableTypeIdentifier(data, data.meshPrimitiveOutVariableIdentifier);
+            pointerIdentifier := GetPointerTypeIdentifier(typeIdentifier, storageClass);
             WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+            WriteTypeOrVariableOrConstant(data, b, pointerIdentifier);
 
             print_to_builder(b, "\%% = OpVariable \%% %\n",
                                  GetSSAId(data, data.meshPrimitiveOutVariableIdentifier),
-                                 GetSSAId(data, typeIdentifier),
-                                 ToSpirvStorageClass(.Output)
+                                 GetSSAId(data, pointerIdentifier),
+                                 ToSpirvStorageClass(storageClass)
             );
          } else {
             // assert(false, "identifier: %. i guess all variables in \"Types, variables and constants\" block is builtin (user cant define a variable that goes in this block, i think)", identifier);
@@ -1173,28 +1176,6 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          }
       case .BuiltinThingies;
          if #complete identifier.builtinThingies == {
-            case .MeshVerticesEXTOutVariable;
-               // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
-
-               // *[] MeshPerVertex
-
-               arrayIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) [] MeshPerVertex, array = .{ fixed = true, size = data.maxVertices } } };
-               WriteTypeOrVariableOrConstant(data, b, arrayIdentifier);
-
-               typeSSAId := GetNextSSAId(data); // ssa id of *[max vertices] MeshPerVertex output. fine to not have an identifier since only used here
-
-               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
-                                    typeSSAId,
-                                    ToSpirvStorageClass(.Output),
-                                    GetSSAId(data, arrayIdentifier)
-               );
-
-               print_to_builder(b, "\%% = OpVariable \%% %\n",
-                                    GetSSAId(data, identifier),
-                                    typeSSAId,
-                                    ToSpirvStorageClass(.Output)
-               );
-
             case .PushDataVariable;
                typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) *void, pointer = .{ storageClass = .PushConstant, untyped = true } } };
                WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
@@ -1207,30 +1188,6 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                                     GetSSAId(data, typeIdentifier),
                                     ToSpirvStorageClass(.PushConstant),
                                     GetSSAId(data, pushDataStructIdentifier)
-               );
-
-            case .PrimitiveTriangleIndicesEXTOutVariable;
-               // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
-
-               // *[] uint3    if triangles
-               // *[] uint2    if lines
-               // *[] uint     if points
-
-               arrayIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) [] Int32x3, array = .{ fixed = true, size = data.maxPrimitives } } };
-               WriteTypeOrVariableOrConstant(data, b, arrayIdentifier);
-
-               typeSSAId := GetNextSSAId(data); // ssa id of *[max primitives] uint3 output. fine to not have an identifier since only used here
-
-               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
-                                    typeSSAId,
-                                    ToSpirvStorageClass(.Output),
-                                    GetSSAId(data, arrayIdentifier)
-               );
-
-               print_to_builder(b, "\%% = OpVariable \%% %\n",
-                                    GetSSAId(data, identifier),
-                                    typeSSAId,
-                                    ToSpirvStorageClass(.Output)
                );
 
             case .SamplerHeapVariable;
@@ -1251,50 +1208,6 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                                     GetSSAId(data, identifier),
                                     GetSSAId(data, typeIdentifier),
                                     ToSpirvStorageClass(.UniformConstant)
-               );
-
-            case .MeshVertexOutVariableType;
-               // *[] MeshVertexOut
-
-               meshVertexOutUserStructTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = data.meshVertexOutUserStruct } };
-               WriteTypeOrVariableOrConstant(data, b, meshVertexOutUserStructTypeIdentifier);
-
-               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.maxVertices, bitSize = 32 } };
-               WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
-
-               arrayTypeSSAId := GetNextSSAId(data); // not having an identifier for this since it is only used here
-               print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
-                                    arrayTypeSSAId,
-                                    GetSSAId(data, meshVertexOutUserStructTypeIdentifier),
-                                    GetSSAId(data, arraySizeIdentifier)
-               );
-
-               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
-                                    GetSSAId(data, identifier),
-                                    ToSpirvStorageClass(.Output),
-                                    arrayTypeSSAId
-               );
-
-            case .MeshPrimitiveOutVariableType;
-               // *[] MeshPrimitiveOut
-
-               meshPrimitiveOutUserStructIdentifier: Identifier = .{ type = ._Type, _type = .{ type = data.meshPrimitiveOutUserStruct } };
-               WriteTypeOrVariableOrConstant(data, b, meshPrimitiveOutUserStructIdentifier);
-
-               arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.maxPrimitives, bitSize = 32 } };
-               WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
-
-               arrayTypeSSAId := GetNextSSAId(data); // not having an identifier for this since it is only used here
-               print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
-                                    arrayTypeSSAId,
-                                    GetSSAId(data, meshPrimitiveOutUserStructIdentifier),
-                                    GetSSAId(data, arraySizeIdentifier)
-               );
-
-               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
-                                    GetSSAId(data, identifier),
-                                    ToSpirvStorageClass(.Output),
-                                    arrayTypeSSAId
                );
          }
 
@@ -1587,13 +1500,42 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
          if cbo.operator_type == {
             case #char ".";
+               storageClass := StorageClass.Output;
+
                base, indices := GetBaseAndIndices(cbo);
-               // print_to_builder(function, "\%% = OpAccessChain \%% \%%");
+               assert(base.type == .Variable);
+
+               baseTypeIdentifier := GetVariableTypeIdentifier(data, base);
+               basePointerTypeIdentifier := GetPointerTypeIdentifier(baseTypeIdentifier, storageClass);
+
+               lValueSSAId := GetNextSSAId(data);
+               print_to_builder(function, "\%% = OpAccessChain \%% \%%",
+                                          lValueSSAId,
+                                          GetSSAId(data, basePointerTypeIdentifier),
+                                          GetSSAId(data, base)
+               );
+
+               for indices {
+                  print_to_builder(function, " \%%",
+                                             GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = it, bitSize = 32 } })
+                  );
+               }
+
+               print_to_builder(function, "\n");
 
                if (additionalData.isLValue) {
-
+                  return lValueSSAId, .{};
                }
-               
+
+               dereferencedSSAId := GetNextSSAId(data);
+               print_to_builder(function, "\%% = OpLoad \%% \%%\n",
+                                          dereferencedSSAId,
+                                          GetSSAId(data, baseTypeIdentifier),
+                                          lValueSSAId
+               );
+
+               return dereferencedSSAId, .{};
+
             case #char "-"; #through;
             case #char "+"; {
                assert(cbo.left.type == cbo.right.type);
@@ -1734,7 +1676,6 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
          storageClass := StorageClass.Function;
          // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
-
          print_to_builder(general, "\%% = OpVariable \%% %",
                                     variableSSAId,
                                     GetSSAId(data, .{ type = ._Type, _type = .{ type = pointerToVariableType, pointer = .{ storageClass = storageClass } } }),
@@ -1757,6 +1698,83 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
    return -69, .{};
 }
 
+// i need this function because some of the variables, their jai types doesnt match the spirv i want to generate.
+// for example meshvertices is declared as an array view but is a fixed size array.
+GetVariableTypeIdentifier :: (data: *CompilationData, variable: Identifier) -> Identifier {
+   // if an array
+   GetElementType :: (declaration: *Code_Declaration) -> *Type_Info #expand {
+      assert(declaration.type.type == .ARRAY, "type: %", declaration.type.type);
+      tip := cast(*Type_Info_Array) declaration.type;
+      return tip.element_type;
+   }
+
+   CreateTypeInfoArray :: (elementType: *Type_Info, arrayCount: int) -> *Type_Info_Array #expand {
+      typeInfo := New(Type_Info_Array);
+      typeInfo.type = .ARRAY;
+      typeInfo.element_type = elementType;
+      typeInfo.array_type = .FIXED;
+      typeInfo.array_count = arrayCount;
+
+      return typeInfo;
+   }
+
+   assert(variable.type == .Variable, "variable.type: %", variable.type);
+
+   declaration := variable.variable;
+   name := declaration.name;
+
+   if (name == MESH_VERTICES_NAME) {
+      elementType := GetElementType(declaration);
+      assert(elementType == cast(*Type_Info) MeshPerVertex);
+
+      typeInfo := CreateTypeInfoArray(elementType, data.maxVertices);
+      return .{ type = ._Type, _type = .{ type = typeInfo } };
+   }
+
+   if (name == MESH_TRIANGLES_NAME) {
+      elementType := GetElementType(declaration);
+      assert(elementType == cast(*Type_Info) Int32x3);
+
+      typeInfo := CreateTypeInfoArray(elementType, data.maxPrimitives);
+      return .{ type = ._Type, _type = .{ type = typeInfo } };
+   }
+
+   if (IdentifierCompare(variable, data.meshVertexOutVariableIdentifier)) {
+      elementType := GetElementType(declaration);
+      typeInfo := CreateTypeInfoArray(elementType, data.maxVertices);
+      return .{ type = ._Type, _type = .{ type = typeInfo } };
+   }
+
+   if (IdentifierCompare(variable, data.meshPrimitiveOutVariableIdentifier)) {
+      elementType := GetElementType(declaration);
+      typeInfo := CreateTypeInfoArray(elementType, data.maxVertices);
+      return .{ type = ._Type, _type = .{ type = typeInfo } };
+   }
+
+   return .{ type = ._Type, _type = .{ type = declaration.type } };
+}
+
+// used to get the result type of OpVariable from jai declared type
+GetPointerTypeIdentifier :: (typeIdentifier: Identifier, storageClass: StorageClass) -> Identifier {
+   assert(typeIdentifier.type == ._Type, "type: %", typeIdentifier.type);
+
+   pointerTypeInfo := New(Type_Info_Pointer);
+   pointerTypeInfo.type = .POINTER;
+   pointerTypeInfo.runtime_size = 8;
+   pointerTypeInfo.pointer_to = typeIdentifier._type.type;
+
+   return .{ type = ._Type, _type = .{ type = pointerTypeInfo, pointer = .{ storageClass = storageClass } } };
+}
+
+// TODO
+// this function should return an array of ssa ids. because index might not be an int literal
+// but result of an OpLoad operation. also this function can generate instructions. for example if an index to the array
+// is a variable the OpLoad operation needs to be done and the ssa id generatd by that OpLoad should be returned by this function
+// since varaible declaration and such is not allowed, just a single string builder is enough and this function emits to that builder.
+// also my traversel logic is not correct. i should visit from leafs to the root. so this function should be a recursive function that
+// goes left then visits then goes right i think. and if i traverse in this order then i dont need to reverse the array because they are added in the correct order
+//          - apila, 16/04/26
+//
 // tree of a.b.c is:
 //          .
 //        /   \
@@ -1789,6 +1807,10 @@ GetBaseAndIndices :: (cbo: *Code_Binary_Operator) -> base: Identifier, indices: 
             array_add(*indices, memberIndex);
             current = currentCbo.left;
 
+         case .ARRAY;
+            tia := cast(*Type_Info_Array) leftType;
+            print("right.kind: %\n", right.kind);
+            break;
          case; assert(false, "not yet implemented! type: %", leftType.type);
       }
    }
