@@ -6,94 +6,103 @@ OpCapability PhysicalStorageBufferAddresses
 OpExtension "SPV_EXT_mesh_shader"
 OpExtension "SPV_EXT_descriptor_heap"
 OpExtension "SPV_KHR_untyped_pointers"
-%39 = OpExtInstImport "GLSL.std.450"
+%53 = OpExtInstImport "GLSL.std.450"
 OpMemoryModel PhysicalStorageBuffer64 GLSL450
-OpEntryPoint MeshEXT %1 "ApilaMS" %14 %40 %41 %42 %43 %44 %45
-OpExecutionModeId %1 LocalSizeId %46 %46 %46
+OpEntryPoint MeshEXT %1 "ApilaMS" %14 %54 %55 %31 %56 %57 %58
+OpExecutionModeId %1 LocalSizeId %59 %59 %59
 OpExecutionMode %1 OutputVertices 40
 OpExecutionMode %1 OutputPrimitivesEXT 20
 OpExecutionMode %1 OutputTrianglesEXT
 
 ; annotations (decorations)
-OpDecorate %47 Block
-OpMemberDecorate %47 0 BuiltIn Position
-OpMemberDecorate %47 1 BuiltIn PointSize
-OpDecorate %42 Location 0
-OpDecorate %43 Location 2
-OpDecorate %43 PerPrimitiveEXT
-OpDecorate %41 BuiltIn PrimitiveTriangleIndicesEXT
-OpDecorate %44 BuiltIn ResourceHeapEXT
-OpDecorate %45 BuiltIn SamplerHeapEXT
+OpDecorate %60 Block
+OpMemberDecorate %60 0 BuiltIn Position
+OpMemberDecorate %60 1 BuiltIn PointSize
+OpDecorate %31 Location 0
+OpDecorate %56 Location 1
+OpDecorate %56 PerPrimitiveEXT
+OpDecorate %55 BuiltIn PrimitiveTriangleIndicesEXT
+OpDecorate %57 BuiltIn ResourceHeapEXT
+OpDecorate %58 BuiltIn SamplerHeapEXT
 
 ; struct annotate infos
-OpDecorate %48 Block
-OpMemberDecorate %48 0 Offset 0
-OpMemberDecorate %48 1 Offset 8
-OpMemberDecorate %48 2 Offset 16
+OpDecorate %61 Block
+OpMemberDecorate %61 0 Offset 0
+OpMemberDecorate %61 1 Offset 8
+OpMemberDecorate %61 2 Offset 16
 
 ; Types, variables and constants
-%49 = OpTypeInt 32 1
-%50 = OpTypeVector %49 3
-%51 = OpTypeInt 32 0
-%52 = OpConstant %51 20
-%53 = OpTypeArray %50 %52
-%54 = OpTypePointer Output %53
-%41 = OpVariable %54 Output
-%31 = OpTypeFloat 32
-%55 = OpTypeVector %31 4
-%18 = OpTypePointer Output %55
-%6 = OpConstant %51 2
-%7 = OpConstant %31 -1
+%62 = OpTypeInt 32 0
+%6 = OpConstant %62 2
+%63 = OpTypeInt 32 1
+%20 = OpConstant %63 2
+%45 = OpTypeFloat 32
+%27 = OpConstant %45 0
+%64 = OpTypeVector %45 2
+%9 = OpConstant %45 1
+%32 = OpConstantComposite %64 %9 %27
+%65 = OpTypeUntypedPointerKHR UniformConstant
+%57 = OpUntypedVariableKHR %65 UniformConstant    ; image heap variable
+%11 = OpConstant %63 0
+%66 = OpTypeUntypedPointerKHR PushConstant
+%67 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
+%61 = OpTypeStruct %67 %67 %67
+%54 = OpUntypedVariableKHR %66 PushConstant %61   ; push data variable
+%68 = OpTypeVector %45 4
+%22 = OpTypePointer Output %68
+%26 = OpTypePointer Output %68
+%34 = OpTypePointer Output %64
+%38 = OpConstantComposite %64 %27 %9
+%42 = OpConstant %45 10
+%69 = OpTypeInt 64 1
+%52 = OpTypePointer Function %69
+%70 = OpTypeStruct  ; MeshOutPrimitive
+%71 = OpConstant %62 40
+%72 = OpTypeArray %70 %71
+%73 = OpTypePointer Output %72
+%56 = OpVariable %73 Output    ; mOutPrimitive
+%5 = OpConstant %62 4
+%49 = OpConstant %45 9
+%8 = OpConstant %45 0.5
+%19 = OpConstantComposite %68 %9 %9 %8 %9
+%7 = OpConstant %45 -1
+%23 = OpConstantComposite %68 %7 %9 %8 %9
 %2 = OpTypeVoid
-%20 = OpConstant %49 2
-%8 = OpConstant %31 0.5
-%56 = OpTypeUntypedPointerKHR UniformConstant
-%44 = OpUntypedVariableKHR %56 UniformConstant
-%24 = OpConstant %49 3
 %3 = OpTypeFunction %2
-%57 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
-%48 = OpTypeStruct %57 %57 %57
-%9 = OpConstant %31 1
-%26 = OpTypePointer Output %55
-%11 = OpConstant %49 0
-%58 = OpTypeUntypedPointerKHR PushConstant
-%40 = OpUntypedVariableKHR %58 PushConstant %48
-%59 = OpTypeInt 64 1
-%38 = OpTypePointer Function %59
-%47 = OpTypeStruct %55 %31  ; MeshPerVertex
-%16 = OpConstant %49 1
-%45 = OpUntypedVariableKHR %56 UniformConstant
-%46 = OpConstant %51 1
-%10 = OpConstantComposite %55 %7 %7 %8 %9
-%15 = OpConstantComposite %55 %9 %7 %8 %9
-%13 = OpTypePointer Output %55
-%19 = OpConstantComposite %55 %9 %9 %8 %9
-%22 = OpTypePointer Output %55
-%23 = OpConstantComposite %55 %7 %9 %8 %9
-%28 = OpConstant %31 10
-%60 = OpTypeStruct  ; MeshOutPrimitive
-%61 = OpConstant %51 40
-%62 = OpTypeArray %60 %61
-%63 = OpTypePointer Output %62
-%43 = OpVariable %63 Output
-%5 = OpConstant %51 4
-%29 = OpTypePointer Function %31
-%35 = OpConstant %31 9
-%65 = OpTypeVector %31 3
-%64 = OpTypeStruct %65 %55  ; MeshOutVertex
-%66 = OpTypeArray %64 %61
-%67 = OpTypePointer Output %66
-%42 = OpVariable %67 Output
-%68 = OpTypeArray %47 %61
-%69 = OpTypePointer Output %68
-%14 = OpVariable %69 Output
+%74 = OpTypeStruct %64  ; MeshOutVertex
+%75 = OpTypeArray %74 %71
+%76 = OpTypePointer Output %75
+%31 = OpVariable %76 Output    ; mOutVertex
+%10 = OpConstantComposite %68 %7 %7 %8 %9
+%77 = OpTypeVector %63 3
+%78 = OpConstant %62 20
+%79 = OpTypeArray %77 %78
+%80 = OpTypePointer Output %79
+%55 = OpVariable %80 Output    ; meshtriangles
+%35 = OpConstantComposite %64 %9 %9
+%43 = OpTypePointer Function %45
+%24 = OpConstant %63 3
+%15 = OpConstantComposite %68 %9 %7 %8 %9
+%13 = OpTypePointer Output %68
+%16 = OpConstant %63 1
+%58 = OpUntypedVariableKHR %65 UniformConstant    ; sampler heap variable
+%59 = OpConstant %62 1
+%30 = OpTypePointer Output %64
+%37 = OpTypePointer Output %64
+%28 = OpConstantComposite %64 %27 %27
+%40 = OpTypePointer Output %64
+%60 = OpTypeStruct %68 %45  ; MeshPerVertex
+%18 = OpTypePointer Output %68
+%81 = OpTypeArray %60 %71
+%82 = OpTypePointer Output %81
+%14 = OpVariable %82 Output    ; meshvertices
 
 ; functions
 ; main function
 %1 = OpFunction %2 None %3
 %4 = OpLabel
-%27 = OpVariable %29 Function %28
-%37 = OpVariable %38 Function
+%41 = OpVariable %43 Function %42      ; a
+%51 = OpVariable %52 Function      ; b
 OpSetMeshOutputsEXT %5 %6
 %12 = OpAccessChain %13 %14 %11 %11
 OpStore %12 %10
@@ -103,12 +112,20 @@ OpStore %17 %15
 OpStore %21 %19
 %25 = OpAccessChain %26 %14 %24 %11
 OpStore %25 %23
-%30 = OpLoad %31 %27
-%32 = OpLoad %31 %27
-%33 = OpFAdd %31 %30 %32
-OpStore %27 %33
-%34 = OpLoad %31 %27
-%36 = OpFSub %31 %34 %35
-OpStore %27 %36
+%29 = OpAccessChain %30 %31 %11 %11
+OpStore %29 %28
+%33 = OpAccessChain %34 %31 %16 %11
+OpStore %33 %32
+%36 = OpAccessChain %37 %31 %20 %11
+OpStore %36 %35
+%39 = OpAccessChain %40 %31 %24 %11
+OpStore %39 %38
+%44 = OpLoad %45 %41      ; a
+%46 = OpLoad %45 %41      ; a
+%47 = OpFAdd %45 %44 %46
+OpStore %41 %47
+%48 = OpLoad %45 %41      ; a
+%50 = OpFSub %45 %48 %49
+OpStore %41 %50
 OpReturn
 OpFunctionEnd

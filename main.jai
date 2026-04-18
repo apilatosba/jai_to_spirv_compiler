@@ -8,8 +8,7 @@
 #import "File";
 
 MeshOutVertex :: struct {
-   position: Float3;
-   color: Float4;
+   uv: Float2;
 }
 MeshOutPrimitive :: struct { }
 
@@ -38,7 +37,7 @@ UInt64x3  :: struct {};
 UInt64x4  :: struct {};
 
 Float    :: float; // idk. maybe not the way to do it
-Float2   :: struct {};
+Float2   :: struct { x: Float; y: Float; };
 Float3   :: struct {};
 Float4   :: struct { x: Float; y: Float; z: Float; w: Float; };
 
@@ -58,7 +57,9 @@ MeshPerVertex :: struct {
 
 
 FragmentData :: struct { }
-MeshData :: struct { }
+MeshData :: struct {
+   offset: float;
+}
 
 MeshShader :: (mOutVertex: [] MeshOutVertex, mOutPrimitive: [] MeshOutPrimitive, data: *MeshData) {
    SetMeshOutputs(4, 2);
@@ -67,6 +68,11 @@ MeshShader :: (mOutVertex: [] MeshOutVertex, mOutPrimitive: [] MeshOutPrimitive,
    meshvertices[1].position = .{  1, -1, 0.5, 1 };
    meshvertices[2].position = .{  1,  1, 0.5, 1 };
    meshvertices[3].position = .{ -1,  1, 0.5, 1 };
+
+   mOutVertex[0].uv = .{ 0, 0 };
+   mOutVertex[1].uv = .{ 1, 0 };
+   mOutVertex[2].uv = .{ 1, 1 };
+   mOutVertex[3].uv = .{ 0, 1 };
 
    a: float = 10;
    a = a + a;
@@ -328,6 +334,7 @@ CompilationData :: struct {
    writtenIdentifiers:                    Table(Identifier, IdentifierWriteStatus, IdentifierHash, IdentifierCompare);
    meshVertexOutUserStruct:               *Type_Info;
    meshPrimitiveOutUserStruct:            *Type_Info;
+   shaderDataPointerVariableIdentifier:   Identifier;
 
 
    HashStringArray :: (x: [] string) -> u32 {
@@ -471,8 +478,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             assert(header.arguments[index].type.type == .POINTER, "third argument wrong");
             pointer := cast(*Type_Info_Pointer) header.arguments[index].type;
 
-            userStruct := get_type(pointer.pointer_to);
-            // GetSSAId(*data, .{ type = ._Type, _type = userStruct });
+            data.shaderDataPointerVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
          }
       }
 
@@ -1157,16 +1163,18 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
             WriteTypeOrVariableOrConstant(data, b, pointerIdentifier);
 
-            print_to_builder(b, "\%% = OpVariable \%% %\n",
+            print_to_builder(b, "\%% = OpVariable \%% %    ; %\n",
                                  GetSSAId(data, identifier),
                                  GetSSAId(data, pointerIdentifier),
-                                 ToSpirvStorageClass(storageClass)
+                                 ToSpirvStorageClass(storageClass),
+                                 name
             );
          } else {
             // assert(false, "identifier: %. i guess all variables in \"Types, variables and constants\" block is builtin (user cant define a variable that goes in this block, i think)", identifier);
             print("WARNING    variable: %. skipped!\n", identifier.variable.declaration.*);
             return;
          }
+
       case .BuiltinThingies;
          if #complete identifier.builtinThingies == {
             case .PushDataVariable;
@@ -1176,7 +1184,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                pushDataStructIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) PushData } };
                WriteTypeOrVariableOrConstant(data, b, pushDataStructIdentifier);
 
-               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% % \%%\n",
+               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% % \%%   ; push data variable\n",
                                     GetSSAId(data, identifier),
                                     GetSSAId(data, typeIdentifier),
                                     ToSpirvStorageClass(.PushConstant),
@@ -1187,7 +1195,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } };
                WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
 
-               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %\n",
+               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %    ; sampler heap variable\n",
                                     GetSSAId(data, identifier),
                                     GetSSAId(data, typeIdentifier),
                                     ToSpirvStorageClass(.UniformConstant)
@@ -1197,7 +1205,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cast(*Type_Info) *void, pointer = .{ storageClass = .UniformConstant, untyped = true } } };
                WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
 
-               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %\n",
+               print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %    ; image heap variable\n",
                                     GetSSAId(data, identifier),
                                     GetSSAId(data, typeIdentifier),
                                     ToSpirvStorageClass(.UniformConstant)
@@ -1430,63 +1438,53 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                }
 
             case .STRUCT;
-               structLiteralInfo := cl.values.struct_literal_info;
-               identifier: Identifier = .{ type = .CompositeLiteral, compositeLiteral = .{ type = cl.type } };
-               identifier.compositeLiteral.arguments = NewArray(structLiteralInfo.arguments.count, *Identifier);
-
                assert(cl.type.type == .STRUCT);
                tis := cast(*Type_Info_Struct) cl.type;
+               structLiteralInfo := cl.values.struct_literal_info;
 
-               for structLiteralInfo.arguments {
-                  argumentAdditionalData: GenerateInstructionsData;
+               isConstant := IsStructLiteralConstant(cl);
+               if (isConstant) {
+                  identifier: Identifier = .{ type = .CompositeLiteral, compositeLiteral = .{ type = cl.type } };
+                  identifier.compositeLiteral.arguments = NewArray(structLiteralInfo.arguments.count, *Identifier);
 
-                  // wait a minute. i think i dont need to handle the casts manually like this.
-                  // becasue there is Code_Cast user needs to cast the type manually anyways.
-                  // unless you go from 64 bit to 32 bit. idk
-                  //             - apila, 14/04/26
-                  //
-                  //
-                  // doing this autocast thingy only on literals because thats the behaivour of jai
-                  // and i want to keep the same behaviour. for example following works on jai:
-                  //
-                  //    f: float = -1;
-                  //
-                  // but the following doesnt work in jai:
-                  //
-                  //    i: int = -1;
-                  //    f: float = i; // this is an error
-                  //
-                  // so i am only doing the autocast if the node is a Code_Literal, otherwise additionalData will not be used
-                  // and additional data is not recursed in GenerateInstructions function
-                  //       - apila, 18/04/26
-                  memberType := tis.members[it_index].type;
-                  argumentAdditionalData.literal.autoCastFromIntToFloat = memberType.type == .FLOAT && it.type.type == .INTEGER;
+                  for structLiteralInfo.arguments {
+                     argumentAdditionalData := GetAutoCastAdditionalData(tis.members[it_index].type, it.type);
 
-                  if (memberType.type == .INTEGER) {
-                     if (false) {
-                     } else if (memberType == cast(*Type_Info) Int32) {
-                        argumentAdditionalData.literal.intLiteralBitSize = 32;
-                        argumentAdditionalData.literal.intLiteralUnsigned = false;
-                     } else if (memberType == cast(*Type_Info) UInt32) {
-                        argumentAdditionalData.literal.intLiteralBitSize = 32;
-                        argumentAdditionalData.literal.intLiteralUnsigned = true;
-                     } else if (memberType == cast(*Type_Info) Int64) {
-                        argumentAdditionalData.literal.intLiteralBitSize = 64;
-                        argumentAdditionalData.literal.intLiteralUnsigned = false;
-                     } else if (memberType == cast(*Type_Info) UInt64) {
-                        argumentAdditionalData.literal.intLiteralBitSize = 64;
-                        argumentAdditionalData.literal.intLiteralUnsigned = true;
-                     }
+                     _, argumentIdentifier := GenerateInstructions(data, it, general, function, argumentAdditionalData);
+                     assert(argumentIdentifier.type != .Invalid, "struct: %, index: %, loc: %:%", tis.name, it_index, node.c0, node.l0);
+
+                     heapCopy := New(Identifier);
+                     heapCopy.* = argumentIdentifier;
+                     identifier.compositeLiteral.arguments[it_index] = heapCopy;
                   }
 
-                  _, argumentIdentifier := GenerateInstructions(data, it, general, function, argumentAdditionalData);
-                  assert(argumentIdentifier.type != .Invalid, "struct: %, index: %, loc: %:%", tis.name, it_index, node.c0, node.l0);
-                  heapCopy := New(Identifier);
-                  heapCopy.* = argumentIdentifier;
-                  identifier.compositeLiteral.arguments[it_index] = heapCopy;
-               }
+                  return GetSSAId(data, identifier), identifier;
+               } else {
+                  resultSSAId := GetNextSSAId(data);
+                  typeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = cl.type } };
 
-               return GetSSAId(data, identifier), identifier;
+                  compositeConstructBuilder: String_Builder;
+                  print_to_builder(*compositeConstructBuilder, "\%% = OpCompositeConstruct \%%",
+                                                               resultSSAId,
+                                                               GetSSAId(data, typeIdentifier)
+                  );
+
+                  for structLiteralInfo.arguments {
+                     argumentAdditionalData := GetAutoCastAdditionalData(tis.members[it_index].type, it.type);
+
+                     // argumentIdentifier doesnt have any value if "it" is not a literal
+                     argumentSSAId, argumentIdentifier := GenerateInstructions(data, it, general, function, argumentAdditionalData);
+
+                     print_to_builder(*compositeConstructBuilder, " \%%",
+                                                                  argumentSSAId
+                     );
+                  }
+
+                  print_to_builder(*compositeConstructBuilder, "\n");
+                  append_and_steal_buffers(function, *compositeConstructBuilder);
+
+                  return resultSSAId, .{};
+               }
 
             case; assert(false, "cl.value_type: %\n", cl.value_type);
          }
@@ -1497,6 +1495,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
          variableIdentifier := GetVariableIdentifier(ci);
          variableSSAId := GetSSAId(data, variableIdentifier);
+         variableName := GetVariableName(variableIdentifier);
 
          if (additionalData.isLValue) {
             return variableSSAId, variableIdentifier;
@@ -1505,10 +1504,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          deferencedSSAId := GetNextSSAId(data);
 
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = .{ type = ci.resolved_declaration.type } };
-         print_to_builder(function, "\%% = OpLoad \%% \%%\n",
+         print_to_builder(function, "\%% = OpLoad \%% \%%      ; %\n",
                                     deferencedSSAId,
                                     GetSSAId(data, variableTypeIdentifier),
-                                    variableSSAId
+                                    variableSSAId,
+                                    variableName
          );
 
          return deferencedSSAId, .{};
@@ -1700,11 +1700,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                                     ToSpirvStorageClass(storageClass),
          );
 
-         if (initializerSSAId == NO_INITIALIZER) {
-            print_to_builder(general, "\n");
-         } else {
-            print_to_builder(general, " \%%\n", initializerSSAId);
+         if (initializerSSAId != NO_INITIALIZER) {
+            print_to_builder(general, " \%%", initializerSSAId);
          }
+
+         print_to_builder(general, "      ; %\n", GetVariableName(variableIdentifier));
 
          return variableSSAId, variableIdentifier;
       case .CAST                        ;
@@ -1714,6 +1714,96 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
    assert(false, "node.kind: %, didnt return!", node.kind);
    return -69, .{};
+}
+
+GetAutoCastAdditionalData :: (memberType: *Type_Info, literalNodeType: *Type_Info) -> GenerateInstructionsData {
+   additionalData: GenerateInstructionsData;
+
+   // wait a minute. i think i dont need to handle the casts manually like this.
+   // becasue there is Code_Cast user needs to cast the type manually anyways.
+   // unless you go from 64 bit to 32 bit. idk
+   //             - apila, 14/04/26
+   //
+   //
+   // doing this autocast thingy only on literals because thats the behaivour of jai
+   // and i want to keep the same behaviour. for example following works on jai:
+   //
+   //    f: float = -1;
+   //
+   // but the following doesnt work in jai:
+   //
+   //    i: int = -1;
+   //    f: float = i; // this is an error
+   //
+   // so i am only doing the autocast if the node is a Code_Literal, otherwise additionalData will not be used
+   // and additional data is not recursed in GenerateInstructions function
+   //       - apila, 18/04/26
+   additionalData.literal.autoCastFromIntToFloat = memberType.type == .FLOAT && literalNodeType.type == .INTEGER;
+
+   if (memberType.type == .INTEGER) {
+      if (false) {
+      } else if (memberType == cast(*Type_Info) Int32) {
+         additionalData.literal.intLiteralBitSize = 32;
+         additionalData.literal.intLiteralUnsigned = false;
+      } else if (memberType == cast(*Type_Info) UInt32) {
+         additionalData.literal.intLiteralBitSize = 32;
+         additionalData.literal.intLiteralUnsigned = true;
+      } else if (memberType == cast(*Type_Info) Int64) {
+         additionalData.literal.intLiteralBitSize = 64;
+         additionalData.literal.intLiteralUnsigned = false;
+      } else if (memberType == cast(*Type_Info) UInt64) {
+         additionalData.literal.intLiteralBitSize = 64;
+         additionalData.literal.intLiteralUnsigned = true;
+      }
+   }
+
+   return additionalData;
+}
+
+// this function is used to determine whether i should use OpConstantComposite or OpCompositeConstruct
+// so i think it is still fine even if this function returns false all the time
+//       - apila, 18/04/26
+IsStructLiteralConstant :: (literal: *Code_Literal) -> bool {
+   // assume result is true and set to false if not constant
+   Helper :: (literal: *Code_Literal, result: *bool) {
+      if literal.value_type == {
+         case .ARRAY; #through;
+         case .STRUCT;
+            array := ifx literal.value_type == .STRUCT then literal.struct_literal_info.arguments else literal.array_literal_info.array_members;
+            for array {
+               // i am being lazy here and saying if it is not literal then gg
+               // but thats not true. it could be a constant variable.
+               //
+               // is there a better way to check if a code node has a compile time constant value?
+               //          - apila, 18/04/26
+               if (it.kind != .LITERAL) {
+                  result.* = false;
+                  return;
+               }
+
+               cl := cast(*Code_Literal) it;
+               Helper(cl, result);
+            }
+
+         case .NUMBER; return;
+         case .BOOLEAN; return;
+         case .STRING; return;
+
+         case .POINTER;
+            result.* = false;
+            return;
+
+         case .TYPE_INFO;
+            result.* = false;
+            return;
+      }
+   }
+
+   assert(literal.value_type == .STRUCT, "type: %", literal.value_type);
+   result := true;
+   Helper(literal, *result);
+
+   return result;
 }
 
 GetVariableIdentifier :: (ci: *Code_Ident) -> Identifier {
@@ -1824,6 +1914,9 @@ GetPointerTypeIdentifier :: (type: *Type_Info, storageClass: StorageClass) -> Id
    return .{ type = ._Type, _type = .{ type = pointerTypeInfo, pointer = .{ storageClass = storageClass } } };
 }
 
+//
+// this function only works if none of the "."s are deference operations
+//
 // tree of a.b.c is:
 //          .
 //        /   \
@@ -1838,15 +1931,15 @@ GetBaseAndIndices :: (data: *CompilationData, b: *String_Builder, cbo: *Code_Bin
    // treat indices, base and baseSeen as if it is they are capture variables
    Helper :: (data: *CompilationData, b: *String_Builder, current: *Code_Node, parent: *Code_Node, indices: *[..] int, base: *Identifier, baseSeen: *bool) {
       if (current.kind == .BINARY_OPERATOR) {
-            cbo := cast(*Code_Binary_Operator) current;
-            assert(cbo.operator_type == #char "." ||
-                   cbo.operator_type == .ARRAY_SUBSCRIPT,
-                   "operator: %", cbo.operator_type
-            );
+         cbo := cast(*Code_Binary_Operator) current;
+         assert(cbo.operator_type == #char "." ||
+                  cbo.operator_type == .ARRAY_SUBSCRIPT,
+                  "operator: %", cbo.operator_type
+         );
 
-            Helper(data, b, cbo.left, current, indices, base, baseSeen);
-            Helper(data, b, cbo.right, current, indices, base, baseSeen);
-            return;
+         Helper(data, b, cbo.left, current, indices, base, baseSeen);
+         Helper(data, b, cbo.right, current, indices, base, baseSeen);
+         return;
       }
 
       // this is the left most node. which means this is the base
