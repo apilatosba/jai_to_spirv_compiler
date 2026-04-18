@@ -5,18 +5,6 @@
 #import "Hash";
 #import "Math";
 
-#placeholder meshvertices;
-
-MeshShader :: () {
-   meshvertices[0].positon = .{ 99 };
-}
-
 #run {
    set_build_options_dc(.{ do_output = false });
-
-   code := #code a.b.c;
-   root := compiler_get_nodes(code);
-
-   cbo := root.(*Code_Binary_Operator);
-   print("%\n", cbo.left.(*Code_Binary_Operator).right.(*Code_Ident).name);
 }

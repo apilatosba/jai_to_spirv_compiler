@@ -130,7 +130,20 @@ Identifier :: struct {
                                        };
                         };
       // _void: // Void doesnt have a value
-      variable:         *Code_Declaration;
+      variable:         struct {
+                           //
+                           // the declaration is the default. but there some variables that their declaration is above the scope of the shader
+                           // for example intrinsics that i predefined, meshvertices, meshtriangles and such.
+                           // when i use code_of it doesnt behave the way i want. i think it generates competely new tree instead of referencing to the one generated
+                           // by the compiler during the compilation. so for that reason i use the name of these variables and this is fine since they are
+                           // treated as a keyword anyways.
+                           // and you shouldnt mix using name or using declaration for a single variable. either use name or the declaration. not both at the same time
+                           //          - apila, 18/04/26
+                           //
+                           declaration:   *Code_Declaration;
+                           useName:       bool;
+                           name:          string;
+                        };
       builtinThingies:  enum {
                            PushDataVariable;
                            SamplerHeapVariable;
@@ -158,27 +171,7 @@ StorageClass :: enum {
 main :: () {
 }
 
-meshVerticesDeclaration:   *Code_Declaration;
-meshTrianglesDeclaration:  *Code_Declaration;
 #run {
-   {
-      code := code_of(meshvertices);
-      node := compiler_get_nodes(code);
-      assert(node.kind == .IDENT);
-
-      ci := cast(*Code_Ident) node;
-      meshVerticesDeclaration = ci.resolved_declaration;
-   }
-
-   {
-      code := code_of(meshtriangles);
-      node := compiler_get_nodes(code);
-      assert(node.kind == .IDENT);
-
-      ci := cast(*Code_Ident) node;
-      meshTrianglesDeclaration = ci.resolved_declaration;
-   }
-
    CompileToSpirv(code_of(MeshShader), .Mesh);
 }
 
@@ -220,7 +213,12 @@ IdentifierHash :: (using identifier: Identifier) -> u32 {
 
          return cast,trunc(u32) fnv1a_hash(xx *_type.type, size_of(type_of(_type.type)));
       case .Void; return 69; // does the hash matter here?
-      case .Variable; return get_hash(variable.name);
+      case .Variable;
+         if (variable.useName) {
+            return get_hash(variable.name);
+         } else {
+            return get_hash(variable.declaration.name);
+         }
       case .BuiltinThingies; return get_hash(builtinThingies);
       case .CompositeLiteral;
          hash: u32 = 17;
@@ -276,7 +274,15 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
          }
 
       case .Void; return true;
-      case .Variable; return a.variable == b.variable; // two variables are equal if they have the same declaration
+      case .Variable;
+         if (a.variable.useName != b.variable.useName) return false;
+
+         useName := a.variable.useName; // or b.variable.useName. they are the same at this point
+         if (useName) {
+            return a.variable.name == b.variable.name;
+         }
+
+         return a.variable.declaration == b.variable.declaration; // two variables are equal if they have the same declaration
       case .BuiltinThingies; return a.builtinThingies == b.builtinThingies;
       case .CompositeLiteral;
          if (a.compositeLiteral.type != b.compositeLiteral.type) return false;
@@ -441,7 +447,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             array := cast(*Type_Info_Array) header.arguments[index].type;
 
             data.meshVertexOutUserStruct = array.element_type;
-            data.meshVertexOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[index] };
+            data.meshVertexOutVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
             data.locationsConsumedByPerVertexMeshOut = CalculateLocationsConsumed(get_type(data.meshVertexOutUserStruct));
          }
 
@@ -454,7 +460,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             array := cast(*Type_Info_Array) header.arguments[index].type;
 
             data.meshPrimitiveOutUserStruct = array.element_type;
-            data.meshPrimitiveOutVariableIdentifier = .{ type = .Variable, variable = header.arguments[index] };
+            data.meshPrimitiveOutVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
          }
 
          // third argument: *MeshData. MeshData is user defined struct
@@ -545,9 +551,9 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          print_to_builder(*b, "OpEntryPoint MeshEXT \%% \"%\" \%% \%% \%% \%% \%% \%% \%%\n",
                               GetSSAId(*data, .{ type = .Function, function = header }),
                               "ApilaMS",
-                              GetSSAId(*data, .{ type = .Variable, variable = meshVerticesDeclaration }),
+                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_VERTICES_NAME } }),
                               GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .PushDataVariable }),
-                              GetSSAId(*data, .{ type = .Variable, variable = meshTrianglesDeclaration }),
+                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
                               GetSSAId(*data, data.meshVertexOutVariableIdentifier),
                               GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
                               GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .ImageHeapVariable }),
@@ -630,7 +636,7 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          GetSSAId(*data, .{ type = ._Type, _type = .{ type = cast(*Type_Info) PushData } });
 
          print_to_builder(*b, "OpDecorate \%% BuiltIn PrimitiveTriangleIndicesEXT\n",
-                              GetSSAId(*data, .{ type = .Variable, variable = meshTrianglesDeclaration })
+                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } })
          );
          print_to_builder(*b, "OpDecorate \%% BuiltIn ResourceHeapEXT\n",
                               GetSSAId(*data, .{ type = .BuiltinThingies, builtinThingies = .ImageHeapVariable })
@@ -1138,13 +1144,15 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          );
 
       case .Variable;
-         if (false) {
-         } else if (IdentifierCompare(identifier, data.meshVertexOutVariableIdentifier)) {
-            // [] MeshVertexOut
-            assert(data.meshVertexOutVariableIdentifier.variable.type.type == .ARRAY);
+         name := GetVariableName(identifier);
+         if (IdentifierCompare(identifier, data.meshVertexOutVariableIdentifier) || // [] MeshVertexOut
+               IdentifierCompare(identifier, data.meshPrimitiveOutVariableIdentifier) || // [] MeshPrimitiveOut
+               name == MESH_VERTICES_NAME ||
+               name == MESH_TRIANGLES_NAME
+            ) {
 
             storageClass: StorageClass = .Output;
-            typeIdentifier := GetVariableTypeIdentifier(data, data.meshVertexOutVariableIdentifier);
+            typeIdentifier := GetVariableTypeIdentifier(data, identifier);
             pointerIdentifier := GetPointerTypeIdentifier(typeIdentifier, storageClass);
             WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
             WriteTypeOrVariableOrConstant(data, b, pointerIdentifier);
@@ -1154,24 +1162,9 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                                  GetSSAId(data, pointerIdentifier),
                                  ToSpirvStorageClass(storageClass)
             );
-         } else if (IdentifierCompare(identifier, data.meshPrimitiveOutVariableIdentifier)) {
-            // [] MeshPrimitiveOut
-            assert(data.meshPrimitiveOutVariableIdentifier.variable.type.type == .ARRAY);
-
-            storageClass: StorageClass = .Output;
-            typeIdentifier := GetVariableTypeIdentifier(data, data.meshPrimitiveOutVariableIdentifier);
-            pointerIdentifier := GetPointerTypeIdentifier(typeIdentifier, storageClass);
-            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
-            WriteTypeOrVariableOrConstant(data, b, pointerIdentifier);
-
-            print_to_builder(b, "\%% = OpVariable \%% %\n",
-                                 GetSSAId(data, data.meshPrimitiveOutVariableIdentifier),
-                                 GetSSAId(data, pointerIdentifier),
-                                 ToSpirvStorageClass(storageClass)
-            );
          } else {
             // assert(false, "identifier: %. i guess all variables in \"Types, variables and constants\" block is builtin (user cant define a variable that goes in this block, i think)", identifier);
-            print("WARNING    variable: %. skipped!\n", identifier.variable.*);
+            print("WARNING    variable: %. skipped!\n", identifier.variable.declaration.*);
             return;
          }
       case .BuiltinThingies;
@@ -1309,8 +1302,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
 
 GenerateInstructionsData :: struct {
    literal:    struct {
-                  intLiteralBitSize:   int = 64;
-                  intLiteralUnsigned:  bool = false;
+                  intLiteralBitSize:            int = 64;
+                  intLiteralUnsigned:           bool = false;
+                  autoCastFromIntToFloat:       bool = false;
                };
    isLValue:   bool = false; // maybe i should have two functions GenerateAddress and GenerateExpression instead of single GenerateInstructions function and a lvalue boolean like this. idk man. - apila, 15/04/26
 }
@@ -1411,8 +1405,16 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          cl := cast(*Code_Literal) node;
          if cl.value_type == {
             case .NUMBER;
-               if (cl.value_flags & .FLOAT) {
-                  identifier: Identifier = .{ type = .FloatLiteral, floatLiteral = xx cl._float64 };
+               isFloat := cl.value_flags & .FLOAT || additionalData.literal.autoCastFromIntToFloat;
+
+               if (isFloat) {
+                  identifier: Identifier = .{ type = .FloatLiteral };
+                  if (additionalData.literal.autoCastFromIntToFloat) {
+                     identifier.floatLiteral = xx cl._s64;
+                  } else {
+                     identifier.floatLiteral = xx cl._float64;
+                  }
+
                   return GetSSAId(data, identifier), identifier;
                } else {
                   assert(additionalData.literal.intLiteralBitSize == 32 || additionalData.literal.intLiteralBitSize == 64, "additionalData.literal.intLiteralBitSize: %, not implemented yet!", additionalData.literal.intLiteralBitSize);
@@ -1442,7 +1444,24 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                   // becasue there is Code_Cast user needs to cast the type manually anyways.
                   // unless you go from 64 bit to 32 bit. idk
                   //             - apila, 14/04/26
+                  //
+                  //
+                  // doing this autocast thingy only on literals because thats the behaivour of jai
+                  // and i want to keep the same behaviour. for example following works on jai:
+                  //
+                  //    f: float = -1;
+                  //
+                  // but the following doesnt work in jai:
+                  //
+                  //    i: int = -1;
+                  //    f: float = i; // this is an error
+                  //
+                  // so i am only doing the autocast if the node is a Code_Literal, otherwise additionalData will not be used
+                  // and additional data is not recursed in GenerateInstructions function
+                  //       - apila, 18/04/26
                   memberType := tis.members[it_index].type;
+                  argumentAdditionalData.literal.autoCastFromIntToFloat = memberType.type == .FLOAT && it.type.type == .INTEGER;
+
                   if (memberType.type == .INTEGER) {
                      if (false) {
                      } else if (memberType == cast(*Type_Info) Int32) {
@@ -1476,7 +1495,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          ci := cast(*Code_Ident) node;
          assert(ci.resolved_declaration.type.type != .POINTER, "this means the user declared a local pointer, not implemented yet!");
 
-         variableIdentifier: Identifier = .{ type = .Variable, variable = ci.resolved_declaration };
+         variableIdentifier := GetVariableIdentifier(ci);
          variableSSAId := GetSSAId(data, variableIdentifier);
 
          if (additionalData.isLValue) {
@@ -1500,24 +1519,26 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
          if cbo.operator_type == {
             case #char ".";
-               storageClass := StorageClass.Output;
-
-               base, indices := GetBaseAndIndices(cbo);
+               base, indices := GetBaseAndIndices(data, function, cbo);
                assert(base.type == .Variable);
 
+               storageClass := GetVariableStorageClass(data, base);
                baseTypeIdentifier := GetVariableTypeIdentifier(data, base);
                basePointerTypeIdentifier := GetPointerTypeIdentifier(baseTypeIdentifier, storageClass);
+
+               returnType := cbo.type;
+               returnTypeIdentifier := GetPointerTypeIdentifier(returnType, storageClass);
 
                lValueSSAId := GetNextSSAId(data);
                print_to_builder(function, "\%% = OpAccessChain \%% \%%",
                                           lValueSSAId,
-                                          GetSSAId(data, basePointerTypeIdentifier),
+                                          GetSSAId(data, returnTypeIdentifier),
                                           GetSSAId(data, base)
                );
 
                for indices {
                   print_to_builder(function, " \%%",
-                                             GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = it, bitSize = 32 } })
+                                             it
                   );
                }
 
@@ -1647,14 +1668,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
       case .COMMA_SEPARATED_ARGUMENTS   ;
       case .DECLARATION                 ;
          cd := cast(*Code_Declaration)node;
-         variableIdentifier: Identifier = .{ type = .Variable, variable = cd };
+         variableIdentifier: Identifier = .{ type = .Variable, variable.declaration = cd };
          variableSSAId := GetSSAId(data, variableIdentifier);
-         variableType := cd.type;
 
-         pointerToVariableType := New(Type_Info_Pointer);
-         pointerToVariableType.pointer_to = variableType;
-         pointerToVariableType.type = .POINTER;
-         pointerToVariableType.runtime_size = 8;
+         storageClass := StorageClass.Function;
+         variableTypeIdentifier := GetVariableTypeIdentifier(data, variableIdentifier);
+         pointerTypeIdentifier := GetPointerTypeIdentifier(variableTypeIdentifier, storageClass);
 
          assert(cd.type.type != .POINTER, "a pointer is declared, not implemented yet! loc: %:%", node.l0, node.c0);
 
@@ -1674,11 +1693,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
             }
          }
 
-         storageClass := StorageClass.Function;
          // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
          print_to_builder(general, "\%% = OpVariable \%% %",
                                     variableSSAId,
-                                    GetSSAId(data, .{ type = ._Type, _type = .{ type = pointerToVariableType, pointer = .{ storageClass = storageClass } } }),
+                                    GetSSAId(data, pointerTypeIdentifier),
                                     ToSpirvStorageClass(storageClass),
          );
 
@@ -1696,6 +1714,45 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
    assert(false, "node.kind: %, didnt return!", node.kind);
    return -69, .{};
+}
+
+GetVariableIdentifier :: (ci: *Code_Ident) -> Identifier {
+   if (ci.name == MESH_VERTICES_NAME || ci.name == MESH_TRIANGLES_NAME) {
+      return .{ type = .Variable, variable = .{ useName = true, name = ci.name } };
+   }
+
+   return .{ type = .Variable, variable.declaration = ci.resolved_declaration };
+}
+
+GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> StorageClass {
+   declaration := variable.variable;
+   name := declaration.name;
+
+   if (name == MESH_VERTICES_NAME) {
+      return .Output;
+   }
+
+   if (name == MESH_TRIANGLES_NAME) {
+      return .Output;
+   }
+
+   if (IdentifierCompare(variable, data.meshVertexOutVariableIdentifier)) {
+      return .Output;
+   }
+
+   if (IdentifierCompare(variable, data.meshPrimitiveOutVariableIdentifier)) {
+      return .Output;
+   }
+
+   return .Function;
+}
+
+GetVariableName :: (variable: Identifier) -> string {
+   if (variable.variable.useName) {
+      return variable.variable.name;
+   } else {
+      return variable.variable.declaration.name;
+   }
 }
 
 // i need this function because some of the variables, their jai types doesnt match the spirv i want to generate.
@@ -1720,20 +1777,18 @@ GetVariableTypeIdentifier :: (data: *CompilationData, variable: Identifier) -> I
 
    assert(variable.type == .Variable, "variable.type: %", variable.type);
 
-   declaration := variable.variable;
-   name := declaration.name;
+   declaration := variable.variable.declaration;
+   name := GetVariableName(variable);
 
    if (name == MESH_VERTICES_NAME) {
-      elementType := GetElementType(declaration);
-      assert(elementType == cast(*Type_Info) MeshPerVertex);
+      elementType := cast(*Type_Info) MeshPerVertex;
 
       typeInfo := CreateTypeInfoArray(elementType, data.maxVertices);
       return .{ type = ._Type, _type = .{ type = typeInfo } };
    }
 
    if (name == MESH_TRIANGLES_NAME) {
-      elementType := GetElementType(declaration);
-      assert(elementType == cast(*Type_Info) Int32x3);
+      elementType := cast(*Type_Info) Int32x3;
 
       typeInfo := CreateTypeInfoArray(elementType, data.maxPrimitives);
       return .{ type = ._Type, _type = .{ type = typeInfo } };
@@ -1754,27 +1809,21 @@ GetVariableTypeIdentifier :: (data: *CompilationData, variable: Identifier) -> I
    return .{ type = ._Type, _type = .{ type = declaration.type } };
 }
 
-// used to get the result type of OpVariable from jai declared type
 GetPointerTypeIdentifier :: (typeIdentifier: Identifier, storageClass: StorageClass) -> Identifier {
    assert(typeIdentifier.type == ._Type, "type: %", typeIdentifier.type);
+   return GetPointerTypeIdentifier(typeIdentifier._type.type, storageClass);
+}
 
+// used to get the result type of OpVariable from jai declared type
+GetPointerTypeIdentifier :: (type: *Type_Info, storageClass: StorageClass) -> Identifier {
    pointerTypeInfo := New(Type_Info_Pointer);
    pointerTypeInfo.type = .POINTER;
    pointerTypeInfo.runtime_size = 8;
-   pointerTypeInfo.pointer_to = typeIdentifier._type.type;
+   pointerTypeInfo.pointer_to = type;
 
    return .{ type = ._Type, _type = .{ type = pointerTypeInfo, pointer = .{ storageClass = storageClass } } };
 }
 
-// TODO
-// this function should return an array of ssa ids. because index might not be an int literal
-// but result of an OpLoad operation. also this function can generate instructions. for example if an index to the array
-// is a variable the OpLoad operation needs to be done and the ssa id generatd by that OpLoad should be returned by this function
-// since varaible declaration and such is not allowed, just a single string builder is enough and this function emits to that builder.
-// also my traversel logic is not correct. i should visit from leafs to the root. so this function should be a recursive function that
-// goes left then visits then goes right i think. and if i traverse in this order then i dont need to reverse the array because they are added in the correct order
-//          - apila, 16/04/26
-//
 // tree of a.b.c is:
 //          .
 //        /   \
@@ -1785,42 +1834,75 @@ GetPointerTypeIdentifier :: (typeIdentifier: Identifier, storageClass: StorageCl
 // code := #code a.b.c;
 // root := compiler_get_nodes(code);
 // root.(*Code_Binary_Operator).left.(*Code_Binary_Operator).right.(*Code_Ident).name // is "b"
-GetBaseAndIndices :: (cbo: *Code_Binary_Operator) -> base: Identifier, indices: [] int {
-   indices: [..] int;
-   current: *Code_Node = cbo;
-   while (current.kind == .BINARY_OPERATOR) {
-      currentCbo := cast(*Code_Binary_Operator) current;
-      right := currentCbo.right;
-      assert(right.kind != .BINARY_OPERATOR);
+GetBaseAndIndices :: (data: *CompilationData, b: *String_Builder, cbo: *Code_Binary_Operator) -> base: Identifier, ssaIdsOfIndicies: [] int {
+   // treat indices, base and baseSeen as if it is they are capture variables
+   Helper :: (data: *CompilationData, b: *String_Builder, current: *Code_Node, parent: *Code_Node, indices: *[..] int, base: *Identifier, baseSeen: *bool) {
+      if (current.kind == .BINARY_OPERATOR) {
+            cbo := cast(*Code_Binary_Operator) current;
+            assert(cbo.operator_type == #char "." ||
+                   cbo.operator_type == .ARRAY_SUBSCRIPT,
+                   "operator: %", cbo.operator_type
+            );
 
-      leftType := currentCbo.left.type;
+            Helper(data, b, cbo.left, current, indices, base, baseSeen);
+            Helper(data, b, cbo.right, current, indices, base, baseSeen);
+            return;
+      }
+
+      // this is the left most node. which means this is the base
+      if (!(.*)baseSeen) {
+         assert(current.kind == .IDENT, "kind: %", current.kind);
+         baseSeen.* = true;
+
+         ci := cast(*Code_Ident) current;
+         base.* = GetVariableIdentifier(ci);
+         return;
+      }
+
+      assert(parent.kind == .BINARY_OPERATOR, "parent.kind: %", parent.kind);
+      parentCbo := cast(*Code_Binary_Operator) parent;
+      assert(parentCbo.operator_type == #char "." ||
+             parentCbo.operator_type == .ARRAY_SUBSCRIPT,
+             "operator: %", parentCbo.operator_type
+      );
+
+      leftType := parentCbo.left.type;
       if leftType.type == {
          case .STRUCT;
             tis := cast(*Type_Info_Struct) leftType;
 
-            assert(right.kind == .IDENT, "if you are accessing a struct indexer it is not yet implemented! right.kind: %, struct name: %", right.kind, tis.name);
-            rightIdentifier := cast(*Code_Ident) right;
+            assert(current.kind == .IDENT, "if you are accessing a struct indexer it is not yet implemented! current.kind: %, struct name: %", current.kind, tis.name);
+            ci := cast(*Code_Ident) current;
 
-            memberIndex := GetMemberIndex(tis, rightIdentifier.name);
-            assert(memberIndex != MEMBER_DOESNT_EXIST, "not a member of struct! struct: %, member: %", tis.name, rightIdentifier.name);
+            memberIndex := GetMemberIndex(tis, ci.name);
+            assert(memberIndex != MEMBER_DOESNT_EXIST, "not a member of struct! struct: %, member: %", tis.name, ci.name);
 
-            array_add(*indices, memberIndex);
-            current = currentCbo.left;
+            memberIndexIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = memberIndex, bitSize = 32 } };
+            memberIndexSSAId := GetSSAId(data, memberIndexIdentifier);
+            array_add(indices, memberIndexSSAId);
 
          case .ARRAY;
             tia := cast(*Type_Info_Array) leftType;
-            print("right.kind: %\n", right.kind);
-            break;
+
+            // in case it is a literal then it should be 32 bit signed i think (thats what glslangValidator generates)
+            additionalData: GenerateInstructionsData = .{
+               literal.intLiteralBitSize = 32,
+               literal.intLiteralUnsigned = false,
+            };
+
+            ssaId, _ := GenerateInstructions(data, current, null, b, additionalData);
+            array_add(indices, ssaId);
+
          case; assert(false, "not yet implemented! type: %", leftType.type);
       }
    }
 
-   ArrayReverse(indices);
+   indices: [..] int;
+   base: Identifier;
+   baseSeen := false;
+   Helper(data, b, cbo, null, *indices, *base, *baseSeen);
 
-   // at the end of the loop "current" is the node of the "base"
-   assert(current.kind == .IDENT, "current.kind: %", current.kind);
-   currentIdent := cast(*Code_Ident) current;
-   base: Identifier = .{ type = .Variable, variable = currentIdent.resolved_declaration };
+   assert(baseSeen);
 
    return base, indices;
 }
