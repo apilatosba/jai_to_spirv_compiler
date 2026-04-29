@@ -444,21 +444,21 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
 // now unused but could be of use if i change how i store types. maybe possibly Clueless
 DoesTypeContainPointer :: (type: *Type_Info) -> bool {
    if type.type == {
-      case .INTEGER             ;
+      case .INTEGER;
          return false;
-      case .FLOAT               ;
+      case .FLOAT;
          return false;
-      case .BOOL                ;
+      case .BOOL;
          return false;
-      case .STRING              ;
+      case .STRING;
          return true;
-      case .POINTER             ;
+      case .POINTER;
          return true;
 
       case TYPE_INFO_POINTER_TAG;
          return true;
 
-      case .PROCEDURE           ;
+      case .PROCEDURE;
          tip := cast(*Type_Info_Procedure) type;
 
          for tip.return_types {
@@ -475,9 +475,9 @@ DoesTypeContainPointer :: (type: *Type_Info) -> bool {
 
          return false;
 
-      case .VOID                ;
+      case .VOID;
          return false;
-      case .STRUCT              ;
+      case .STRUCT;
          tis := cast(*Type_Info_Struct) type;
          for tis.members {
             if (DoesTypeContainPointer(it.type)) {
@@ -487,28 +487,28 @@ DoesTypeContainPointer :: (type: *Type_Info) -> bool {
 
          return false;
 
-      case .ARRAY               ;
+      case .ARRAY;
          tia := cast(*Type_Info_Array) type;
          assert(tia.array_type == .FIXED, "tia.array_type: %", tia.array_type);
 
          return DoesTypeContainPointer(tia.element_type);
-      case .OVERLOAD_SET        ;
+      case .OVERLOAD_SET;
          assert(false, "OVERLOAD_SET");
-      case .ANY                 ;
+      case .ANY;
          assert(false, "ANY");
-      case .ENUM                ;
+      case .ENUM;
          return false;
       case .POLYMORPHIC_VARIABLE;
          assert(false, "POLYMORPHIC_VARIABLE");
-      case .TYPE                ;
+      case .TYPE;
          assert(false, "TYPE");
-      case .CODE                ;
+      case .CODE;
          assert(false, "CODE");
-      case .UNTYPED_LITERAL     ;
+      case .UNTYPED_LITERAL;
          assert(false, "UNTYPED_LITERAL");
-      case .UNTYPED_ENUM        ;
+      case .UNTYPED_ENUM;
          assert(false, "UNTYPED_ENUM");
-      case .VARIANT             ;
+      case .VARIANT;
          assert(false, "VARIANT");
    }
 
@@ -564,29 +564,29 @@ CompilationData :: struct {
 CalculateLocationsConsumed :: (T: Type) -> int {
    Helper :: (type: Type, accumulator: *int) {
       if type == {
-         case Int32    ; accumulator.* += 1; return;
-         case Int32x2  ; accumulator.* += 1; return;
-         case Int32x3  ; accumulator.* += 1; return;
-         case Int32x4  ; accumulator.* += 1; return;
-         case UInt32   ; accumulator.* += 1; return;
-         case UInt32x2 ; accumulator.* += 1; return;
-         case UInt32x3 ; accumulator.* += 1; return;
-         case UInt32x4 ; accumulator.* += 1; return;
-         case Int64    ; accumulator.* += 1; return;
-         case Int64x2  ; accumulator.* += 1; return;
-         case Int64x3  ; accumulator.* += 2; return;
-         case Int64x4  ; accumulator.* += 2; return;
-         case UInt64   ; accumulator.* += 1; return;
-         case UInt64x2 ; accumulator.* += 1; return;
-         case UInt64x3 ; accumulator.* += 2; return;
-         case UInt64x4 ; accumulator.* += 2; return;
-         case Float    ; accumulator.* += 1; return;
-         case Float2   ; accumulator.* += 1; return;
-         case Float3   ; accumulator.* += 1; return;
-         case Float4   ; accumulator.* += 1; return;
-         case Float2x2 ; accumulator.* += 2; return;
-         case Float3x3 ; accumulator.* += 3; return;
-         case Float4x4 ; accumulator.* += 4; return;
+         case Int32;    accumulator.* += 1; return;
+         case Int32x2;  accumulator.* += 1; return;
+         case Int32x3;  accumulator.* += 1; return;
+         case Int32x4;  accumulator.* += 1; return;
+         case UInt32;   accumulator.* += 1; return;
+         case UInt32x2; accumulator.* += 1; return;
+         case UInt32x3; accumulator.* += 1; return;
+         case UInt32x4; accumulator.* += 1; return;
+         case Int64;    accumulator.* += 1; return;
+         case Int64x2;  accumulator.* += 1; return;
+         case Int64x3;  accumulator.* += 2; return;
+         case Int64x4;  accumulator.* += 2; return;
+         case UInt64;   accumulator.* += 1; return;
+         case UInt64x2; accumulator.* += 1; return;
+         case UInt64x3; accumulator.* += 2; return;
+         case UInt64x4; accumulator.* += 2; return;
+         case Float;    accumulator.* += 1; return;
+         case Float2;   accumulator.* += 1; return;
+         case Float3;   accumulator.* += 1; return;
+         case Float4;   accumulator.* += 1; return;
+         case Float2x2; accumulator.* += 2; return;
+         case Float3x3; accumulator.* += 3; return;
+         case Float4x4; accumulator.* += 4; return;
       }
 
       ti := cast(*Type_Info) type;
@@ -1788,79 +1788,79 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
    //             - apila, 02/04/26
    //
    if #complete node.kind == {
-      case .UNINITIALIZED               ; #through;
-      case .CONTEXT                     ; #through;
-      case .DIRECTIVE_BYTES             ; #through;
-      case .ASM                         ; #through;
-      case .DIRECTIVE_BAKE              ; #through;
-      case .DIRECTIVE_LIBRARY           ; #through;
-      case .DIRECTIVE_MODIFY            ; #through;
-      case .EXPRESSION_QUERY            ; #through;
-      case .PUSH_CONTEXT                ; #through;
-      case .DIRECTIVE_PLACE             ; #through;
-      case .DIRECTIVE_LOCATION          ; #through;
-      case .DIRECTIVE_MODULE_PARAMETERS ; #through;
-      case .DIRECTIVE_SCOPE             ; #through;
-      case .DIRECTIVE_ADD_CONTEXT       ; #through;
-      case .DIRECTIVE_CONTEXT_TYPE      ;
+      case .UNINITIALIZED;                #through;
+      case .CONTEXT;                      #through;
+      case .DIRECTIVE_BYTES;              #through;
+      case .ASM;                          #through;
+      case .DIRECTIVE_BAKE;               #through;
+      case .DIRECTIVE_LIBRARY;            #through;
+      case .DIRECTIVE_MODIFY;             #through;
+      case .EXPRESSION_QUERY;             #through;
+      case .PUSH_CONTEXT;                 #through;
+      case .DIRECTIVE_PLACE;              #through;
+      case .DIRECTIVE_LOCATION;           #through;
+      case .DIRECTIVE_MODULE_PARAMETERS;  #through;
+      case .DIRECTIVE_SCOPE;              #through;
+      case .DIRECTIVE_ADD_CONTEXT;        #through;
+      case .DIRECTIVE_CONTEXT_TYPE;
          assert(false, "code node kind: %. not valid.", node.kind);
 
-      case .LOOP_CONTROL                ; #through;
-      case .PROCEDURE_HEADER            ; #through;
-      case .EXTRACT                     ; #through;
-      case .MAKE_VARARGS                ; #through;
-      case .DIRECTIVE_THIS              ; #through;
-      case .DIRECTIVE_LOAD              ; #through;
-      case .DIRECTIVE_CODE              ; #through;
-      case .NOTE                        ; #through;
-      case .DIRECTIVE_COMPILE_TIME      ; #through;
-      case .PLACEHOLDER                 ; #through;
-      case .DIRECTIVE_WILDCARD          ; #through;
-      case .RESOLVED_OVERLOAD           ;
+      case .LOOP_CONTROL;              #through;
+      case .PROCEDURE_HEADER;          #through;
+      case .EXTRACT;                   #through;
+      case .MAKE_VARARGS;              #through;
+      case .DIRECTIVE_THIS;            #through;
+      case .DIRECTIVE_LOAD;            #through;
+      case .DIRECTIVE_CODE;            #through;
+      case .NOTE;                      #through;
+      case .DIRECTIVE_COMPILE_TIME;    #through;
+      case .PLACEHOLDER;               #through;
+      case .DIRECTIVE_WILDCARD;        #through;
+      case .RESOLVED_OVERLOAD;
          assert(false, "code node kind: %. idk what to do with this", node.kind);
 
-      case .DIRECTIVE_RUN               ;
+      case .DIRECTIVE_RUN;
          assert(false, "do the #run outside the shader procedure to let jai compiler #run it. this compiler doesnt have #run");
 
-      case .DIRECTIVE_POKE_NAME         ;
+      case .DIRECTIVE_POKE_NAME;
          assert(false, "idk what this directive is");
 
-      case .DIRECTIVE_IMPORT            ;
+      case .DIRECTIVE_IMPORT;
          return 0, .{}; // i think i should skip? idk maybe
 
-      case .TYPE_QUERY                  ;
+      case .TYPE_QUERY;
          // size_of, type_info
          assert(false, "read the comment above. i need a way to get the value somehow not the code nodes");
 
-      case .DEFER                       ;
+      case .DEFER;
          assert(false, "idk how to implement");
 
-      case .USING                       ;
+      case .USING;
          // should i ignore?
          return 0, .{};
 
-      case .DIRECTIVE_INSERT            ;
+      case .DIRECTIVE_INSERT;
          assert(false, "read the comment above");
 
-      case .DIRECTIVE_PROCEDURE_NAME    ;
+      case .DIRECTIVE_PROCEDURE_NAME;
          assert(false, "read the comment above");
 
-      case .DIRECTIVE_EXISTS            ;
+      case .DIRECTIVE_EXISTS;
          assert(false, "read the comment above");
 
-      case .DIRECTIVE_OVERLAY           ;
+      case .DIRECTIVE_OVERLAY;
          assert(false, "i guess i should never see this. the parsing of structs is done through Type_Info, not through code nodes");
 
       // idk if this implementation is correct or do i need to do some other stuff.
       // right now it behaves as if there is no block
-      case .BLOCK                       ;
+      case .BLOCK;
          cb := cast(*Code_Block)node;
          for cb.statements {
             GenerateInstructions(data, it, general, function);
          }
          return 0, .{};
 
-      case .LITERAL                     ;
+      case .LITERAL;
          cl := cast(*Code_Literal) node;
          if cl.value_type == {
             case .NUMBER;
@@ -1970,11 +1970,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          assert(found);
 
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
-         deferencedSSAId := Load(data, function, variableTypeIdentifier, variableSSAId, "3");
+         deferencedSSAId := Load(data, function, variableTypeIdentifier, variableSSAId);
 
          return deferencedSSAId, .{};
 
-      case .UNARY_OPERATOR              ;
+      case .UNARY_OPERATOR;
       case .BINARY_OPERATOR;
          cbo := cast(*Code_Binary_Operator) node;
 
@@ -1990,7 +1990,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                tip := cast(*TypeInfoPointer) typeIdentifier._type;
 
                loadedTypeIdentifier: Identifier = .{ type = ._Type, _type = tip.pointerTo };
-               dereferencedSSAId := Load(data, function, loadedTypeIdentifier, lValueSSAId, "1");
+               dereferencedSSAId := Load(data, function, loadedTypeIdentifier, lValueSSAId);
 
                return dereferencedSSAId, .{};
 
@@ -2071,8 +2071,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
             }
 
          }
-      case .PROCEDURE_BODY              ;
-      case .PROCEDURE_CALL              ;
+      case .PROCEDURE_BODY;
+      case .PROCEDURE_CALL;
          cpc := cast(*Code_Procedure_Call) node;
          procedureExpression := cpc.procedure_expression;
          assert(procedureExpression.kind == .IDENT);
@@ -2096,17 +2096,17 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
             return -42000, .{}; // doesnt matter since OpSetMeshOutputsEXT doesnt return
          }
 
-      case .WHILE                       ;
-      case .IF                          ;
-      case .CASE                        ;
-      case .RETURN                      ;
-      case .FOR                         ;
-      case .TYPE_DEFINITION             ;
-      case .TYPE_INSTANTIATION          ;
-      case .ENUM                        ;
-      case .STRUCT                      ;
-      case .COMMA_SEPARATED_ARGUMENTS   ;
-      case .DECLARATION                 ;
+      case .WHILE;
+      case .IF;
+      case .CASE;
+      case .RETURN;
+      case .FOR;
+      case .TYPE_DEFINITION;
+      case .TYPE_INSTANTIATION;
+      case .ENUM;
+      case .STRUCT;
+      case .COMMA_SEPARATED_ARGUMENTS;
+      case .DECLARATION;
          cd := cast(*Code_Declaration) node;
          variableIdentifier: Identifier = .{ type = .Variable, variable.declaration = cd };
          variableSSAId := GetSSAId(data, variableIdentifier);
@@ -2169,8 +2169,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
          return resultSSAId, .{};
 
-      case .DIRECTIVE_THROUGH           ;
-      case .COMPOUND_DECLARATION        ;
+      case .DIRECTIVE_THROUGH;
+      case .COMPOUND_DECLARATION;
    }
 
    assert(false, "node.kind: %, didnt return!", node.kind);
@@ -2420,22 +2420,22 @@ alignof :: ($T: Type) -> s64 #expand {
 // jblow said on discord that he will move the alignment field from Code_Struct to Type_Info_Struct. so i can properly implement this function
 VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake :: (type: *Type_Info) -> int {
    if type.type == {
-      case .INTEGER              ;
+      case .INTEGER;
          return type.runtime_size;
 
-      case .FLOAT                ;
+      case .FLOAT;
          return type.runtime_size;
 
-      case .BOOL                 ;
+      case .BOOL;
          return 4;
 
-      case .STRING               ;
+      case .STRING;
          assert(false);
 
-      case .POINTER              ;
+      case .POINTER;
          return type.runtime_size;
 
-      case .STRUCT               ;
+      case .STRUCT;
          tis := cast(*Type_Info_Struct) type;
 
          maxAlignment := 0;
@@ -2446,11 +2446,11 @@ VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhere
          assert(maxAlignment != 0);
 
          return maxAlignment;
-      case .ARRAY                ;
+      case .ARRAY;
          tia := cast(*Type_Info_Array) type;
          return VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(tia.element_type);
 
-      case .ENUM                 ;
+      case .ENUM;
          tie := cast(*Type_Info_Enum) type;
          return tie.internal_type.runtime_size;
 
@@ -2516,14 +2516,13 @@ VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhere
 
 // maybe only do Aligned only if you are loading from a physical storage buffer.
 // tho this requires one additional argument to be passed
-Load :: (data: *CompilationData, b: *String_Builder, typeIdentifier: Identifier, lValueSSAId: int, m: string) -> ssaId: int {
+Load :: (data: *CompilationData, b: *String_Builder, typeIdentifier: Identifier, lValueSSAId: int) -> ssaId: int {
    dereferencedSSAId := GetNextSSAId(data);
-   print_to_builder(b, "\%% = OpLoad \%% \%% Aligned % ; %\n",
+   print_to_builder(b, "\%% = OpLoad \%% \%% Aligned %\n",
                         dereferencedSSAId,
                         GetSSAId(data, typeIdentifier),
                         lValueSSAId,
-                        VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(typeIdentifier._type),
-                        m
+                        VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(typeIdentifier._type)
    );
 
    return dereferencedSSAId;
@@ -2851,7 +2850,7 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *String_Builder, cbo: *C
             currentStorageClass = tip.storageClass;
 
             loadedTypeIdentifier: Identifier = .{ type = ._Type, _type = tip };
-            currentBaseSSAId = Load(data, b, loadedTypeIdentifier, loadFromSSAId, "2");
+            currentBaseSSAId = Load(data, b, loadedTypeIdentifier, loadFromSSAId);
             currentBaseType = tip.pointerTo;
 
             assert(tip.pointerTo.type == .STRUCT, "type: %", tip.pointerTo.type);
