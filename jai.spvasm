@@ -30,8 +30,8 @@ OpDecorate %13 RestrictPointer
 
 ; struct annotate infos
 OpDecorate %85 Block
-OpDecorate %88 Block
-OpMemberDecorate %88 0 Offset 0
+OpDecorate %90 Block
+OpMemberDecorate %90 0 Offset 0
 OpDecorate %74 Block
 OpMemberDecorate %74 0 Offset 0
 OpMemberDecorate %74 1 Offset 8
@@ -53,22 +53,22 @@ OpMemberDecorate %83 0 Offset 0
 %34 = OpConstant %39 0
 %18 = OpConstant %39 1
 %30 = OpConstant %75 3
-%80 = OpTypeVector %39 4
-%73 = OpTypeStruct %80 %39  ; MeshPerVertex
+%65 = OpTypePointer Output %76
 %21 = OpConstant %75 0
-%6 = OpConstant %75 1
-%62 = OpConstantComposite %76 %21 %6 %27
-%81 = OpTypeUntypedPointerKHR UniformConstant
-%71 = OpUntypedVariableKHR %81 UniformConstant    ; sampler heap variable
+%66 = OpConstantComposite %76 %21 %27 %30
+%80 = OpTypeUntypedPointerKHR UniformConstant
+%71 = OpUntypedVariableKHR %80 UniformConstant    ; sampler heap variable
 %10 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
 %74 = OpTypeStruct %10 %10 %10
-%82 = OpTypePointer PushConstant %74
-%5 = OpVariable %82 PushConstant   ; push data variable
-%70 = OpUntypedVariableKHR %81 UniformConstant    ; image heap variable
+%81 = OpTypePointer PushConstant %74
+%5 = OpVariable %81 PushConstant   ; push data variable
+%6 = OpConstant %75 1
+%70 = OpUntypedVariableKHR %80 UniformConstant    ; image heap variable
 %72 = OpConstant %77 1
 %3 = OpTypeFunction %2
-%19 = OpConstantComposite %80 %16 %16 %17 %18
-%24 = OpConstantComposite %80 %18 %16 %17 %18
+%33 = OpTypeVector %39 2
+%82 = OpTypeVector %39 4
+%73 = OpTypeStruct %82 %39  ; MeshPerVertex
 %83 = OpTypeStruct %39  ; MeshData
 %12 = OpTypePointer PhysicalStorageBuffer %83
 %84 = OpTypePointer Private %12
@@ -78,22 +78,22 @@ OpMemberDecorate %83 0 Offset 0
 %86 = OpTypeArray %85 %14
 %87 = OpTypePointer Output %86
 %69 = OpVariable %87 Output    ; mOutPrimitive
-%26 = OpConstantComposite %80 %18 %18 %17 %18
 %8 = OpTypePointer PushConstant %10
-%29 = OpConstantComposite %80 %16 %18 %17 %18
-%66 = OpConstantComposite %76 %21 %27 %30
-%37 = OpTypePointer PhysicalStorageBuffer %39
-%23 = OpTypePointer Output %80
-%33 = OpTypeVector %39 2
-%88 = OpTypeStruct %33  ; MeshOutVertex
-%89 = OpTypeArray %88 %14
-%90 = OpTypePointer Output %89
-%41 = OpVariable %90 Output    ; mOutVertex
-%91 = OpTypeArray %73 %14
-%92 = OpTypePointer Output %91
-%20 = OpVariable %92 Output    ; meshvertices
+%29 = OpConstantComposite %82 %16 %18 %17 %18
+%19 = OpConstantComposite %82 %16 %16 %17 %18
+%62 = OpConstantComposite %76 %21 %6 %27
+%24 = OpConstantComposite %82 %18 %16 %17 %18
+%23 = OpTypePointer Output %82
+%26 = OpConstantComposite %82 %18 %18 %17 %18
+%88 = OpTypeArray %73 %14
+%89 = OpTypePointer Output %88
+%20 = OpVariable %89 Output    ; meshvertices
 %43 = OpTypePointer Output %33
-%65 = OpTypePointer Output %76
+%90 = OpTypeStruct %33  ; MeshOutVertex
+%91 = OpTypeArray %90 %14
+%92 = OpTypePointer Output %91
+%41 = OpVariable %92 Output    ; mOutVertex
+%37 = OpTypePointer PhysicalStorageBuffer %39
 
 ; functions
 ; main function

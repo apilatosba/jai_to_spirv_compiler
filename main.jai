@@ -2072,9 +2072,32 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
       case .PROCEDURE_CALL;
          cpc := cast(*Code_Procedure_Call) node;
          procedureExpression := cpc.procedure_expression;
-         assert(procedureExpression.kind == .IDENT);
+         assert(procedureExpression.kind == .IDENT ||
+                procedureExpression.kind == .BINARY_OPERATOR,
+                "kind: %", procedureExpression.kind
+         );
 
-         identifierExpression := cast(*Code_Ident) procedureExpression;
+
+         identifierExpression: *Code_Ident;
+         if (procedureExpression.kind == .IDENT) {
+            identifierExpression = cast(*Code_Ident) procedureExpression;
+         } else if (procedureExpression.kind == .BINARY_OPERATOR) {
+            // named module.
+            // or possibly it could be a function pointer inside a struct but in spirv function pointers is not allowed.
+            // maybe for that reason i should check if the left hand side is a struct.
+
+            cbo := cast(*Code_Binary_Operator) procedureExpression;
+
+            // named module
+            if (cbo.left.type.type == .TYPE) {
+               assert(cbo.right.kind == .IDENT, "kind: %", cbo.right.kind);
+
+               identifierExpression = xx cbo.right;
+            } else {
+               assert(false, "type: %", cbo.left.type.type);
+            }
+         }
+
          identifierName := identifierExpression.name;
          arguments := cpc.arguments_unsorted;
 
@@ -2282,11 +2305,27 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
                if leftType.type == {
                   case .STRUCT;
                      tis = cast(*Type_Info_Struct) leftType;
+
                   case TYPE_INFO_POINTER_TAG;
                      tip := cast(*TypeInfoPointer) leftType;
                      assert(tip.pointerTo.type == .STRUCT, "type: %", tip.pointerTo.type);
 
                      tis = xx tip.pointerTo;
+
+                  // left hand side is a named module
+                  case .TYPE;
+                     // type equal to type of right side
+                     assert(cbo.right.kind == .IDENT, "kind: %", cbo.right.kind);
+                     ci := cast(*Code_Ident) cbo.right;
+                     rightType := DetermineCodeNodeTypes(data, ci.resolved_declaration);
+
+                     // normally i dont add the type of the right node to the table since i dont use it when generating instructions.
+                     // but this is an exception, i do use it.
+                     TableAddIfNotExists(*data.codeNodeTypes, cbo.right, rightType);
+
+                     TableAddIfNotExists(*data.codeNodeTypes, node, rightType);
+                     return rightType;
+
                   case; assert(false, "type: %", leftType.type);
                }
 
@@ -2324,17 +2363,30 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
       //       - apila, 26/04/26
       case .PROCEDURE_CALL;
          cpc := cast(*Code_Procedure_Call) node;
-         assert(cpc.resolved_procedure_expression.kind == .PROCEDURE_HEADER ||
-                cpc.resolved_procedure_expression.kind == .IDENT,
+         assert(cpc.resolved_procedure_expression.kind == .PROCEDURE_HEADER || // constant function
+                cpc.resolved_procedure_expression.kind == .IDENT || // not constant function (intrinsics go here)
+                cpc.resolved_procedure_expression.kind == .BINARY_OPERATOR, // namespaces
                 "kind: %", cpc.resolved_procedure_expression.kind
          );
+
+         GetHeaderFromCodeIdent :: (ci: *Code_Ident) -> *Code_Procedure_Header #expand {
+            assert(ci.resolved_declaration.type_inst.type_valued_expression.kind == .PROCEDURE_HEADER, "kind: %", ci.resolved_declaration.type_inst.type_valued_expression);
+            return xx ci.resolved_declaration.type_inst.type_valued_expression;
+         }
 
          header: *Code_Procedure_Header;
          if (cpc.resolved_procedure_expression.kind == .IDENT) {
             ci := cast(*Code_Ident) cpc.resolved_procedure_expression;
-            header = cast(*Code_Procedure_Header) ci.resolved_declaration.type_inst.type_valued_expression;
+            header = GetHeaderFromCodeIdent(ci);
          } else if (cpc.resolved_procedure_expression.kind == .PROCEDURE_HEADER) {
             header = cast(*Code_Procedure_Header) cpc.resolved_procedure_expression;
+         } else if (cpc.resolved_procedure_expression.kind == .BINARY_OPERATOR) {
+            cbo := cast(*Code_Binary_Operator) cpc.resolved_procedure_expression;
+
+            assert(cbo.right.kind == .IDENT, "type: %", cbo.right.type);
+            ci := cast(*Code_Ident) cbo.right;
+
+            header = GetHeaderFromCodeIdent(ci);
          } else {
             assert(false);
          }
@@ -2758,6 +2810,25 @@ FlattenAccessTree :: (cbo: *Code_Binary_Operator) -> [] *Code_Binary_Operator {
    return accesses;
 }
 
+// it is not always [0].left because of named modules
+GetBaseNodeInAccessChain :: (accesses: [] *Code_Binary_Operator) -> *Code_Ident {
+   for accesses {
+      // could have used CompilationData.codeNodeTypes for consistency but meh.
+      if (it.left.type.type == .TYPE) continue;
+
+      if (it_index == 0) {
+         assert(accesses[0].left.kind == .IDENT);
+         return xx accesses[0].left;
+      }
+
+      assert(accesses[it_index - 1].right.kind == .IDENT, "kind: %", accesses[it_index - 1].right.kind);
+      return xx accesses[it_index - 1].right;
+   }
+
+   assert(false, "no base found. start of the chain: %:%", accesses[0].l0, accesses[0].c0);
+   return null;
+}
+
 //
 // i want to make it so that the pointer deferences work.
 // OpAccessChain is for member accesses.
@@ -2797,11 +2868,8 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *String_Builder, cbo: *C
 
    accesses := FlattenAccessTree(cbo);
 
-   baseNode := accesses[0].left;
-   assert(baseNode.kind == .IDENT, "kind: %", baseNode.kind);
-
-   ciBaseNode := cast(*Code_Ident) baseNode;
-   baseIdentifier := GetVariableIdentifier(ciBaseNode);
+   baseNode := GetBaseNodeInAccessChain(accesses);
+   baseIdentifier := GetVariableIdentifier(baseNode);
 
    found, baseNodeType := table_find(*data.codeNodeTypes, baseNode);
    assert(found);
@@ -2853,6 +2921,11 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *String_Builder, cbo: *C
             assert(tip.pointerTo.type == .STRUCT, "type: %", tip.pointerTo.type);
             tis := cast(*Type_Info_Struct) tip.pointerTo;
             DoMemberAccess(tis, it.right, *indices);
+
+         // named module
+         case .TYPE;
+            // just skip. i could have started the for loop from baseNodeCboIndex
+            continue;
 
          case; assert(false, "type: %", leftType.type);
       }
