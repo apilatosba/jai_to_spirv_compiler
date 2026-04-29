@@ -7,6 +7,7 @@ struct MeshData {
 };
 
 struct PushConstant {
+    void *ptr;
     FragmentData* taskData; // Slang supports actual pointers
     MeshData* meshData;
     FragmentData* fragmentData;
@@ -28,11 +29,17 @@ struct MeshOutPrimitive {
 
 struct B {
     float b;
+    int c;
 };
 
 struct A {
     B b;
 };
+
+int fffff(void* ptr) {
+    int* intPtr = (int*)ptr;
+    return *intPtr;
+}
 
 [shader("mesh")]
 [numthreads(1, 1, 1)]
@@ -48,8 +55,13 @@ void main(
     // Equivalent to SetMeshOutputsEXT
     SetMeshOutputCounts(4, 2);
 
+    FragmentData *fd = (FragmentData *)pc.ptr;
+
     A a;
     a.b.b = 40;
+    a.b.c = 99;
+
+    fffff((void*)&a.b.c);
 
     gl_Position[0] = float4(-1, -1, 0.5, 1);
     gl_Position[1] = float4( 1, -1, 0.5, 1);
