@@ -1036,7 +1036,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          );
       case .Function;
          return;
-         // assert(false, "identifier: %. this is not where you write functions!", identifier);
+
       case ._Type;
          type := identifier._type;
 
@@ -1316,13 +1316,6 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             return;
          }
 
-         //
-         // TODO
-         // this function doesnt follow the new storage class types.
-         // below struct should be updated. idk about the rest. need to check the whole function
-         //       - apila, 27/06/26
-         //
-
          if (ti.type == .STRUCT) {
             tis := cast(*Type_Info_Struct) ti;
 
@@ -1335,7 +1328,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             for tis.members {
                assert(it.type.type != .POINTER, "tis.name: %, it.name: %. user defined struct has a pointer. not implemented yet!", tis.name, it.name);
 
-               memberType := it.type;
+               memberType := ConvertJaiTypeIfNecessary(it.type, it.notes);
                memberTypeIdentifier: Identifier = .{ type = ._Type, _type = memberType };
                WriteTypeOrVariableOrConstant(data, b, memberTypeIdentifier);
 
@@ -1350,6 +1343,10 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             return;
          }
 
+         // TODO
+         // i guess this part is incomplete. it doesnt work with new storage class types.
+         // in that regard i think GetReturnTypeIdentifier needs more information than just the Type_Info.
+         //    - apila, 29/04/26
          if (ti.type == .PROCEDURE) {
             tip := cast(*Type_Info_Procedure) ti;
 
@@ -1385,7 +1382,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             assert(tia.array_type == .FIXED, "array type: %. .VIEW is basically a fat pointer, i will support it when i support pointers. .RESIZABLE is i think kaputt, dont use it.", tia.array_type);
 
             elementType := tia.element_type;
-            assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. idk if an array of pointers", tia.element_type.type);
+            assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. known limitation: cant use pointers inside array. wrap them in a struct for now", tia.element_type.type);
             elementTypeIdentifier: Identifier = .{ type = ._Type, _type = elementType };
             WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
 
