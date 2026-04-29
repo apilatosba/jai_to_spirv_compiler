@@ -67,7 +67,7 @@ PUSH_DATA_VARIABLE_NAME :: "__push_data__";  // this is not gonna be used by the
 // vvvvvv intrinsics vvvvvvvv
 Int32    :: s32; // idk. maybe not the way to do it
 Int32x2  :: struct {};
-Int32x3  :: struct {};
+Int32x3  :: struct { x: Int32; y: Int32; z: Int32; };
 Int32x4  :: struct {};
 
 UInt32    :: u32; // idk. maybe not the way to do it
@@ -134,11 +134,9 @@ MeshShader :: (mOutVertex: [] MeshOutVertex, mOutPrimitive: [] MeshOutPrimitive,
    mOutVertex[2].uv = .{ 1, 1 + data.offset };
    mOutVertex[3].uv = .{ 0, 1 + data.offset };
 
-   a: float = 10;
-   a = a + a;
-   a = a - 9;
-   b: int;
-} @1_1_1 @40_20 @triangles
+   meshtriangles[0] = .{ 0, 1, 2 };
+   meshtriangles[1] = .{ 0, 2, 3 };
+} @1_1_1 @4_2 @triangles
 
 FragmentShader :: (mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, data: *FragmentData) -> Float4 {
    anan123: int = 10;
@@ -1976,6 +1974,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          cbo := cast(*Code_Binary_Operator) node;
 
          if cbo.operator_type == {
+            case .ARRAY_SUBSCRIPT; #through;
             case #char ".";
                lValueSSAId, typeIdentifier := DoDotsAndArraySubscripts(data, function, cbo);
 
@@ -2052,7 +2051,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
             case #char "="; {
                // either a variable or access chain
                assert(cbo.left.kind == .IDENT ||
-                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == #char "."),
+                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == #char ".") ||
+                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == .ARRAY_SUBSCRIPT),
                      "cbo.left.kind: %", cbo.left.kind
                );
 
