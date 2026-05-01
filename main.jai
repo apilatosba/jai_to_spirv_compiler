@@ -6,6 +6,7 @@
 #import "Queue";
 #import "Hash";
 #import "File";
+#import "SpirvTools";
 
 // a lot of bullshit happening because i cant create a type and get a handle to it in the metaprogram
 
@@ -950,7 +951,21 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
    // print("%", spirvasm);
    write_entire_file("jai.spvasm", spirvasm);
 
-   return .{};
+   spirvContext := spvContextCreate(.SPV_ENV_VULKAN_1_4);
+   defer spvContextDestroy(spirvContext);
+
+   spirvOut: spv_binary;
+   spirvDiagnostics: spv_diagnostic;
+   spirvResult := spvTextToBinary(spirvContext, spirvasm.data, xx spirvasm.count, *spirvOut, *spirvDiagnostics);
+   assert(spirvResult == .SUCCESS, "result: %", spirvResult);
+
+   WORD_LENGTH :: size_of(type_of(spirvOut.code.*));
+   assert(WORD_LENGTH == 4, "WORD_LENGTH: %", WORD_LENGTH);
+
+   return .{
+      data = xx spirvOut.code,
+      count = xx spirvOut.wordCount * WORD_LENGTH
+   };
 }
 
 AddFixedArray :: (typeName: string, size: int, elementTypeName: string) {

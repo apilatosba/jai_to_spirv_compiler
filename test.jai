@@ -6,18 +6,30 @@
 #import "Math";
 #import "Random";
 #import "File";
-Q :: #import "Queue";
 
-q: Q.Queue(int);
+GenerateArray :: () -> [] u8 {
+   result := NewArray(64, u8);
+   for * result {
+      it.* = xx it_index;
+   }
+
+   // for result {
+   //    print("%\n", it);
+   // }
+
+   return result;
+}
+
+MY_ARRAY :: #run GenerateArray();
 
 #run {
-   set_build_options_dc(.{ do_output = false });
+   // set_build_options_dc(.{ do_output = false });
 
-   code := code_of(Q.Enqueue(*q, 5));
-   root := compiler_get_nodes(code);
-   cpc := cast(*Code_Procedure_Call) root;
-   cbo := cast(*Code_Binary_Operator) cpc.procedure_expression;
+}
 
-   print("%\n", cbo.right.kind);
+main :: () {
+   for MY_ARRAY {
+      print("%\n", it);
+   }
 }
 
