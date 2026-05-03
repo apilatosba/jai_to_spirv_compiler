@@ -7,29 +7,19 @@
 #import "Random";
 #import "File";
 
-GenerateArray :: () -> [] u8 {
-   result := NewArray(64, u8);
-   for * result {
-      it.* = xx it_index;
+f :: () {
+   if (true) {
+      print("xd\n");
    }
-
-   // for result {
-   //    print("%\n", it);
-   // }
-
-   return result;
 }
-
-MY_ARRAY :: #run GenerateArray();
 
 #run {
-   // set_build_options_dc(.{ do_output = false });
+   set_build_options_dc(.{ do_output = false });
 
+   code := code_of(f);
+   root := compiler_get_nodes(code);
+   header := cast(*Code_Procedure_Header) root;
+   ci := cast(*Code_If) header.body_or_null.block.statements[0];
+
+   print("%\n", ci.then_block);
 }
-
-main :: () {
-   for MY_ARRAY {
-      print("%\n", it);
-   }
-}
-

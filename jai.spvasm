@@ -1,4 +1,5 @@
 OpCapability Int64
+OpCapability Shader
 OpCapability MeshShadingEXT
 OpCapability UntypedPointersKHR
 OpCapability DescriptorHeapEXT
@@ -6,143 +7,103 @@ OpCapability PhysicalStorageBufferAddresses
 OpExtension "SPV_EXT_mesh_shader"
 OpExtension "SPV_EXT_descriptor_heap"
 OpExtension "SPV_KHR_untyped_pointers"
-%68 = OpExtInstImport "GLSL.std.450"
+%48 = OpExtInstImport "GLSL.std.450"
 OpMemoryModel PhysicalStorageBuffer64 GLSL450
-OpEntryPoint MeshEXT %1 "ApilaMS" %20 %5 %63 %41 %69 %70 %71 %13
-OpExecutionModeId %1 LocalSizeId %72 %72 %72
-OpExecutionMode %1 OutputVertices 4
-OpExecutionMode %1 OutputPrimitivesEXT 2
-OpExecutionMode %1 OutputTrianglesEXT
+OpEntryPoint Fragment %1 "ApilaFS" %17 %29 %5 %38 %49 %13 %47
+OpExecutionMode %1 OriginUpperLeft
 
 ; annotations (decorations)
-OpDecorate %73 Block
-OpMemberDecorate %73 0 BuiltIn Position
-OpMemberDecorate %73 1 BuiltIn PointSize
-OpDecorate %41 Location 0
-OpDecorate %69 Location 1
-OpDecorate %69 PerPrimitiveEXT
-OpDecorate %63 BuiltIn PrimitiveTriangleIndicesEXT
-OpDecorate %70 BuiltIn ResourceHeapEXT
-OpDecorate %71 BuiltIn SamplerHeapEXT
+OpDecorate %38 Location 0
+OpDecorate %49 Location 1
+OpDecorate %49 PerPrimitiveEXT
+OpDecorate %17 BuiltIn ResourceHeapEXT
+OpDecorate %29 BuiltIn SamplerHeapEXT
 OpDecorate %13 RestrictPointer
+OpDecorate %47 Location 0
+OpDecorateId %35 ArrayStrideIdEXT %51
+OpDecorateId %26 ArrayStrideIdEXT %52
 
 ; Types, variables and constants
 
 ; struct annotate infos
-OpDecorate %88 Block
-OpMemberDecorate %88 0 Offset 0
-OpDecorate %74 Block
-OpMemberDecorate %74 0 Offset 0
-OpMemberDecorate %74 1 Offset 8
-OpMemberDecorate %74 2 Offset 16
-OpDecorate %83 Block
-OpMemberDecorate %83 0 Offset 0
-OpDecorate %85 Block
-%75 = OpTypeInt 32 1
-%76 = OpTypeVector %75 3
-%77 = OpTypeInt 32 0
-%15 = OpConstant %77 2
-%78 = OpTypeArray %76 %15
-%79 = OpTypePointer Output %78
-%63 = OpVariable %79 Output    ; meshtriangles
-%39 = OpTypeFloat 32
-%16 = OpConstant %39 -1
+OpDecorate %57 Block
+OpMemberDecorate %57 0 Offset 0
+OpMemberDecorate %57 1 Offset 4
+OpDecorate %61 Block
+OpMemberDecorate %61 0 Offset 0
+OpDecorate %59 Block
+OpDecorate %50 Block
+OpMemberDecorate %50 0 Offset 0
+OpMemberDecorate %50 1 Offset 8
+OpMemberDecorate %50 2 Offset 16
+%23 = OpTypeInt 32 1
+%53 = OpTypeFloat 32
+%28 = OpTypeImage %53 2D 0 0 0 1 Unknown
+%52 = OpConstantSizeOfEXT %23 %28
+%6 = OpConstant %23 2
 %2 = OpTypeVoid
-%27 = OpConstant %75 2
-%17 = OpConstant %39 0.5
-%34 = OpConstant %39 0
-%21 = OpConstant %75 0
-%6 = OpConstant %75 1
-%62 = OpConstantComposite %76 %21 %6 %27
-%18 = OpConstant %39 1
-%30 = OpConstant %75 3
-%80 = OpTypeUntypedPointerKHR UniformConstant
-%71 = OpUntypedVariableKHR %80 UniformConstant    ; sampler heap variable
+%42 = OpTypeVector %53 2
+%40 = OpTypePointer Input %42
+%25 = OpTypeUntypedPointerKHR UniformConstant
+%17 = OpUntypedVariableKHR %25 UniformConstant    ; image heap variable
+%46 = OpTypeVector %53 4
+%54 = OpTypePointer Output %46
+%47 = OpVariable %54 Output  ; fragment output [0]
+%19 = OpConstant %23 0
+%29 = OpUntypedVariableKHR %25 UniformConstant    ; sampler heap variable
 %10 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
-%74 = OpTypeStruct %10 %10 %10
-%81 = OpTypePointer PushConstant %74
-%5 = OpVariable %81 PushConstant   ; push data variable
-%70 = OpUntypedVariableKHR %80 UniformConstant    ; image heap variable
-%72 = OpConstant %77 1
-%82 = OpTypeVector %39 4
-%26 = OpConstantComposite %82 %18 %18 %17 %18
-%19 = OpConstantComposite %82 %16 %16 %17 %18
-%24 = OpConstantComposite %82 %18 %16 %17 %18
+%50 = OpTypeStruct %10 %10 %10
+%55 = OpTypePointer PushConstant %50
+%5 = OpVariable %55 PushConstant   ; push data variable
+%56 = OpTypeBool
+%16 = OpConstantTrue %56
+%31 = OpConstant %23 1
+%37 = OpTypeSampler
+%51 = OpConstantSizeOfEXT %23 %37
 %3 = OpTypeFunction %2
-%29 = OpConstantComposite %82 %16 %18 %17 %18
-%33 = OpTypeVector %39 2
-%66 = OpConstantComposite %76 %21 %27 %30
-%83 = OpTypeStruct %39  ; MeshData
-%12 = OpTypePointer PhysicalStorageBuffer %83
-%84 = OpTypePointer Private %12
-%13 = OpVariable %84 Private
-%85 = OpTypeStruct  ; MeshOutPrimitive
-%14 = OpConstant %77 4
-%86 = OpTypeArray %85 %14
-%87 = OpTypePointer Output %86
-%69 = OpVariable %87 Output    ; mOutPrimitive
-%73 = OpTypeStruct %82 %39  ; MeshPerVertex
+%35 = OpTypeRuntimeArray %37
+%57 = OpTypeStruct %23 %23  ; FragmentData
+%12 = OpTypePointer PhysicalStorageBuffer %57
+%58 = OpTypePointer Private %12
+%13 = OpVariable %58 Private
+%26 = OpTypeRuntimeArray %28
 %8 = OpTypePointer PushConstant %10
-%37 = OpTypePointer PhysicalStorageBuffer %39
-%23 = OpTypePointer Output %82
-%88 = OpTypeStruct %33  ; MeshOutVertex
-%89 = OpTypeArray %88 %14
-%90 = OpTypePointer Output %89
-%41 = OpVariable %90 Output    ; mOutVertex
-%91 = OpTypeArray %73 %14
-%92 = OpTypePointer Output %91
-%20 = OpVariable %92 Output    ; meshvertices
-%43 = OpTypePointer Output %33
-%65 = OpTypePointer Output %76
+%44 = OpTypeSampledImage %28
+%21 = OpTypePointer PhysicalStorageBuffer %23
+%59 = OpTypeStruct  ; MeshOutPrimitive
+%60 = OpTypePointer Input %59
+%49 = OpVariable %60 Input  ; mOutPrimitive
+%61 = OpTypeStruct %42  ; MeshOutVertex
+%62 = OpTypePointer Input %61
+%38 = OpVariable %62 Input  ; mOutVertex
 
 ; functions
 ; main function
 %1 = OpFunction %2 None %3
 %4 = OpLabel
 %7 = OpAccessChain %8 %5 %6
-%9 = OpLoad %10 %7 Aligned 8
+%9 = OpLoad %10 %7
 %11 = OpBitcast %12 %9
 OpStore %13 %11
-OpSetMeshOutputsEXT %14 %15
-%22 = OpAccessChain %23 %20 %21 %21
-OpStore %22 %19
-%25 = OpAccessChain %23 %20 %6 %21
-OpStore %25 %24
-%28 = OpAccessChain %23 %20 %27 %21
-OpStore %28 %26
-%31 = OpAccessChain %23 %20 %30 %21
-OpStore %31 %29
-%35 = OpLoad %12 %13 Aligned 8
-%36 = OpAccessChain %37 %35 %21
-%38 = OpLoad %39 %36 Aligned 4
-%40 = OpFAdd %39 %34 %38
-%32 = OpCompositeConstruct %33 %34 %40
-%42 = OpAccessChain %43 %41 %21 %21
-OpStore %42 %32
-%45 = OpLoad %12 %13 Aligned 8
-%46 = OpAccessChain %37 %45 %21
-%47 = OpLoad %39 %46 Aligned 4
-%48 = OpFAdd %39 %34 %47
-%44 = OpCompositeConstruct %33 %18 %48
-%49 = OpAccessChain %43 %41 %6 %21
-OpStore %49 %44
-%51 = OpLoad %12 %13 Aligned 8
-%52 = OpAccessChain %37 %51 %21
-%53 = OpLoad %39 %52 Aligned 4
-%54 = OpFAdd %39 %18 %53
-%50 = OpCompositeConstruct %33 %18 %54
-%55 = OpAccessChain %43 %41 %27 %21
-OpStore %55 %50
-%57 = OpLoad %12 %13 Aligned 8
-%58 = OpAccessChain %37 %57 %21
-%59 = OpLoad %39 %58 Aligned 4
-%60 = OpFAdd %39 %18 %59
-%56 = OpCompositeConstruct %33 %34 %60
-%61 = OpAccessChain %43 %41 %30 %21
-OpStore %61 %56
-%64 = OpAccessChain %65 %63 %21
-OpStore %64 %62
-%67 = OpAccessChain %65 %63 %6
-OpStore %67 %66
+OpSelectionMerge %15 None
+OpBranchConditional %16 %14 %15
+%14 = OpLabel
+%18 = OpLoad %12 %13
+%20 = OpAccessChain %21 %18 %19
+%22 = OpLoad %23 %20 Aligned 4
+%24 = OpUntypedAccessChainKHR %25 %26 %17 %22
+%27 = OpLoad %28 %24
+%30 = OpLoad %12 %13
+%32 = OpAccessChain %21 %30 %31
+%33 = OpLoad %23 %32 Aligned 4
+%34 = OpUntypedAccessChainKHR %25 %35 %29 %33
+%36 = OpLoad %37 %34
+%39 = OpAccessChain %40 %38 %19
+%41 = OpLoad %42 %39
+%43 = OpSampledImage %44 %27 %36
+%45 = OpImageSampleImplicitLod %46 %43 %41
+OpStore %47 %45
+OpReturn
+%15 = OpLabel
 OpReturn
 OpFunctionEnd

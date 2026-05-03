@@ -20,32 +20,13 @@ layout(push_constant) uniform PC {
 };
 
 layout(location = 0) in vec2 vUv;
-layout(location = 1) perprimitiveEXT in vec2 asdsa;
+layout(location = 4) perprimitiveEXT in vec2 pppppp;
 layout(location = 0) out vec4 fragColor;
 
-
-void ffff() {
-    uint q;
-    int w;
-    float a = w;
-    a = a + q;
-    a = a - 9;
-
-    float e;
-    a = e;
-
-    if (e < 3) {
-        {
-            float inner = 99;
-            e = inner;
-        }
-    }
-}
-
 void main() {
-    ffff();
     fragColor = texture(sampler2D(imageHeap[fragmentData.imageIndex], samplerHeap[fragmentData.samplerIndex]), vUv);
 }
+
 
 //
 // imagine you have the following available

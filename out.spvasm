@@ -1,0 +1,110 @@
+; SPIR-V
+; Version: 1.6
+; Generator: Khronos SPIR-V Tools Assembler; 0
+; Bound: 62
+; Schema: 0
+               OpCapability Int64
+               OpCapability Shader
+               OpCapability MeshShadingEXT
+               OpCapability UntypedPointersKHR
+               OpCapability DescriptorHeapEXT
+               OpCapability PhysicalStorageBufferAddresses
+               OpExtension "SPV_EXT_mesh_shader"
+               OpExtension "SPV_EXT_descriptor_heap"
+               OpExtension "SPV_KHR_untyped_pointers"
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel PhysicalStorageBuffer64 GLSL450
+               OpEntryPoint Fragment %2 "ApilaFS" %3 %4 %5 %6 %7 %8 %9
+               OpExecutionMode %2 OriginUpperLeft
+
+               ; Annotations
+               OpDecorate %6 Location 0
+               OpDecorate %7 Location 1
+               OpDecorate %7 PerPrimitiveEXT
+               OpDecorate %3 BuiltIn ResourceHeapEXT
+               OpDecorate %4 BuiltIn SamplerHeapEXT
+               OpDecorate %8 RestrictPointer
+               OpDecorate %9 Location 0
+               OpDecorateId %_runtimearr_33 ArrayStrideIdEXT %11
+               OpDecorateId %_runtimearr_20 ArrayStrideIdEXT %13
+               OpDecorate %_struct_14 Block
+               OpMemberDecorate %_struct_14 0 Offset 0
+               OpDecorate %_struct_15 Block
+               OpMemberDecorate %_struct_15 0 Offset 0
+               OpMemberDecorate %_struct_15 1 Offset 4
+               OpDecorate %_struct_16 Block
+               OpDecorate %_struct_17 Block
+               OpMemberDecorate %_struct_17 0 Offset 0
+               OpMemberDecorate %_struct_17 1 Offset 8
+               OpMemberDecorate %_struct_17 2 Offset 16
+
+               ; Types, variables and constants
+        %int = OpTypeInt 32 1
+      %float = OpTypeFloat 32
+         %20 = OpTypeImage %float 2D 0 0 0 1 Unknown
+         %13 = OpConstantSizeOfEXT %int %20
+       %void = OpTypeVoid
+    %v2float = OpTypeVector %float 2
+%_ptr_Input_v2float = OpTypePointer Input %v2float
+%_ptr_UniformConstant = OpTypeUntypedPointerKHR UniformConstant
+          %3 = OpUntypedVariableKHR %_ptr_UniformConstant UniformConstant   ; BuiltIn ResourceHeapEXT
+    %v4float = OpTypeVector %float 4
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+          %9 = OpVariable %_ptr_Output_v4float Output   ; Location 0
+      %int_0 = OpConstant %int 0
+          %4 = OpUntypedVariableKHR %_ptr_UniformConstant UniformConstant   ; BuiltIn SamplerHeapEXT
+%_ptr_PhysicalStorageBuffer = OpTypeUntypedPointerKHR PhysicalStorageBuffer
+ %_struct_17 = OpTypeStruct %_ptr_PhysicalStorageBuffer %_ptr_PhysicalStorageBuffer %_ptr_PhysicalStorageBuffer     ; Block
+%_ptr_PushConstant__struct_17 = OpTypePointer PushConstant %_struct_17
+          %5 = OpVariable %_ptr_PushConstant__struct_17 PushConstant
+      %int_1 = OpConstant %int 1
+       %bool = OpTypeBool
+       %true = OpConstantTrue %bool
+         %33 = OpTypeSampler
+         %11 = OpConstantSizeOfEXT %int %33
+         %34 = OpTypeFunction %void
+%_runtimearr_33 = OpTypeRuntimeArray %33
+ %_struct_15 = OpTypeStruct %int %int               ; Block
+%_ptr_PhysicalStorageBuffer__struct_15 = OpTypePointer PhysicalStorageBuffer %_struct_15
+%_ptr_Private__ptr_PhysicalStorageBuffer__struct_15 = OpTypePointer Private %_ptr_PhysicalStorageBuffer__struct_15
+          %8 = OpVariable %_ptr_Private__ptr_PhysicalStorageBuffer__struct_15 Private   ; RestrictPointer
+%_runtimearr_20 = OpTypeRuntimeArray %20
+%_ptr_PushConstant__ptr_PhysicalStorageBuffer = OpTypePointer PushConstant %_ptr_PhysicalStorageBuffer
+         %38 = OpTypeSampledImage %20
+%_ptr_PhysicalStorageBuffer_int = OpTypePointer PhysicalStorageBuffer %int
+ %_struct_16 = OpTypeStruct                         ; Block
+%_ptr_Input__struct_16 = OpTypePointer Input %_struct_16
+          %7 = OpVariable %_ptr_Input__struct_16 Input  ; Location 1, PerPrimitiveEXT
+ %_struct_14 = OpTypeStruct %v2float                    ; Block
+%_ptr_Input__struct_14 = OpTypePointer Input %_struct_14
+          %6 = OpVariable %_ptr_Input__struct_14 Input  ; Location 0
+
+               ; Function 2
+          %2 = OpFunction %void None %34
+         %42 = OpLabel
+         %43 = OpAccessChain %_ptr_PushConstant__ptr_PhysicalStorageBuffer %5 %int_1
+         %44 = OpLoad %_ptr_PhysicalStorageBuffer %43
+         %45 = OpBitcast %_ptr_PhysicalStorageBuffer__struct_15 %44
+               OpStore %8 %45
+               OpSelectionMerge %46 None
+               OpBranchConditional %true %47 %46
+         %47 = OpLabel
+         %48 = OpLoad %_ptr_PhysicalStorageBuffer__struct_15 %8
+         %49 = OpAccessChain %_ptr_PhysicalStorageBuffer_int %48 %int_0
+         %50 = OpLoad %int %49 Aligned 4
+         %51 = OpUntypedAccessChainKHR %_ptr_UniformConstant %_runtimearr_20 %3 %50
+         %52 = OpLoad %20 %51
+         %53 = OpLoad %_ptr_PhysicalStorageBuffer__struct_15 %8
+         %54 = OpAccessChain %_ptr_PhysicalStorageBuffer_int %53 %int_1
+         %55 = OpLoad %int %54 Aligned 4
+         %56 = OpUntypedAccessChainKHR %_ptr_UniformConstant %_runtimearr_33 %4 %55
+         %57 = OpLoad %33 %56
+         %58 = OpAccessChain %_ptr_Input_v2float %6 %int_0
+         %59 = OpLoad %v2float %58
+         %60 = OpSampledImage %38 %52 %57
+         %61 = OpImageSampleImplicitLod %v4float %60 %59
+               OpStore %9 %61
+               OpReturn
+         %46 = OpLabel
+               OpReturn
+               OpFunctionEnd
