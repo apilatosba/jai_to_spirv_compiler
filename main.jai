@@ -47,7 +47,7 @@ MESH_VERTICES_NAME               :: "meshvertices";
 MESH_TRIANGLES_NAME              :: "meshtriangles";
 SET_MESH_OUTPUTS_NAME            :: "SetMeshOutputs";
 PUSH_DATA_VARIABLE_NAME          :: "__push_data__";  // this is not gonna be used by the user.
-                                                   // so i picked a name hoping that it is not gonna clash with other variables
+                                                      // so i picked a name hoping that it is not gonna clash with other variables
 IMAGE_HEAP_VARIABLE_NAME         :: "images";
 SAMPLER_HEAP_VARIABLE_NAME       :: "samplers";
 TEXTURE_FLOAT_2D_FUNCTION_NAME   :: "texture";
@@ -470,6 +470,7 @@ main :: () {
 }
 
 #run {
+   CompileToSpirv(code_of(MeshShader), .Mesh);
    CompileToSpirv(code_of(FragmentShader), .Fragment);
 }
 
@@ -698,14 +699,10 @@ CompilationData :: struct {
    meshVertexOutVariableIdentifier:          Identifier;
    meshPrimitiveOutVariableIdentifier:       Identifier;
    writtenIdentifiers:                       Table(Identifier, IdentifierWriteStatus, IdentifierHash, IdentifierCompare);
-   meshVertexOutUserStruct:                  *Type_Info; // REFACTOR: you dont need these seperately. type is already stored in the identifiers
-   meshPrimitiveOutUserStruct:               *Type_Info; // REFACTOR: you dont need these seperately. type is already stored in the identifiers
    shaderDataPointerVariableIdentifier:      Identifier;
    codeNodeTypes:                            Table(*Code_Node, *Type_Info);
    fragmentVertexInVariableIdentifier:       Identifier;
    fragmentPrimitiveInVariableIdentifier:    Identifier;
-   fragmentVertexInUserStruct:               *Type_Info; // REFACTOR: you dont need these seperately. type is already stored in the identifiers
-   fragmentPrimitiveInUserStruct:            *Type_Info; // REFACTOR: you dont need these seperately. type is already stored in the identifiers
    fragmentOutputIdentifiers:                [] Identifier;
    shaderType:                               ShaderType;
    entryFunction:                            *Code_Procedure_Header;
@@ -829,9 +826,8 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             assert(header.arguments[index].type.type == .ARRAY, "first argument wrong");
             array := cast(*Type_Info_Array) header.arguments[index].type;
 
-            data.meshVertexOutUserStruct = array.element_type;
             data.meshVertexOutVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
-            data.locationsConsumedByPerVertexUserStruct = CalculateLocationsConsumed(get_type(data.meshVertexOutUserStruct));
+            data.locationsConsumedByPerVertexUserStruct = CalculateLocationsConsumed(get_type(array.element_type));
          }
 
          // second argument: mOutPrimitive: *[] MeshOutPrimitive. MeshOutPrimitive is user defined struct
@@ -842,7 +838,6 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             assert(header.arguments[index].type.type == .ARRAY, "second argument wrong");
             array := cast(*Type_Info_Array) header.arguments[index].type;
 
-            data.meshPrimitiveOutUserStruct = array.element_type;
             data.meshPrimitiveOutVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
          }
 
@@ -869,9 +864,8 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             assert(header.arguments[index].type.type == .STRUCT, "first argument wrong");
             tis := cast(*Type_Info_Struct) header.arguments[index].type;
 
-            data.fragmentVertexInUserStruct = tis;
             data.fragmentVertexInVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
-            data.locationsConsumedByPerVertexUserStruct = CalculateLocationsConsumed(get_type(data.fragmentVertexInUserStruct));
+            data.locationsConsumedByPerVertexUserStruct = CalculateLocationsConsumed(get_type(tis));
          }
 
          // second argument: mOutPrimitive: MeshOutPrimitive
@@ -882,7 +876,6 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             assert(header.arguments[index].type.type == .STRUCT, "second argumnet wrong");
             tis := cast(*Type_Info_Struct) header.arguments[index];
 
-            data.fragmentPrimitiveInUserStruct = tis;
             data.fragmentPrimitiveInVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
          }
 
