@@ -40,18 +40,6 @@ void ffffff(MeshData ptr) {
 void main() {
    SetMeshOutputsEXT(4, 2);
 
-    MyStruct1 ms1;
-    MyStruct2 ms2;
-
-    ffffff(md);
-
-    ms1.a = ms2.a;
-    ms2.a = ms1.a;
-
-    if (ms1.a < 5.0f) {
-        return;
-    }
-
    gl_MeshVerticesEXT[0].gl_Position = vec4(-1, -1, 0.5, 1);
    gl_MeshVerticesEXT[1].gl_Position = vec4( 1, -1, 0.5, 1);
    gl_MeshVerticesEXT[2].gl_Position = vec4( 1,  1, 0.5, 1);

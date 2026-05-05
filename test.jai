@@ -7,19 +7,34 @@
 #import "Random";
 #import "File";
 
-f :: () {
-   if (true) {
-      print("xd\n");
-   }
+c :: (obj: $T) -> Any #expand {
+   copy := New(T);
+   copy.* = obj;
+
+   result: Any;
+   result.value_pointer = copy;
+   result.type = type_info(T);
+   return result;
 }
 
 #run {
    set_build_options_dc(.{ do_output = false });
 
-   code := code_of(f);
-   root := compiler_get_nodes(code);
-   header := cast(*Code_Procedure_Header) root;
-   ci := cast(*Code_If) header.body_or_null.block.statements[0];
+   a := 10;
+   b := 11;
 
-   print("%\n", ci.then_block);
+   GetValue :: (i: int) -> int {
+      return i;
+   }
+
+   array: [..] Any;
+
+   for a..b {
+      value: int = GetValue(it);
+      array_add(*array, c(value));
+   }
+
+   for array {
+      print("%\n", it);
+   }
 }

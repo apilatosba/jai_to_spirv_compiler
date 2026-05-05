@@ -1,16 +1,16 @@
 OpCapability Int64
-OpCapability Shader
 OpCapability MeshShadingEXT
 OpCapability UntypedPointersKHR
 OpCapability DescriptorHeapEXT
 OpCapability PhysicalStorageBufferAddresses
+OpCapability Shader
 OpExtension "SPV_EXT_mesh_shader"
 OpExtension "SPV_EXT_descriptor_heap"
 OpExtension "SPV_KHR_untyped_pointers"
 %48 = OpExtInstImport "GLSL.std.450"
 OpMemoryModel PhysicalStorageBuffer64 GLSL450
-OpEntryPoint Fragment %1 "ApilaFS" %17 %29 %5 %38 %49 %13 %47
-OpExecutionMode %1 OriginUpperLeft
+OpEntryPoint Fragment %2 "ApilaFS" %17 %29 %5 %38 %49 %13 %47
+OpExecutionMode %2 OriginUpperLeft
 
 ; annotations (decorations)
 OpDecorate %38 Location 0
@@ -37,49 +37,58 @@ OpMemberDecorate %50 0 Offset 0
 OpMemberDecorate %50 1 Offset 8
 OpMemberDecorate %50 2 Offset 16
 %23 = OpTypeInt 32 1
-%53 = OpTypeFloat 32
-%28 = OpTypeImage %53 2D 0 0 0 1 Unknown
-%52 = OpConstantSizeOfEXT %23 %28
 %6 = OpConstant %23 2
-%2 = OpTypeVoid
+%1 = OpTypeVoid
+%53 = OpTypeFloat 32
 %42 = OpTypeVector %53 2
 %40 = OpTypePointer Input %42
-%25 = OpTypeUntypedPointerKHR UniformConstant
-%17 = OpUntypedVariableKHR %25 UniformConstant    ; image heap variable
 %46 = OpTypeVector %53 4
 %54 = OpTypePointer Output %46
-%47 = OpVariable %54 Output  ; fragment output [0]
+; fragment output [0]
+%47 = OpVariable %54 Output
+%25 = OpTypeUntypedPointerKHR UniformConstant
+; image heap variable
+%17 = OpUntypedVariableKHR %25 UniformConstant
+%37 = OpTypeSampler
+%51 = OpConstantSizeOfEXT %23 %37
 %19 = OpConstant %23 0
-%29 = OpUntypedVariableKHR %25 UniformConstant    ; sampler heap variable
+; sampler heap variable
+%29 = OpUntypedVariableKHR %25 UniformConstant
 %10 = OpTypeUntypedPointerKHR PhysicalStorageBuffer
 %50 = OpTypeStruct %10 %10 %10
 %55 = OpTypePointer PushConstant %50
-%5 = OpVariable %55 PushConstant   ; push data variable
+; push data variable
+%5 = OpVariable %55 PushConstant
+%31 = OpConstant %23 1
 %56 = OpTypeBool
 %16 = OpConstantTrue %56
-%31 = OpConstant %23 1
-%37 = OpTypeSampler
-%51 = OpConstantSizeOfEXT %23 %37
-%3 = OpTypeFunction %2
+%3 = OpTypeFunction %1
 %35 = OpTypeRuntimeArray %37
-%57 = OpTypeStruct %23 %23  ; FragmentData
+; FragmentData
+%57 = OpTypeStruct %23 %23
 %12 = OpTypePointer PhysicalStorageBuffer %57
 %58 = OpTypePointer Private %12
 %13 = OpVariable %58 Private
+%28 = OpTypeImage %53 2D 0 0 0 1 Unknown
+%52 = OpConstantSizeOfEXT %23 %28
 %26 = OpTypeRuntimeArray %28
-%8 = OpTypePointer PushConstant %10
 %44 = OpTypeSampledImage %28
-%21 = OpTypePointer PhysicalStorageBuffer %23
-%59 = OpTypeStruct  ; MeshOutPrimitive
+; MeshOutPrimitive
+%59 = OpTypeStruct
 %60 = OpTypePointer Input %59
-%49 = OpVariable %60 Input  ; mOutPrimitive
-%61 = OpTypeStruct %42  ; MeshOutVertex
+; mOutPrimitive
+%49 = OpVariable %60 Input
+%8 = OpTypePointer PushConstant %10
+%21 = OpTypePointer PhysicalStorageBuffer %23
+; MeshOutVertex
+%61 = OpTypeStruct %42
 %62 = OpTypePointer Input %61
-%38 = OpVariable %62 Input  ; mOutVertex
+; mOutVertex
+%38 = OpVariable %62 Input
 
 ; functions
 ; main function
-%1 = OpFunction %2 None %3
+%2 = OpFunction %1 None %3
 %4 = OpLabel
 %7 = OpAccessChain %8 %5 %6
 %9 = OpLoad %10 %7

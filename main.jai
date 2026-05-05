@@ -7,6 +7,7 @@
 #import "Hash";
 #import "File";
 #import "SpirvTools";
+#import "SpirvHeaders";
 
 // TODO
 // can you use OpConstantSampler to inline the samplers?
@@ -37,6 +38,21 @@
 // infer it directly from what it is assigned to.
 //       - apila, 25/04/26
 //
+
+SSAId :: #type,distinct int;
+
+SPIRV_BUILDER_TYPE :: SpirvBuilderType.String;
+BuilderType :: #run -> Type {
+   if #complete SPIRV_BUILDER_TYPE == {
+      case .Byte; return [..] u32; // list of words. one word is 4 bytes
+      case .String; return String_Builder;
+   }
+}
+
+SpirvBuilderType :: enum {
+   Byte;
+   String;
+}
 
 MeshOutVertex :: struct {
    uv: Float2;
@@ -185,7 +201,7 @@ TypeInfoPointer :: struct {
    info.runtime_size = 8;
 
    pointerTo:     *Type_Info;
-   storageClass:  StorageClass;
+   storageClass:  SpvStorageClass;
 }
 
 TypeInfoSampledImage :: struct {
@@ -203,12 +219,12 @@ TypeInfoImage :: struct {
                            // same as VkPhysicalDeviceDescriptorHeapPropertiesEXT.imageDescriptorSize
 
    sampledType:      *Type_Info;
-   dimensionality:   Dimensionality;
+   dimensionality:   SpvDim;
    depth:            int;
    arrayed:          int;
    ms:               int;
    sampled:          int;
-   imageFormat:      __ImageFormat__;
+   imageFormat:      SpvImageFormat;
 }
 
 // this is different than normal array: [] T.
@@ -242,19 +258,6 @@ TYPE_INFO_POINTER_TAG         :: 669;
 TYPE_INFO_SAMPLED_IMAGE_TAG   :: 670;
 TYPE_INFO_IMAGE_TAG           :: 671;
 TYPE_INFO_RUNTIME_ARRAY_TAG   :: 672;
-
-// https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#Dim
-Dimensionality :: enum {
-   _1D;
-   _2D;
-   _3D;
-   Cube;
-}
-
-// https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#Image_Format
-__ImageFormat__ :: enum {
-   Unknown;
-}
 
 // identifier is anything that can be given an ssa id.
 Identifier :: struct {
@@ -293,6 +296,13 @@ Identifier :: struct {
                                        // treated as a keyword anyways.
                                        // and you shouldnt mix using name or using declaration for a single variable. either use name or the declaration. not both at the same time
                                        //          - apila, 18/04/26
+                                       //
+                                       // BUG
+                                       // useName approach is faulty. instead i should use the declaration pointer but the way jai works right now it is not possible to my knowledge.
+                                       // the problem is for example consider this scenario:
+                                       // user has a named module in which they declared a variable meshvertices. if they try to access this using the named module:
+                                       // UserModule.meshvertices then i wrongly think that this is the meshvertices from this module. declaration pointer would have solved this problem.
+                                       //          - apila, 05/05/26
                                        //
                                        declaration:   *Code_Declaration;
                                        useName:       bool;
@@ -449,21 +459,6 @@ CompareType :: (a: *Type_Info, b: *Type_Info) -> bool {
 
       case; assert(false, "type: %", type); return false;
    }
-}
-
-StorageClass :: enum {
-   Invalid;
-   Function;
-   PhysicalStorageBuffer;
-   Output;
-   PushConstant;
-   UniformConstant;
-   Image;
-   Workgroup;
-   StorageBuffer;
-   Uniform;
-   Private;
-   Input;
 }
 
 main :: () {
@@ -686,8 +681,8 @@ CompilationData :: struct {
    maxVertices:                              int;
    maxPrimitives:                            int;
    primitiveTopology:                        string;
-   identifierToSSAId:                        Table(Identifier, int, IdentifierHash, IdentifierCompare);
-   ssaIota:                                  int;
+   identifierToSSAId:                        Table(Identifier, SSAId, IdentifierHash, IdentifierCompare);
+   ssaIota:                                  SSAId;
 
    // TODO
    // instead of having a frontier and a table generate the functions using a depth first traversel
@@ -706,6 +701,7 @@ CompilationData :: struct {
    fragmentOutputIdentifiers:                [] Identifier;
    shaderType:                               ShaderType;
    entryFunction:                            *Code_Procedure_Header;
+   extraTypeDependencies:                    Table(Identifier, [..] Identifier, IdentifierHash, IdentifierCompare);
 
 
    HashStringArray :: (x: [] string) -> u32 {
@@ -987,52 +983,117 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
    }
 
    DetermineCodeNodeTypes(*data, body.block);
-   functions := GenerateFunctions(*data, body);
+   functionsBuilder: BuilderType;
+   GenerateFunctions(*data, body, *functionsBuilder);
 
-   b: String_Builder;
+   b: BuilderType;
    if type == {
+      case .Fragment; #through;
       case .Mesh; {
-         // first part
-         print_to_builder(*b, "OpCapability Int64\n");
-         print_to_builder(*b, "OpCapability MeshShadingEXT\n");
-         print_to_builder(*b, "OpCapability UntypedPointersKHR\n");
-         print_to_builder(*b, "OpCapability DescriptorHeapEXT\n");
-         print_to_builder(*b, "OpCapability PhysicalStorageBufferAddresses\n");
-         print_to_builder(*b, "OpExtension \"SPV_EXT_mesh_shader\"\n");
-         print_to_builder(*b, "OpExtension \"SPV_EXT_descriptor_heap\"\n");
-         print_to_builder(*b, "OpExtension \"SPV_KHR_untyped_pointers\"\n");
-         print_to_builder(*b, "\%% = OpExtInstImport \"GLSL.std.450\"\n", GetNextSSAId(*data));
-         print_to_builder(*b, "OpMemoryModel PhysicalStorageBuffer64 GLSL450\n");
-         print_to_builder(*b, "OpEntryPoint MeshEXT \%% \"%\" \%% \%% \%% \%% \%% \%% \%% \%%\n",
-                              GetSSAId(*data, .{ type = .Function, function = header }),
-                              "ApilaMS",
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_VERTICES_NAME } }),
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = PUSH_DATA_VARIABLE_NAME } }),
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
-                              GetSSAId(*data, data.meshVertexOutVariableIdentifier),
-                              GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
-                              GetSSAId(*data, data.shaderDataPointerVariableIdentifier)
-         );
-         print_to_builder(*b, "OpExecutionModeId \%% LocalSizeId \%% \%% \%%\n",
-                              GetSSAId(*data, .{ type = .Function, function = header }),
-                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[0], bitSize = 32 } }),
-                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[1], bitSize = 32 } }),
-                              GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[2], bitSize = 32 } })
-         );
-         print_to_builder(*b, "OpExecutionMode \%% OutputVertices %\n",
-                              GetSSAId(*data, .{ type = .Function, function = header }),
-                              data.maxVertices
-         );
-         print_to_builder(*b, "OpExecutionMode \%% OutputPrimitivesEXT %\n",
-                              GetSSAId(*data, .{ type = .Function, function = header }),
-                              data.maxPrimitives
-         );
-         print_to_builder(*b, "OpExecutionMode \%% %\n",
-                              GetSSAId(*data, .{ type = .Function, function = header }),
-                              ToSpirvOutputTopology(data.primitiveTopology)
-         );
+         // capabilities
+         {
+            WriteSingleInstruction(*b, .Capability, SpvCapability.Int64);
+            WriteSingleInstruction(*b, .Capability, SpvCapability.MeshShadingEXT);
+            WriteSingleInstruction(*b, .Capability, SpvCapability.UntypedPointersKHR);
+            WriteSingleInstruction(*b, .Capability, SpvCapability.DescriptorHeapEXT);
+            WriteSingleInstruction(*b, .Capability, SpvCapability.PhysicalStorageBufferAddresses);
+
+            if (type == .Fragment) {
+               WriteSingleInstruction(*b, .Capability, SpvCapability.Shader);
+            }
+         }
+
+         // extensions
+         WriteSingleInstruction(*b, .Extension, "SPV_EXT_mesh_shader");
+         WriteSingleInstruction(*b, .Extension, "SPV_EXT_descriptor_heap");
+         WriteSingleInstruction(*b, .Extension, "SPV_KHR_untyped_pointers");
+
+         WriteSingleInstruction(*b, .ExtInstImport, GetNextSSAId(*data), "GLSL.std.450");
+         WriteSingleInstruction(*b, .MemoryModel, SpvAddressingModel.PhysicalStorageBuffer64, SpvMemoryModel.GLSL450);
+
+         // entry point
+         if (type == .Mesh) {
+            WriteSingleInstruction(
+               *b,
+               .EntryPoint,
+               SpvExecutionModel.MeshEXT,
+               GetSSAId(*data, .{ type = .Function, function = header }),
+               "ApilaMS",
+               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_VERTICES_NAME } }),
+               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = PUSH_DATA_VARIABLE_NAME } }),
+               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
+               GetSSAId(*data, data.meshVertexOutVariableIdentifier),
+               GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
+               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
+               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
+               GetSSAId(*data, data.shaderDataPointerVariableIdentifier)
+            );
+         } else if (type == .Fragment) {
+            operands: [..] Any;
+            array_add(*operands, SpvExecutionModel.Fragment);
+            array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
+            array_add(*operands, "ApilaFS");
+            array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
+            array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
+            array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = PUSH_DATA_VARIABLE_NAME } }));
+            array_add(*operands, GetSSAId(*data, data.fragmentVertexInVariableIdentifier));
+            array_add(*operands, GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier));
+            array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
+
+            for data.fragmentOutputIdentifiers {
+               array_add(*operands, ac(GetSSAId(*data, it)));
+            }
+
+            WriteSingleInstruction(
+               *b,
+               .EntryPoint,
+               .. operands
+            );
+         } else {
+            assert(false, "should have been unreachable because of the outer case.");
+         }
+
+         // execution modes
+         if (type == .Mesh) {
+            WriteSingleInstruction(
+               *b,
+               .ExecutionModeId,
+               GetSSAId(*data, .{ type = .Function, function = header }),
+               SpvExecutionMode.LocalSizeId,
+               GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[0], bitSize = 32 } }),
+               GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[1], bitSize = 32 } }),
+               GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[2], bitSize = 32 } })
+            );
+            WriteSingleInstruction(
+               *b,
+               .ExecutionMode,
+               GetSSAId(*data, .{ type = .Function, function = header }),
+               SpvExecutionMode.OutputVertices,
+               data.maxVertices
+            );
+            WriteSingleInstruction(
+               *b,
+               .ExecutionMode,
+               GetSSAId(*data, .{ type = .Function, function = header }),
+               SpvExecutionMode.OutputPrimitivesEXT,
+               data.maxPrimitives
+            );
+            WriteSingleInstruction(
+               *b,
+               .ExecutionMode,
+               GetSSAId(*data, .{ type = .Function, function = header }),
+               ToSpirvOutputTopology(data.primitiveTopology)
+            );
+         } else if (type == .Fragment) {
+            WriteSingleInstruction(
+               *b,
+               .ExecutionMode,
+               GetSSAId(*data, .{ type = .Function, function = header }),
+               SpvExecutionMode.OriginUpperLeft
+            );
+         } else {
+            assert(false, "should have been unreachable because of the outer case.");
+         }
 
 
 
@@ -1041,16 +1102,34 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
 
 
          // annotations (decorations)
-         print_to_builder(*b, "\n; annotations (decorations)\n");
-         print_to_builder(*b, "OpDecorate \%% Block\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex })
-         );
-         print_to_builder(*b, "OpMemberDecorate \%% 0 BuiltIn Position\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex })
-         );
-         print_to_builder(*b, "OpMemberDecorate \%% 1 BuiltIn PointSize\n",
-                              GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex })
-         );
+         #if SPIRV_BUILDER_TYPE == .String {
+            print_to_builder(*b, "\n; annotations (decorations)\n");
+         }
+
+         if (type == .Mesh) {
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
+               SpvDecoration.Block
+            );
+            WriteSingleInstruction(
+               *b,
+               .MemberDecorate,
+               GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
+               0,
+               SpvDecoration.BuiltIn,
+               SpvBuiltIn.Position
+            );
+            WriteSingleInstruction(
+               *b,
+               .MemberDecorate,
+               GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
+               1,
+               SpvDecoration.BuiltIn,
+               SpvBuiltIn.PointSize
+            );
+         }
 
          //
          // i say location 0, and location 1. but idk if this is correct. for example glsl disallows this if meshVertexOut is a struct with more than one member
@@ -1066,16 +1145,51 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          // so i cant say meshPrimitiveOut has location 1. i need to calculate its location from MeshVertexOut struct.
          // look for an implementation in glslangValidator, they must have something similar.
          //
-         print_to_builder(*b, "OpDecorate \%% Location 0\n",
-                              GetSSAId(*data, data.meshVertexOutVariableIdentifier)
-         );
-         print_to_builder(*b, "OpDecorate \%% Location %\n",
-                              GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
-                              data.locationsConsumedByPerVertexUserStruct,
-         );
-         print_to_builder(*b, "OpDecorate \%% PerPrimitiveEXT\n",
-                              GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier)
-         );
+         if (type == .Mesh) {
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, data.meshVertexOutVariableIdentifier),
+               SpvDecoration.Location,
+               0
+            );
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
+               SpvDecoration.Location,
+               data.locationsConsumedByPerVertexUserStruct
+            );
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
+               SpvDecoration.PerPrimitiveEXT
+            );
+         } else if (type == .Fragment) {
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, data.fragmentVertexInVariableIdentifier),
+               SpvDecoration.Location,
+               0
+            );
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier),
+               SpvDecoration.Location,
+               data.locationsConsumedByPerVertexUserStruct
+            );
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier),
+               SpvDecoration.PerPrimitiveEXT
+            );
+         } else {
+            assert(false, "should have been unreachable because of the outer case.");
+         }
 
          // print_to_builder(*b, "OpDecorate \%% Block\n",
          //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
@@ -1091,21 +1205,51 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          // );
          GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData });
 
-         print_to_builder(*b, "OpDecorate \%% BuiltIn PrimitiveTriangleIndicesEXT\n",
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } })
+         if (type == .Mesh) {
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
+               SpvDecoration.BuiltIn,
+               SpvBuiltIn.PrimitiveTriangleIndicesEXT
+            );
+         }
+
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.ResourceHeapEXT
          );
-         print_to_builder(*b, "OpDecorate \%% BuiltIn ResourceHeapEXT\n",
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
-         );
-         print_to_builder(*b, "OpDecorate \%% BuiltIn SamplerHeapEXT\n",
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.SamplerHeapEXT
          );
 
          // not necessary but voila. Restrict is already the default. if you wanted to alias you would have to type it here.
          // it is restrict becasue __push_data__.meshData is basically a dead pointer, never used (except to initialize shader data pointer).
-         print_to_builder(*b, "OpDecorate \%% RestrictPointer\n",
-                              GetSSAId(*data, data.shaderDataPointerVariableIdentifier)
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, data.shaderDataPointerVariableIdentifier),
+            SpvDecoration.RestrictPointer
          );
+
+         if (type == .Fragment) {
+            for data.fragmentOutputIdentifiers {
+               WriteSingleInstruction(
+                  *b,
+                  .Decorate,
+                  GetSSAId(*data, it),
+                  SpvDecoration.Location,
+                  it_index
+               );
+            }
+         }
 
          // runtime arrays
          for ssaId, identifier: data.identifierToSSAId {
@@ -1118,9 +1262,16 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             if (tira.elementType.type == TYPE_INFO_IMAGE_TAG ||
                   tira.elementType == cast(*Type_Info) __Sampler__) {
                constantSizeOfIdentifier: Identifier = .{ type = .ConstantSizeOf, constantSizeOf = tira.elementType };
-               print_to_builder(*b, "OpDecorateId \%% ArrayStrideIdEXT \%%\n",
-                                    GetSSAId(*data, identifier),
-                                    GetSSAId(*data, constantSizeOfIdentifier)
+
+               // specs mandates that: All <id> Extra Operands must appear before Target.
+               AddTypeDependency(*data.extraTypeDependencies, identifier, constantSizeOfIdentifier);
+
+               WriteSingleInstruction(
+                  *b,
+                  .DecorateId,
+                  GetSSAId(*data, identifier),
+                  SpvDecoration.ArrayStrideIdEXT,
+                  GetSSAId(*data, constantSizeOfIdentifier)
                );
             } else {
                assert(false, "not yet implemented! element type: %", tira.elementType.*);
@@ -1140,9 +1291,12 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             array_add(*typesConstantsVariables, identifier);
          }
 
-         typesConstantsVariablesBuilder: String_Builder;
+         typesConstantsVariablesBuilder: BuilderType;
 
-         print_to_builder(*b, "\n; Types, variables and constants\n");
+         #if SPIRV_BUILDER_TYPE == .String {
+            print_to_builder(*b, "\n; Types, variables and constants\n");
+         }
+
          for typesConstantsVariables {
             WriteTypeOrVariableOrConstant(*data, *typesConstantsVariablesBuilder, it);
          }
@@ -1152,7 +1306,10 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          //    apila, 12/04/26
          //
          // struct annotate infos
-         print_to_builder(*b, "\n; struct annotate infos\n");
+         #if SPIRV_BUILDER_TYPE == .String {
+            print_to_builder(*b, "\n; struct annotate infos\n");
+         }
+
          for ssaId, identifier: data.identifierToSSAId {
             if (identifier.type != ._Type) continue;
             ti := cast(*Type_Info) identifier._type;
@@ -1187,210 +1344,75 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
 
             annotateInfo := GetAnnotateInfoFromStruct(identifier._type);
             structIdentifier: Identifier = .{ type = ._Type, _type = identifier._type };
-            print_to_builder(*b, "OpDecorate \%% Block\n",
-                                 GetSSAId(*data, structIdentifier)
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, structIdentifier),
+               SpvDecoration.Block
             );
 
             for annotateInfo.memberInfos {
-               print_to_builder(*b, "OpMemberDecorate \%% % Offset %\n",
-                                    GetSSAId(*data, structIdentifier),
-                                    it.memberIndex,
-                                    it.offset
+               WriteSingleInstruction(
+                  *b,
+                  .MemberDecorate,
+                  GetSSAId(*data, structIdentifier),
+                  it.memberIndex,
+                  SpvDecoration.Offset,
+                  it.offset
                );
             }
          }
 
-         append_and_steal_buffers(*b, *typesConstantsVariablesBuilder);
-
+         AppendAndStealBuffers(*b, *typesConstantsVariablesBuilder);
 
 
          // functions
-         print_to_builder(*b, "\n; functions\n");
-         print_to_builder(*b, "%", functions);
+         #if SPIRV_BUILDER_TYPE == .String {
+            print_to_builder(*b, "\n; functions\n");
+         }
+
+         AppendAndStealBuffers(*b, *functionsBuilder);
       }
-
-      case .Fragment;
-         // first part
-         print_to_builder(*b, "OpCapability Int64\n");
-         print_to_builder(*b, "OpCapability Shader\n");
-         print_to_builder(*b, "OpCapability MeshShadingEXT\n");
-         print_to_builder(*b, "OpCapability UntypedPointersKHR\n");
-         print_to_builder(*b, "OpCapability DescriptorHeapEXT\n");
-         print_to_builder(*b, "OpCapability PhysicalStorageBufferAddresses\n");
-         print_to_builder(*b, "OpExtension \"SPV_EXT_mesh_shader\"\n");
-         print_to_builder(*b, "OpExtension \"SPV_EXT_descriptor_heap\"\n");
-         print_to_builder(*b, "OpExtension \"SPV_KHR_untyped_pointers\"\n");
-         print_to_builder(*b, "\%% = OpExtInstImport \"GLSL.std.450\"\n", GetNextSSAId(*data));
-         print_to_builder(*b, "OpMemoryModel PhysicalStorageBuffer64 GLSL450\n");
-
-         print_to_builder(*b, "OpEntryPoint Fragment \%% \"%\" \%% \%% \%% \%% \%% \%%",
-                              GetSSAId(*data, .{ type = .Function, function = header }),
-                              "ApilaFS",
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = PUSH_DATA_VARIABLE_NAME } }),
-                              GetSSAId(*data, data.fragmentVertexInVariableIdentifier),
-                              GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier),
-                              GetSSAId(*data, data.shaderDataPointerVariableIdentifier)
-         );
-         for data.fragmentOutputIdentifiers {
-            print_to_builder(*b, " \%%",
-                                 GetSSAId(*data, it)
-            );
-         }
-         print_to_builder(*b, "\n");
-
-         print_to_builder(*b, "OpExecutionMode \%% OriginUpperLeft\n",
-                              GetSSAId(*data, .{ type = .Function, function = header })
-         );
-
-
-         // skip debug info
-
-
-         // annotations (decorations)
-         print_to_builder(*b, "\n; annotations (decorations)\n");
-         print_to_builder(*b, "OpDecorate \%% Location 0\n",
-                              GetSSAId(*data, data.fragmentVertexInVariableIdentifier)
-         );
-         print_to_builder(*b, "OpDecorate \%% Location %\n",
-                              GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier),
-                              data.locationsConsumedByPerVertexUserStruct,
-         );
-         print_to_builder(*b, "OpDecorate \%% PerPrimitiveEXT\n",
-                              GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier)
-         );
-         GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData });
-
-         print_to_builder(*b, "OpDecorate \%% BuiltIn ResourceHeapEXT\n",
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
-         );
-         print_to_builder(*b, "OpDecorate \%% BuiltIn SamplerHeapEXT\n",
-                              GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
-         );
-
-         print_to_builder(*b, "OpDecorate \%% RestrictPointer\n",
-                              GetSSAId(*data, data.shaderDataPointerVariableIdentifier)
-         );
-
-         for data.fragmentOutputIdentifiers {
-            print_to_builder(*b, "OpDecorate \%% Location %\n",
-                                 GetSSAId(*data, it),
-                                 it_index
-            );
-         }
-
-         // runtime arrays
-         for ssaId, identifier: data.identifierToSSAId {
-            if (identifier.type != ._Type) continue;
-
-            type := identifier._type;
-            if (type.type != TYPE_INFO_RUNTIME_ARRAY_TAG) continue;
-
-            tira := cast(*TypeInfoRuntimeArray) type;
-            if (tira.elementType.type == TYPE_INFO_IMAGE_TAG ||
-                  tira.elementType == cast(*Type_Info) __Sampler__) {
-               constantSizeOfIdentifier: Identifier = .{ type = .ConstantSizeOf, constantSizeOf = tira.elementType };
-               print_to_builder(*b, "OpDecorateId \%% ArrayStrideIdEXT \%%\n",
-                                    GetSSAId(*data, identifier),
-                                    GetSSAId(*data, constantSizeOfIdentifier)
-               );
-            } else {
-               assert(false, "not yet implemented! element type: %", tira.elementType.*);
-            }
-         }
-
-
-         // Types, variables and constants
-         typesConstantsVariables: [..] Identifier;
-         for ssaId, identifier: data.identifierToSSAId {
-            array_add(*typesConstantsVariables, identifier);
-         }
-
-         typesConstantsVariablesBuilder: String_Builder;
-
-         print_to_builder(*b, "\n; Types, variables and constants\n");
-         for typesConstantsVariables {
-            WriteTypeOrVariableOrConstant(*data, *typesConstantsVariablesBuilder, it);
-         }
-
-         // struct annotate infos
-         print_to_builder(*b, "\n; struct annotate infos\n");
-         for ssaId, identifier: data.identifierToSSAId {
-            if (identifier.type != ._Type) continue;
-            ti := cast(*Type_Info) identifier._type;
-            if (ti.type != .STRUCT) continue;
-
-            if (identifier._type == cast(*Type_Info) MeshPerVertex)  continue; // builtin struct handled seperately
-            if (identifier._type == cast(*Type_Info) Int32)          continue;
-            if (identifier._type == cast(*Type_Info) Int32x2)        continue;
-            if (identifier._type == cast(*Type_Info) Int32x3)        continue;
-            if (identifier._type == cast(*Type_Info) Int32x4)        continue;
-            if (identifier._type == cast(*Type_Info) UInt32)         continue;
-            if (identifier._type == cast(*Type_Info) UInt32x2)       continue;
-            if (identifier._type == cast(*Type_Info) UInt32x3)       continue;
-            if (identifier._type == cast(*Type_Info) UInt32x4)       continue;
-            if (identifier._type == cast(*Type_Info) Int64)          continue;
-            if (identifier._type == cast(*Type_Info) Int64x2)        continue;
-            if (identifier._type == cast(*Type_Info) Int64x3)        continue;
-            if (identifier._type == cast(*Type_Info) Int64x4)        continue;
-            if (identifier._type == cast(*Type_Info) UInt64)         continue;
-            if (identifier._type == cast(*Type_Info) UInt64x2)       continue;
-            if (identifier._type == cast(*Type_Info) UInt64x3)       continue;
-            if (identifier._type == cast(*Type_Info) UInt64x4)       continue;
-            if (identifier._type == cast(*Type_Info) Float)          continue;
-            if (identifier._type == cast(*Type_Info) Float2)         continue;
-            if (identifier._type == cast(*Type_Info) Float3)         continue;
-            if (identifier._type == cast(*Type_Info) Float4)         continue;
-            if (identifier._type == cast(*Type_Info) Float2x2)       continue;
-            if (identifier._type == cast(*Type_Info) Float3x3)       continue;
-            if (identifier._type == cast(*Type_Info) Float4x4)       continue;
-            if (identifier._type == cast(*Type_Info) __Image__)      continue;
-            if (identifier._type == cast(*Type_Info) __Sampler__)    continue;
-
-            annotateInfo := GetAnnotateInfoFromStruct(identifier._type);
-            structIdentifier: Identifier = .{ type = ._Type, _type = identifier._type };
-            print_to_builder(*b, "OpDecorate \%% Block\n",
-                                 GetSSAId(*data, structIdentifier)
-            );
-
-            for annotateInfo.memberInfos {
-               print_to_builder(*b, "OpMemberDecorate \%% % Offset %\n",
-                                    GetSSAId(*data, structIdentifier),
-                                    it.memberIndex,
-                                    it.offset
-               );
-            }
-         }
-
-         append_and_steal_buffers(*b, *typesConstantsVariablesBuilder);
-
-         // functions
-         print_to_builder(*b, "\n; functions\n");
-         print_to_builder(*b, "%", functions);
 
       case; assert(false, "not yet implemented! type: %", type);
    }
 
-   spirvasm := builder_to_string(*b);
-   // print("%", spirvasm);
-   write_entire_file("jai.spvasm", spirvasm);
+   #if SPIRV_BUILDER_TYPE == {
+      case .String;
+         spirvasm := builder_to_string(*b);
+         // print("%", spirvasm);
+         write_entire_file("jai.spvasm", spirvasm);
 
-   spirvContext := spvContextCreate(.SPV_ENV_VULKAN_1_4);
-   defer spvContextDestroy(spirvContext);
+         spirvContext := spvContextCreate(.SPV_ENV_VULKAN_1_4);
+         defer spvContextDestroy(spirvContext);
 
-   spirvOut: spv_binary;
-   spirvDiagnostics: spv_diagnostic;
-   spirvResult := spvTextToBinary(spirvContext, spirvasm.data, xx spirvasm.count, *spirvOut, *spirvDiagnostics);
-   assert(spirvResult == .SUCCESS, "result: %", spirvResult);
+         spirvOut: spv_binary;
+         spirvDiagnostics: spv_diagnostic;
+         spirvResult := spvTextToBinary(spirvContext, spirvasm.data, xx spirvasm.count, *spirvOut, *spirvDiagnostics);
+         assert(spirvResult == .SUCCESS, "result: %", spirvResult);
 
-   WORD_LENGTH :: size_of(type_of(spirvOut.code.*));
-   assert(WORD_LENGTH == 4, "WORD_LENGTH: %", WORD_LENGTH);
+         WORD_LENGTH :: size_of(type_of(spirvOut.code.*));
+         assert(WORD_LENGTH == 4, "WORD_LENGTH: %", WORD_LENGTH);
 
-   return .{
-      data = xx spirvOut.code,
-      count = xx spirvOut.wordCount * WORD_LENGTH
-   };
+         return .{
+            data = xx spirvOut.code,
+            count = xx spirvOut.wordCount * WORD_LENGTH
+         };
+
+      case .Byte;
+         return .{
+            data = xx b.data,
+            count = b.count * size_of(type_of(b[69])),
+         };
+
+      case; assert(false, "not yet implemented! type: %", SPIRV_BUILDER_TYPE);
+   }
+}
+
+AddTypeDependency :: (table: *Table, dependant: Identifier, dependency: Identifier) {
+   pointer := find_or_add(table, dependant);
+   newlyAdded := array_add_if_unique(pointer, dependency, IdentifierCompare);
+   assert(newlyAdded);
 }
 
 AddFixedArray :: (typeName: string, size: int, elementTypeName: string) {
@@ -1398,12 +1420,919 @@ AddFixedArray :: (typeName: string, size: int, elementTypeName: string) {
    add_build_string(codeString, -1);
 }
 
+AppendAndStealBuffers :: (builder: *BuilderType, stealFrom: *BuilderType) {
+   #if SPIRV_BUILDER_TYPE == .String {
+      append_and_steal_buffers(builder, stealFrom);
+   } else #if SPIRV_BUILDER_TYPE == .Byte {
+      array_add(builder, .. stealFrom);
+      array_reset(stealFrom);
+   } else {
+      #assert(false, "not implemented yet! type: %", SPIRV_BUILDER_TYPE);
+   }
+}
+
+WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
+   #if SPIRV_BUILDER_TYPE == .String {
+      if op == {
+         case .Capability; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SpvCapability);
+
+            capability := operands[0].value_pointer.(*SpvCapability).*;
+
+            capabilityString := SpvCapabilityToString(capability);
+            print_to_builder(b, "OpCapability %\n", capabilityString);
+         }
+
+         case .Extension; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) string);
+
+            extension := operands[0].value_pointer.(*string).*;
+
+            print_to_builder(b, "OpExtension \"%\"\n", extension);
+         }
+
+         case .ExtInstImport; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) string);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+            import := operands[1].value_pointer.(*string).*;
+
+            print_to_builder(b, "\%% = OpExtInstImport \"%\"\n", result, import);
+         }
+
+         case .MemoryModel; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SpvAddressingModel);
+            assert(operands[1].type == cast(*Type_Info) SpvMemoryModel);
+
+            addressingModel := operands[0].value_pointer.(*SpvAddressingModel).*;
+            memoryModel     := operands[1].value_pointer.(*SpvMemoryModel).*;
+
+            addressingModelString := SpvAddressingModelToString(addressingModel);
+            memoryModelString := SpvMemoryModelToString(memoryModel);
+
+            print_to_builder(b, "OpMemoryModel % %\n", addressingModelString, memoryModelString);
+         }
+
+         case .EntryPoint; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SpvExecutionModel);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) string);
+
+            executionModel := operands[0].value_pointer.(*SpvExecutionModel).*;
+            entryPoint     := operands[1].value_pointer.(*SSAId).*;
+            name           := operands[2].value_pointer.(*string).*;
+
+            executionModelString := SpvExecutionModelToString(executionModel);
+
+            print_to_builder(b, "OpEntryPoint % \%% \"%\"", executionModelString, entryPoint, name);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               operand := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", operand);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .ExecutionModeId; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvExecutionMode);
+
+            entryPoint    := operands[0].value_pointer.(*SSAId).*;
+            executionMode := operands[1].value_pointer.(*SpvExecutionMode).*;
+
+            executionModeString := SpvExecutionModeToString(executionMode);
+
+            print_to_builder(b, "OpExecutionModeId \%% %", entryPoint, executionModeString);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               operand := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", operand);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .ExecutionMode; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvExecutionMode);
+
+            entryPoint    := operands[0].value_pointer.(*SSAId).*;
+            executionMode := operands[1].value_pointer.(*SpvExecutionMode).*;
+
+            executionModeString := SpvExecutionModeToString(executionMode);
+
+            print_to_builder(b, "OpExecutionMode \%% %", entryPoint, executionModeString);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) int);
+
+               operand := operands[it].value_pointer.(*int).*;
+               print_to_builder(b, " %", operand);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .Decorate; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvDecoration);
+
+            target     := operands[0].value_pointer.(*SSAId).*;
+            decoration := operands[1].value_pointer.(*SpvDecoration).*;
+
+            decorationString := SpvDecorationToString(decoration);
+
+            print_to_builder(b, "OpDecorate \%% %", target, decorationString);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) int || operands[it].type == cast(*Type_Info) SpvBuiltIn);
+
+               if (operands[it].type == cast(*Type_Info) int) {
+                  operand := operands[it].value_pointer.(*int).*;
+                  print_to_builder(b, " %", operand);
+               } else if (operands[it].type == cast(*Type_Info) SpvBuiltIn) {
+                  operand := operands[it].value_pointer.(*SpvBuiltIn).*;
+                  operandString := SpvBuiltInToString(operand);
+                  print_to_builder(b, " %", operandString);
+               }
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .MemberDecorate; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) int);
+            assert(operands[2].type == cast(*Type_Info) SpvDecoration);
+
+            structType := operands[0].value_pointer.(*SSAId).*;
+            member     := operands[1].value_pointer.(*int).*;
+            decoration := operands[2].value_pointer.(*SpvDecoration).*;
+
+            decorationString := SpvDecorationToString(decoration);
+
+            print_to_builder(b, "OpMemberDecorate \%% % %", structType, member, decorationString);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SpvBuiltIn || operands[it].type == cast(*Type_Info) int);
+
+               if (operands[it].type == cast(*Type_Info) SpvBuiltIn) {
+                  builtin := operands[it].value_pointer.(*SpvBuiltIn).*;
+                  builtinString := SpvBuiltInToString(builtin);
+                  print_to_builder(b, " %", builtinString);
+               } else if (operands[it].type == cast(*Type_Info) int) {
+                  operand := operands[it].value_pointer.(*int).*;
+                  print_to_builder(b, " %", operand);
+               }
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .DecorateId; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvDecoration);
+
+            target     := operands[0].value_pointer.(*SSAId).*;
+            decoration := operands[1].value_pointer.(*SpvDecoration).*;
+
+            decorationString := SpvDecorationToString(decoration);
+
+            print_to_builder(b, "OpDecorateId \%% %", target, decorationString);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               ssaId := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", ssaId);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .Constant; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) s64 || cast(*Type_Info) u64 || cast(*Type_Info) float);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            value      := operands[2];
+
+            print_to_builder(b, "\%% = OpConstant \%% %\n", result, resultType, value);
+         }
+
+         case .TypeInt; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) int);
+            assert(operands[2].type == cast(*Type_Info) int);
+
+            result     := operands[0].value_pointer.(*SSAId).*;
+            width      := operands[1].value_pointer.(*int).*;
+            signedness := operands[2].value_pointer.(*int).*;
+
+            print_to_builder(b, "\%% = OpTypeInt % %\n", result, width, signedness);
+         }
+
+         case .TypeFloat; {
+            assert(operands.count == 2 || operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) int);
+
+            result     := operands[0].value_pointer.(*SSAId).*;
+            width      := operands[1].value_pointer.(*int).*;
+
+            print_to_builder(b, "\%% = OpTypeFloat %", result, width);
+
+            if (operands.count == 3) {
+               assert(operands[2].type == cast(*Type_Info) SpvFPEncoding);
+
+               encoding := operands[1].value_pointer.(*SpvFPEncoding).*;
+               encodingString := SpvFPEncodingToString(encoding);
+               print_to_builder(b, " %", encodingString);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .TypeVector; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) int);
+
+            result         := operands[0].value_pointer.(*SSAId).*;
+            componentType  := operands[1].value_pointer.(*SSAId).*;
+            componentCount := operands[2].value_pointer.(*int).*;
+
+            print_to_builder(b, "\%% = OpTypeVector \%% %\n", result, componentType, componentCount);
+         }
+
+         case .TypeMatrix; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) int);
+
+            result      := operands[0].value_pointer.(*SSAId).*;
+            columnType  := operands[1].value_pointer.(*SSAId).*;
+            columnCount := operands[2].value_pointer.(*int).*;
+
+            print_to_builder(b, "\%% = OpTypeMatrix \%% %\n", result, columnType, columnCount);
+         }
+
+         case .TypeBool; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpTypeBool\n", result);
+         }
+
+         case .TypeStruct; {
+            // spirv specs: "It is valid for the structure to have no members"
+            assert(operands.count >= 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpTypeStruct", result);
+
+            for 1..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               memberType := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", memberType);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .TypeSampledImage; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            result    := operands[0].value_pointer.(*SSAId).*;
+            imageType := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpTypeSampledImage \%%\n", result, imageType);
+         }
+
+         case .TypeSampler; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpTypeSampler\n", result);
+         }
+
+         case .TypeImage; {
+            assert(operands.count == 8 || operands.count == 9);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvDim);
+            assert(operands[3].type == cast(*Type_Info) int);
+            assert(operands[4].type == cast(*Type_Info) int);
+            assert(operands[5].type == cast(*Type_Info) int);
+            assert(operands[6].type == cast(*Type_Info) int);
+            assert(operands[7].type == cast(*Type_Info) SpvImageFormat);
+
+            result      := operands[0].value_pointer.(*SSAId).*;
+            sampledType := operands[1].value_pointer.(*SSAId).*;
+            dim         := operands[2].value_pointer.(*SpvDim).*;
+            depth       := operands[3].value_pointer.(*int).*;
+            arrayed     := operands[4].value_pointer.(*int).*;
+            ms          := operands[5].value_pointer.(*int).*;
+            sampled     := operands[6].value_pointer.(*int).*;
+            imageFormat := operands[7].value_pointer.(*SpvImageFormat).*;
+
+            dimString := SpvDimToString(dim);
+            imageFormatString := SpvImageFormatToString(imageFormat);
+
+            print_to_builder(b, "\%% = OpTypeImage \%% % % % % % %", result, sampledType, dimString, depth, arrayed, ms, sampled, imageFormatString);
+
+            if (operands.count == 9) {
+               assert(operands[8].type == cast(*Type_Info) SpvAccessQualifier);
+
+               accessQualifier := operands[8].value_pointer.(*SpvAccessQualifier).*;
+               accessQualifierString := SpvAccessQualifierToString(accessQualifier);
+               print_to_builder(b, " %", accessQualifierString);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .TypeRuntimeArray; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            result      := operands[0].value_pointer.(*SSAId).*;
+            elementType := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpTypeRuntimeArray \%%\n", result, elementType);
+         }
+
+         case .TypeUntypedPointerKHR; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvStorageClass);
+
+            result       := operands[0].value_pointer.(*SSAId).*;
+            storageClass := operands[1].value_pointer.(*SpvStorageClass).*;
+
+            storageClassString := SpvStorageClassToString(storageClass);
+
+            print_to_builder(b, "\%% = OpTypeUntypedPointerKHR %\n", result, storageClassString);
+         }
+
+         case .TypePointer; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvStorageClass);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            result       := operands[0].value_pointer.(*SSAId).*;
+            storageClass := operands[1].value_pointer.(*SpvStorageClass).*;
+            type         := operands[2].value_pointer.(*SSAId).*;
+
+            storageClassString := SpvStorageClassToString(storageClass);
+
+            print_to_builder(b, "\%% = OpTypePointer % \%%\n", result, storageClassString, type);
+         }
+
+         case .TypeFunction; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            result     := operands[0].value_pointer.(*SSAId).*;
+            returnType := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpTypeFunction \%%", result, returnType);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               parameterType := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", parameterType);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .TypeArray; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            result      := operands[0].value_pointer.(*SSAId).*;
+            elementType := operands[1].value_pointer.(*SSAId).*;
+            length      := operands[2].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpTypeArray \%% \%%\n", result, elementType, length);
+         }
+
+         case .TypeVoid; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpTypeVoid\n", result);
+         }
+
+         case .Variable; {
+            assert(operands.count == 3 || operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvStorageClass);
+
+            resultType   := operands[0].value_pointer.(*SSAId).*;
+            result       := operands[1].value_pointer.(*SSAId).*;
+            storageClass := operands[2].value_pointer.(*SpvStorageClass).*;
+
+            storageClassString := SpvStorageClassToString(storageClass);
+
+            print_to_builder(b, "\%% = OpVariable \%% %", result, resultType, storageClassString);
+
+            if (operands.count == 4) {
+               assert(operands[3].type == cast(*Type_Info) SSAId);
+
+               initializer := operands[3].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", initializer);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .UntypedVariableKHR; {
+            assert(operands.count >= 3 || operands.count <= 5);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvStorageClass);
+
+            resultType   := operands[0].value_pointer.(*SSAId).*;
+            result       := operands[1].value_pointer.(*SSAId).*;
+            storageClass := operands[2].value_pointer.(*SpvStorageClass).*;
+
+            storageClassString := SpvStorageClassToString(storageClass);
+
+            print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %", result, resultType, storageClassString);
+
+            if (operands.count > 3) {
+               assert(operands[3].type == cast(*Type_Info) SSAId);
+
+               dataType := operands[3].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", dataType);
+
+               if (operands.count > 4) {
+                  assert(operands[4].type == cast(*Type_Info) SSAId);
+
+                  initializer := operands[4].value_pointer.(*SSAId).*;
+                  print_to_builder(b, " \%%", initializer);
+               }
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .ConstantComposite; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpConstantComposite \%%", result, resultType);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               constituent := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", constituent);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .ConstantTrue; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpConstantTrue \%%\n", result, resultType);
+         }
+
+         case .ConstantFalse; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpConstantFalse \%%\n", result, resultType);
+         }
+
+         case .ConstantSizeOfEXT; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            type       := operands[2].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpConstantSizeOfEXT \%% \%%\n", result, resultType, type);
+         }
+
+         case .Function; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvFunctionControlMask);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType      := operands[0].value_pointer.(*SSAId).*;
+            result          := operands[1].value_pointer.(*SSAId).*;
+            functionControl := operands[2].value_pointer.(*SpvFunctionControlMask).*;
+            functionType    := operands[3].value_pointer.(*SSAId).*;
+
+            functionControlString := SpvFunctionControlMaskToString(functionControl);
+
+            print_to_builder(b, "\%% = OpFunction \%% % \%%\n", result, resultType, functionControlString, functionType);
+         }
+
+         case .Label; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpLabel\n", result);
+         }
+
+         case .Return; {
+            assert(operands.count == 0);
+            print_to_builder(b, "OpReturn\n");
+         }
+
+         case .FunctionEnd; {
+            assert(operands.count == 0);
+            print_to_builder(b, "OpFunctionEnd\n");
+         }
+
+         case .CompositeConstruct; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpCompositeConstruct \%%", result, resultType);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               constituent := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", constituent);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .Store; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            pointer := operands[0].value_pointer.(*SSAId).*;
+            object  := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "OpStore \%% \%%", pointer, object);
+
+            for 2..operands.count - 1 {
+               assert(false, "not yet implemented! try the byte builder instead.");
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .SetMeshOutputsEXT; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            vertexCount    := operands[0].value_pointer.(*SSAId).*;
+            primitiveCount := operands[1].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "OpSetMeshOutputsEXT \%% \%%\n", vertexCount, primitiveCount);
+         }
+
+         case .SampledImage; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            image      := operands[2].value_pointer.(*SSAId).*;
+            sampler    := operands[3].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpSampledImage \%% \%% \%%\n", result, resultType, image, sampler);
+         }
+
+         case .ImageSampleImplicitLod; {
+            assert(operands.count >= 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType   := operands[0].value_pointer.(*SSAId).*;
+            result       := operands[1].value_pointer.(*SSAId).*;
+            sampledImage := operands[2].value_pointer.(*SSAId).*;
+            coordinate   := operands[3].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpImageSampleImplicitLod \%% \%% \%%", result, resultType, sampledImage, coordinate);
+
+            if (operands.count > 4) {
+               assert(false, "not yet implemented! maybe try byte builder instead.");
+               assert(operands[4].type == cast(*Type_Info) SpvImageOperandsMask);
+
+               for 5..operands.count - 1 {
+
+               }
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .SelectionMerge; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvSelectionControlMask);
+
+            mergeBlock       := operands[0].value_pointer.(*SSAId).*;
+            selectionControl := operands[1].value_pointer.(*SpvSelectionControlMask).*;
+
+            assert(selectionControl == SpvSelectionControlMask.MaskNone, "not yet implemented! maybe try byte builder.");
+            print_to_builder(b, "OpSelectionMerge \%% None\n", mergeBlock);
+         }
+
+         case .BranchConditional; {
+            assert(operands.count == 3 || operands.count == 5);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            condition  := operands[0].value_pointer.(*SSAId).*;
+            trueLabel  := operands[1].value_pointer.(*SSAId).*;
+            falseLabel := operands[2].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "OpBranchConditional \%% \%% \%%", condition, trueLabel, falseLabel);
+
+            if (operands.count == 5) {
+               assert(operands[3].type == cast(*Type_Info) int);
+               assert(operands[4].type == cast(*Type_Info) int);
+
+               trueWeight  := operands[3].value_pointer.(*int).*;
+               falseWeight := operands[4].value_pointer.(*int).*;
+
+               print_to_builder(b, " % %", trueWeight, falseWeight);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .Branch; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            targetLabel := operands[0].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpLabel\n", targetLabel);
+         }
+
+         case .Bitcast; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand    := operands[2].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpBitcast \%% \%%\n", result, resultType, operand);
+         }
+
+         case .Load; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            pointer    := operands[2].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpLoad \%% \%%", result, resultType, pointer);
+
+            if (operands.count > 3) {
+               assert(operands[3].type == cast(*Type_Info) SpvMemoryAccessMask);
+
+               memoryOperand := operands[3].value_pointer.(*SpvMemoryAccessMask).*;
+
+               assert(memoryOperand == .AlignedMask, "not yet implemented! try byte builder instead.");
+               align := operands[4].value_pointer.(*int).*;
+
+               print_to_builder(b, " Aligned %", align);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .UntypedAccessChainKHR; {
+            assert(operands.count >= 5);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            baseType   := operands[2].value_pointer.(*SSAId).*;
+            base       := operands[3].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpUntypedAccessChainKHR \%% \%% \%%", result, resultType, baseType, base);
+
+            for 4..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               index := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", index);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .AccessChain; {
+            assert(operands.count >= 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            base       := operands[2].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpAccessChain \%% \%%", result, resultType, base);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               index := operands[it].value_pointer.(*SSAId).*;
+               print_to_builder(b, " \%%", index);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
+         case .FAdd; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpFAdd \%% \%% \%%\n", result, resultType, operand1, operand2);
+         }
+
+         case .FSub; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpFSub \%% \%% \%%\n", result, resultType, operand1, operand2);
+         }
+
+         case .IAdd; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpIAdd \%% \%% \%%\n", result, resultType, operand1, operand2);
+         }
+
+         case .ISub; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpISub \%% \%% \%%\n", result, resultType, operand1, operand2);
+         }
+
+         case; assert(false, "not yet implemented! op: %", op);
+      }
+   } else #if SPIRV_BUILDER_TYPE == .Byte {
+      if op == {
+         case .Capability; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SpvCapability);
+
+            capability := operands[0].value_pointer.(*SpvCapability).*;
+            array_add(b, OpCodeWordCount(op, operands.count), capability);
+         }
+
+         case; assert(false, "not yet implemented! op: %", op);
+      }
+   } else {
+      #assert(false, "not implemented yet! type: %", SPIRV_BUILDER_TYPE);
+   }
+}
+
+SpvFunctionControlMaskToString :: (value: SpvFunctionControlMask) -> string {
+   if value == {
+      case .MaskNone;            return "None";
+      case .InlineMask;          return "Inline";
+      case .DontInlineMask;      return "DontInline";
+      case .PureMask;            return "Pure";
+      case .ConstMask;           return "Const";
+      case .OptNoneEXTMask;      return "OptNoneEXT";
+      case; assert(false, "not implemented"); return "";
+   }
+}
+
+OpCodeWordCount :: (op: SpvOp, operandsCount: int) -> u32 #expand {
+   // higher 16 bits = word count
+   // lower 16 bits  = op
+   return ((operandsCount + 1) << 16) | op; // + 1 for this word
+}
+
 // this function is called for every identifier that exists in the shader program
 // this function writes to "Types, variables and constants" block, so if an identifier doesnt go in that block this function should ignore and skip that identifier instead of asserting.
 // i first thought that i should call this functions only on identifiers that goes into the "Types, variables and constants" block, but it is easier to let pass every identifier to this function
 // and this function just skips if an identifier doesnt go to the "Types, variables and constants" block instead of asserting false.
 //          - apila, 13/04/26
-WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, identifier: Identifier) {
+WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, identifier: Identifier) {
    currentStatus := table_find_pointer(*data.writtenIdentifiers, identifier);
    if (currentStatus != null) {
       if (false) {
@@ -1422,6 +2351,14 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
       status = table_find_pointer(*data.writtenIdentifiers, identifier);
       assert(status != null);
       status.* = .Written;
+   }
+
+   dependencies := table_find_pointer(*data.extraTypeDependencies, identifier);
+   if (dependencies != null) {
+      for dependencies.* {
+         WriteTypeOrVariableOrConstant(data, b, it);
+         remove it;
+      }
    }
 
    if #complete identifier.type == {
@@ -1448,30 +2385,34 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) intLiteralType };
          WriteTypeOrVariableOrConstant(data, b, intIdentifier);
 
-         print_to_builder(b, "\%% = OpConstant \%%",
-                              GetSSAId(data, identifier),
-                              GetSSAId(data, intIdentifier),
-         );
+         operands: [..] Any;
+         array_add(*operands, GetSSAId(data, intIdentifier));
+         array_add(*operands, GetSSAId(data, identifier));
 
          if (identifier.intLiteral.unsigned) {
-            print_to_builder(b, " %\n",
-                                 identifier.intLiteral.value._u64
-            );
+            array_add(*operands, identifier.intLiteral.value._u64);
          } else {
-            print_to_builder(b, " %\n",
-                                 identifier.intLiteral.value._s64
-            );
+            array_add(*operands, identifier.intLiteral.value._s64);
          }
+
+         WriteSingleInstruction(
+            b,
+            .Constant,
+            .. operands
+         );
 
       case .FloatLiteral;
          floatIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Float };
          WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
 
-         print_to_builder(b, "\%% = OpConstant \%% %\n",
-                              GetSSAId(data, identifier),
-                              GetSSAId(data, floatIdentifier),
-                              identifier.floatLiteral
+         WriteSingleInstruction(
+            b,
+            .Constant,
+            GetSSAId(data, floatIdentifier),
+            GetSSAId(data, identifier),
+            identifier.floatLiteral
          );
+
       case .Function;
          return;
 
@@ -1480,8 +2421,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
 
          // intrinsics
          if (type == cast(*Type_Info) Int32) {
-            print_to_builder(b, "\%% = OpTypeInt 32 1\n",
-                                 GetSSAId(data, identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeInt,
+               GetSSAId(data, identifier),
+               32,
+               1
             );
             return;
          }
@@ -1490,9 +2435,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Int32 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               2
             );
             return;
          }
@@ -1500,9 +2448,13 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) Int32x3) {
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Int32 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               3
             );
             return;
          }
@@ -1510,16 +2462,24 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) Int32x4) {
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Int32 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               4
             );
             return;
          }
 
          if (type == cast(*Type_Info) UInt32) {
-            print_to_builder(b, "\%% = OpTypeInt 32 0\n",
-                                 GetSSAId(data, identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeInt,
+               GetSSAId(data, identifier),
+               32,
+               0
             );
             return;
          }
@@ -1528,9 +2488,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) UInt32 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               2
             );
             return;
          }
@@ -1538,9 +2501,13 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) UInt32x3) {
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) UInt32 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               3
             );
             return;
          }
@@ -1548,16 +2515,24 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) UInt32x4) {
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) UInt32 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               4
             );
             return;
          }
 
          if (type == cast(*Type_Info) Int64) {
-            print_to_builder(b, "\%% = OpTypeInt 64 1\n",
-                                 GetSSAId(data, identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeInt,
+               GetSSAId(data, identifier),
+               64,
+               1
             );
             return;
          }
@@ -1566,9 +2541,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Int64 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               2
             );
             return;
          }
@@ -1576,9 +2554,13 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) Int64x3) {
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Int64 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               3
             );
             return;
          }
@@ -1586,16 +2568,24 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) Int64x4) {
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Int64 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               4
             );
             return;
          }
 
          if (type == cast(*Type_Info) UInt64) {
-            print_to_builder(b, "\%% = OpTypeInt 64 0\n",
-                                 GetSSAId(data, identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeInt,
+               GetSSAId(data, identifier),
+               64,
+               0
             );
             return;
          }
@@ -1604,9 +2594,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) UInt64 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               2
             );
             return;
          }
@@ -1614,9 +2607,13 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) UInt64x3) {
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) UInt64 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               3
             );
             return;
          }
@@ -1624,16 +2621,23 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) UInt64x4) {
             intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) UInt64 };
             WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, intIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, intIdentifier),
+               4
             );
             return;
          }
 
          if (type == cast(*Type_Info) Float) {
-            print_to_builder(b, "\%% = OpTypeFloat 32\n",
-                                 GetSSAId(data, identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeFloat,
+               GetSSAId(data, identifier),
+               32
             );
             return;
          }
@@ -1642,9 +2646,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             floatIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Float };
             WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeVector \%% 2\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, floatIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, floatIdentifier),
+               2
             );
             return;
          }
@@ -1652,9 +2659,13 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) Float3) {
             floatIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Float };
             WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 3\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, floatIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, floatIdentifier),
+               3
             );
             return;
          }
@@ -1662,9 +2673,13 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (type == cast(*Type_Info) Float4) {
             floatIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Float };
             WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
-            print_to_builder(b, "\%% = OpTypeVector \%% 4\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, floatIdentifier)
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, floatIdentifier),
+               4
             );
             return;
          }
@@ -1673,9 +2688,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             float2Identifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Float2 };
             WriteTypeOrVariableOrConstant(data, b, float2Identifier);
 
-            print_to_builder(b, "\%% = OpTypeMatrix \%% 2\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, float2Identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeMatrix,
+               GetSSAId(data, identifier),
+               GetSSAId(data, float2Identifier),
+               2
             );
             return;
          }
@@ -1684,9 +2702,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             float3Identifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Float3 };
             WriteTypeOrVariableOrConstant(data, b, float3Identifier);
 
-            print_to_builder(b, "\%% = OpTypeMatrix \%% 3\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, float3Identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeMatrix,
+               GetSSAId(data, identifier),
+               GetSSAId(data, float3Identifier),
+               3
             );
             return;
          }
@@ -1695,18 +2716,22 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             float4Identifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) Float4 };
             WriteTypeOrVariableOrConstant(data, b, float4Identifier);
 
-            print_to_builder(b, "\%% = OpTypeMatrix \%% 4\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, float4Identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeMatrix,
+               GetSSAId(data, identifier),
+               GetSSAId(data, float4Identifier),
+               4
             );
             return;
          }
 
          if (type == cast(*Type_Info) bool) {
-            print_to_builder(b, "\%% = OpTypeBool\n",
-                                 GetSSAId(data, identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeBool,
+               GetSSAId(data, identifier)
             );
-
             return;
          }
 
@@ -1717,11 +2742,13 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             voidStar: Identifier = .{ type = ._Type, _type = tip };
             WriteTypeOrVariableOrConstant(data, b, voidStar);
 
-            print_to_builder(b, "\%% = OpTypeStruct \%% \%% \%%\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, voidStar), // task
-                                 GetSSAId(data, voidStar), // mesh
-                                 GetSSAId(data, voidStar)  // fragment
+            WriteSingleInstruction(
+               b,
+               .TypeStruct,
+               GetSSAId(data, identifier),
+               GetSSAId(data, voidStar), // task
+               GetSSAId(data, voidStar), // mesh
+               GetSSAId(data, voidStar)  // fragment
             );
             return;
          }
@@ -1732,19 +2759,21 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             imageIdentifier: Identifier = .{ type = ._Type, _type = tisi.image };
             WriteTypeOrVariableOrConstant(data, b, imageIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeSampledImage \%%\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, imageIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeSampledImage,
+               GetSSAId(data, identifier),
+               GetSSAId(data, imageIdentifier)
             );
-
             return;
          }
 
          if (type == cast(*Type_Info) __Sampler__) {
-            print_to_builder(b, "\%% = OpTypeSampler\n",
-                                 GetSSAId(data, identifier)
+            WriteSingleInstruction(
+               b,
+               .TypeSampler,
+               GetSSAId(data, identifier)
             );
-
             return;
          }
 
@@ -1758,15 +2787,17 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             sampledTypeIdentifier: Identifier = .{ type = ._Type, _type = tii.sampledType };
             WriteTypeOrVariableOrConstant(data, b, sampledTypeIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeImage \%% % % % % % %\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, sampledTypeIdentifier),
-                                 ToSpirvDimensionality(tii.dimensionality),
-                                 tii.depth,
-                                 tii.arrayed,
-                                 tii.ms,
-                                 tii.sampled,
-                                 ToSpirvImageFormat(tii.imageFormat)
+            WriteSingleInstruction(
+               b,
+               .TypeImage,
+               GetSSAId(data, identifier),
+               GetSSAId(data, sampledTypeIdentifier),
+               tii.dimensionality,
+               tii.depth,
+               tii.arrayed,
+               tii.ms,
+               tii.sampled,
+               tii.imageFormat
             );
 
             return;
@@ -1776,9 +2807,11 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             elementTypeIdentifier: Identifier = .{ type = ._Type, _type = tira.elementType };
             WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeRuntimeArray \%%\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, elementTypeIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeRuntimeArray,
+               GetSSAId(data, identifier),
+               GetSSAId(data, elementTypeIdentifier)
             );
 
             return;
@@ -1788,16 +2821,16 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             imageIdentifier: Identifier = .{ type = ._Type, _type = tisi.image };
             WriteTypeOrVariableOrConstant(data, b, imageIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeSampledImage \%%\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, imageIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeSampledImage,
+               GetSSAId(data, identifier),
+               GetSSAId(data, imageIdentifier)
             );
 
             return;
          } else if (ti.type == TYPE_INFO_POINTER_TAG) {
             tip := cast(*TypeInfoPointer) ti;
-
-            storageClass := ToSpirvStorageClass(tip.storageClass);
 
             if (tip.pointerTo == cast(*Type_Info) void) {
                // VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417
@@ -1805,21 +2838,25 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                assert(tip.storageClass == .Image || tip.storageClass == .UniformConstant || tip.storageClass == .Workgroup ||
                      tip.storageClass == .StorageBuffer || tip.storageClass == .Uniform || tip.storageClass == .PushConstant ||
                      tip.storageClass == .PhysicalStorageBuffer,
-                     "storageClass: %, type: %", storageClass, type
+                     "storageClass: %, type: %", tip.storageClass, type
                );
 
-               print_to_builder(b, "\%% = OpTypeUntypedPointerKHR %\n",
-                                    GetSSAId(data, identifier),
-                                    storageClass
+               WriteSingleInstruction(
+                  b,
+                  .TypeUntypedPointerKHR,
+                  GetSSAId(data, identifier),
+                  tip.storageClass
                );
             } else {
                pointerToIdentifier: Identifier = .{ type = ._Type, _type = tip.pointerTo };
                WriteTypeOrVariableOrConstant(data, b, pointerToIdentifier);
 
-               print_to_builder(b, "\%% = OpTypePointer % \%%\n",
-                                    GetSSAId(data, identifier),
-                                    storageClass,
-                                    GetSSAId(data, pointerToIdentifier)
+               WriteSingleInstruction(
+                  b,
+                  .TypePointer,
+                  GetSSAId(data, identifier),
+                  tip.storageClass,
+                  GetSSAId(data, pointerToIdentifier)
                );
             }
 
@@ -1829,27 +2866,27 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          if (ti.type == .STRUCT) {
             tis := cast(*Type_Info_Struct) ti;
 
-            structBuilder: String_Builder;
-
-            print_to_builder(*structBuilder, "\%% = OpTypeStruct",
-                                             GetSSAId(data, identifier)
-            );
+            operands: [..] Any;
+            array_add(*operands, GetSSAId(data, identifier));
 
             for tis.members {
-               assert(it.type.type != .POINTER, "tis.name: %, it.name: %. user defined struct has a pointer. not implemented yet!", tis.name, it.name);
-
                memberType := ConvertJaiTypeIfNecessary(it.type, it.notes);
                memberTypeIdentifier: Identifier = .{ type = ._Type, _type = memberType };
                WriteTypeOrVariableOrConstant(data, b, memberTypeIdentifier);
 
-               print_to_builder(*structBuilder, " \%%",
-                                                GetSSAId(data, memberTypeIdentifier)
-               );
+               array_add(*operands, ac(GetSSAId(data, memberTypeIdentifier)));
             }
 
-            print_to_builder(*structBuilder, "  ; %\n", tis.name);
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; %\n", tis.name);
+            }
 
-            append_and_steal_buffers(b, *structBuilder);
+            WriteSingleInstruction(
+               b,
+               .TypeStruct,
+               .. operands
+            );
+
             return;
          }
 
@@ -1863,12 +2900,9 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             returnTypeIdentifier := GetReturnTypeIdentifier(tip);
             WriteTypeOrVariableOrConstant(data, b, returnTypeIdentifier);
 
-            functionBuilder: String_Builder;
-
-            print_to_builder(*functionBuilder, "\%% = OpTypeFunction \%%",
-                                                GetSSAId(data, identifier),
-                                                GetSSAId(data, returnTypeIdentifier)
-            );
+            operands: [..] Any;
+            array_add(*operands, GetSSAId(data, identifier));
+            array_add(*operands, GetSSAId(data, returnTypeIdentifier));
 
             for tip.argument_types {
                assert(it.type != .POINTER, "function takes a pointer. not implemented yet!");
@@ -1877,13 +2911,15 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                argumentTypeIdentifier: Identifier = .{ type = ._Type, _type = argumentType };
                WriteTypeOrVariableOrConstant(data, b, argumentTypeIdentifier);
 
-               print_to_builder(*functionBuilder, " \%%",
-                                                   GetSSAId(data, argumentTypeIdentifier)
-               );
+               array_add(*operands, ac(GetSSAId(data, argumentTypeIdentifier)));
             }
 
-            print_to_builder(*functionBuilder, "\n");
-            append_and_steal_buffers(b, *functionBuilder);
+            WriteSingleInstruction(
+               b,
+               .TypeFunction,
+               .. operands
+            );
+
             return;
          }
 
@@ -1899,10 +2935,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx tia.array_count, bitSize = 32 } };
             WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
 
-            print_to_builder(b, "\%% = OpTypeArray \%% \%%\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, elementTypeIdentifier),
-                                 GetSSAId(data, arraySizeIdentifier)
+            WriteSingleInstruction(
+               b,
+               .TypeArray,
+               GetSSAId(data, identifier),
+               GetSSAId(data, elementTypeIdentifier),
+               GetSSAId(data, arraySizeIdentifier)
             );
 
             return;
@@ -1912,8 +2950,10 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          print("WARNING    type: %. skipped!\n", type);
 
       case .Void;
-         print_to_builder(b, "\%% = OpTypeVoid\n",
-                              GetSSAId(data, .{ type = .Void })
+         WriteSingleInstruction(
+            b,
+            .TypeVoid,
+            GetSSAId(data, .{ type = .Void })
          );
 
       case .Variable;
@@ -1924,30 +2964,40 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
                name == MESH_TRIANGLES_NAME
             ) {
 
-            storageClass: StorageClass = .Output;
+            storageClass: SpvStorageClass = .Output;
             typeIdentifier := GetVariableTypeIdentifier(data, identifier);
             pointerIdentifier := GetPointerTypeIdentifier(typeIdentifier, storageClass);
             WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
             WriteTypeOrVariableOrConstant(data, b, pointerIdentifier);
 
-            print_to_builder(b, "\%% = OpVariable \%% %    ; %\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, pointerIdentifier),
-                                 ToSpirvStorageClass(storageClass),
-                                 name
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; %\n", name);
+            }
+
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, pointerIdentifier),
+               GetSSAId(data, identifier),
+               storageClass,
             );
          } else if(IdentifierCompare(identifier, data.fragmentVertexInVariableIdentifier) ||
                    IdentifierCompare(identifier, data.fragmentPrimitiveInVariableIdentifier)) {
-            storageClass := StorageClass.Input;
+            storageClass := SpvStorageClass.Input;
             typeIdentifier := GetVariableTypeIdentifier(data, identifier);
             pointerIdentifier := GetPointerTypeIdentifier(typeIdentifier, storageClass);
             WriteTypeOrVariableOrConstant(data, b, pointerIdentifier);
 
-            print_to_builder(b, "\%% = OpVariable \%% %  ; %\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, pointerIdentifier),
-                                 ToSpirvStorageClass(storageClass),
-                                 name
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; %\n", name);
+            }
+
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, pointerIdentifier),
+               GetSSAId(data, identifier),
+               storageClass,
             );
          } else if(IdentifierCompare(identifier, data.shaderDataPointerVariableIdentifier)) {
             type := identifier.variable.declaration.type;
@@ -1965,9 +3015,12 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             pointerIdentifier := GetPointerTypeIdentifier(variableType, .Private);
             WriteTypeOrVariableOrConstant(data, b, pointerIdentifier);
 
-            print_to_builder(b, "\%% = OpVariable \%% Private\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, pointerIdentifier)
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, pointerIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.Private
             );
          } else if(name == PUSH_DATA_VARIABLE_NAME) {
             pointerType := New(TypeInfoPointer);
@@ -1977,10 +3030,16 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             pointerTypeIdentifier: Identifier = .{ type = ._Type, _type = pointerType };
             WriteTypeOrVariableOrConstant(data, b, pointerTypeIdentifier);
 
-            print_to_builder(b, "\%% = OpVariable \%% %   ; push data variable\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, pointerTypeIdentifier),
-                                 ToSpirvStorageClass(.PushConstant),
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; push data variable\n");
+            }
+
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, pointerTypeIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.PushConstant
             );
          } else if(name == SAMPLER_HEAP_VARIABLE_NAME) {
             voidStarUC := New(TypeInfoPointer);
@@ -1990,10 +3049,16 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
             WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
 
-            print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %    ; sampler heap variable\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, typeIdentifier),
-                                 ToSpirvStorageClass(.UniformConstant)
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; sampler heap variable\n");
+            }
+
+            WriteSingleInstruction(
+               b,
+               .UntypedVariableKHR,
+               GetSSAId(data, typeIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.UniformConstant
             );
          } else if(name == IMAGE_HEAP_VARIABLE_NAME) {
             voidStarUC := New(TypeInfoPointer);
@@ -2003,23 +3068,34 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
             typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
             WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
 
-            print_to_builder(b, "\%% = OpUntypedVariableKHR \%% %    ; image heap variable\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, typeIdentifier),
-                                 ToSpirvStorageClass(.UniformConstant)
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; image heap variable\n");
+            }
+
+            WriteSingleInstruction(
+               b,
+               .UntypedVariableKHR,
+               GetSSAId(data, typeIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.UniformConstant
             );
          } else {
             for data.fragmentOutputIdentifiers {
                if (IdentifierCompare(identifier, it)) {
-                  storageClass := StorageClass.Output;
+                  storageClass := SpvStorageClass.Output;
                   returnTypeIdentifier := GetPointerTypeIdentifier(it.variable.declaration.type, storageClass);
                   WriteTypeOrVariableOrConstant(data, b, returnTypeIdentifier);
 
-                  print_to_builder(b, "\%% = OpVariable \%% %  ; %\n",
-                                       GetSSAId(data, identifier),
-                                       GetSSAId(data, returnTypeIdentifier),
-                                       ToSpirvStorageClass(storageClass),
-                                       sprint("fragment output [%]", it_index)
+                  #if SPIRV_BUILDER_TYPE == .String {
+                     print_to_builder(b, "; fragment output [%]\n", it_index);
+                  }
+
+                  WriteSingleInstruction(
+                     b,
+                     .Variable,
+                     GetSSAId(data, returnTypeIdentifier),
+                     GetSSAId(data, identifier),
+                     storageClass,
                   );
 
                   return;
@@ -2035,23 +3111,21 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          typeIdentifier: Identifier = .{ type = ._Type, _type = identifier.compositeLiteral.type };
          WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
 
-         literalBuilder: String_Builder;
-
-         print_to_builder(*literalBuilder, "\%% = OpConstantComposite \%%",
-                                          GetSSAId(data, identifier),
-                                          GetSSAId(data, typeIdentifier)
-         );
+         operands: [..] Any;
+         array_add(*operands, GetSSAId(data, typeIdentifier));
+         array_add(*operands, GetSSAId(data, identifier));
 
          for identifier.compositeLiteral.arguments {
             WriteTypeOrVariableOrConstant(data, b, it.*);
-            print_to_builder(*literalBuilder, " \%%",
-                                             GetSSAId(data, it.*)
-            );
+            array_add(*operands, ac(GetSSAId(data, it.*)));
          }
 
-         print_to_builder(*literalBuilder, "\n");
 
-         append_and_steal_buffers(b, *literalBuilder);
+         WriteSingleInstruction(
+            b,
+            .ConstantComposite,
+            .. operands
+         );
       }
 
       case .BoolLiteral;
@@ -2059,14 +3133,18 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
 
          if (identifier.boolLiteral == true) {
-            print_to_builder(b, "\%% = OpConstantTrue \%%\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, typeIdentifier)
+            WriteSingleInstruction(
+               b,
+               .ConstantTrue,
+               GetSSAId(data, typeIdentifier),
+               GetSSAId(data, identifier),
             );
          } else {
-            print_to_builder(b, "\%% = OpConstantFalse \%%\n",
-                                 GetSSAId(data, identifier),
-                                 GetSSAId(data, typeIdentifier)
+            WriteSingleInstruction(
+               b,
+               .ConstantFalse,
+               GetSSAId(data, typeIdentifier),
+               GetSSAId(data, identifier),
             );
          }
 
@@ -2078,12 +3156,25 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *String_Builder, id
          WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
 
 
-         print_to_builder(b, "\%% = OpConstantSizeOfEXT \%% \%%\n",
-                              GetSSAId(data, identifier),
-                              GetSSAId(data, intIdentifier),
-                              GetSSAId(data, typeIdentifier)
+         WriteSingleInstruction(
+            b,
+            .ConstantSizeOfEXT,
+            GetSSAId(data, intIdentifier),
+            GetSSAId(data, identifier),
+            GetSSAId(data, typeIdentifier)
          );
    }
+}
+
+// ac: Any copy
+ac :: (obj: $T) -> Any #expand {
+   copy := New(T);
+   copy.* = obj;
+
+   result: Any;
+   result.value_pointer = copy;
+   result.type = type_info(T);
+   return result;
 }
 
 // meshData = cast(*MeshData) __push_data__.meshData;
@@ -2123,7 +3214,7 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
    return assignment;
 }
 
-GetStorageClassFromNote :: (note: string) -> StorageClass {
+GetStorageClassFromNote :: (note: string) -> SpvStorageClass {
    if (false) {}
    else if (note == PHYSICAL_STORAGE_BUFFER_QUALIFIER)   return .PhysicalStorageBuffer;
    else if (note == FUNCTION_QUALIFIER)                  return .Function;
@@ -2132,8 +3223,8 @@ GetStorageClassFromNote :: (note: string) -> StorageClass {
    return 0;
 }
 
-FlattenStorageClasses :: (type: *Type_Info) -> [] StorageClass {
-   storageClasses: [..] StorageClass;
+FlattenStorageClasses :: (type: *Type_Info) -> [] SpvStorageClass {
+   storageClasses: [..] SpvStorageClass;
 
    current := type;
    while (current.type == TYPE_INFO_POINTER_TAG) {
@@ -2255,41 +3346,51 @@ ConvertJaiTypeIfNecessary :: (type: *Type_Info, declarationNotes: [] *Code_Note)
    return ConvertJaiTypeIfNecessary(type, notesAsString);
 }
 
-GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> string {
-   b: String_Builder; // general builder. builder for the whole functions block (the one that comes after "Types, variables and constants")
-
+// general builder. builder for the whole functions block (the one that comes after "Types, variables and constants")
+GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *BuilderType) {
    // entry function is handled seperately because its parameters define the general shader interface
    // so it actually has no parameters. other functions behave more normally
    {
       // entry function is always void?
       header := body.header;
       block := body.block;
-      print_to_builder(*b, "; main function\n");
-      print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
-                           GetSSAId(data, .{ type = .Function, function = header }),
-                           GetSSAId(data, .{ type = .Void }),
-                           GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) #type () -> () })
+
+      #if SPIRV_BUILDER_TYPE == .String {
+         print_to_builder(b, "; main function\n");
+      }
+
+      WriteSingleInstruction(
+         b,
+         .Function,
+         GetSSAId(data, .{ type = .Void }),
+         GetSSAId(data, .{ type = .Function, function = header }),
+         SpvFunctionControlMask.MaskNone,
+         GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) #type () -> () })
       );
 
       // idk what to do with the label rn
-      print_to_builder(*b, "\%% = OpLabel\n", GetNextSSAId(data));
+      WriteSingleInstruction(
+         b,
+         .Label,
+         GetNextSSAId(data)
+      );
 
       //
       // not adding this function type to CompilationData.functions since entry function is handled seperately
       //    - apila, 04/04/26
       //
 
-      functionBuilder: String_Builder;
+      functionBuilder: BuilderType;
 
       assignment := MakeShaderDataPointerAssignmentStatement(data.shaderDataPointerVariableIdentifier.variable.declaration, data.shaderType);
       DetermineCodeNodeTypes(data, assignment);
-      GenerateInstructions(data, assignment, *b, *functionBuilder, header);
+      GenerateInstructions(data, assignment, b, *functionBuilder, header);
 
-      GenerateInstructions(data, block, *b, *functionBuilder, header);
-      append_and_steal_buffers(*b, *functionBuilder);
+      GenerateInstructions(data, block, b, *functionBuilder, header);
+      AppendAndStealBuffers(b, *functionBuilder);
 
-      print_to_builder(*b, "OpReturn\n");
-      print_to_builder(*b, "OpFunctionEnd\n");
+      WriteSingleInstruction(b, .Return);
+      WriteSingleInstruction(b, .FunctionEnd);
    }
 
    while data.functionFrontier.count > 0 {
@@ -2305,29 +3406,34 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body) -> str
 
       assert(header.type.type != .POINTER);
       functionTypeIdentifier: Identifier = .{ type = ._Type, _type = header.type };
-      print_to_builder(*b, "\n; %\n", header.name);
-      print_to_builder(*b, "\%% = OpFunction \%% None \%%\n",
-                           GetSSAId(data,  .{ type = .Function, function = header }),
-                           GetSSAId(data, returnTypeIdentifier),
-                           GetSSAId(data, functionTypeIdentifier)
+
+      #if SPIRV_BUILDER_TYPE == .String {
+         print_to_builder(b, "\n; %\n", header.name);
+      }
+
+      WriteSingleInstruction(
+         b,
+         .Function,
+         GetSSAId(data, returnTypeIdentifier),
+         GetSSAId(data,  .{ type = .Function, function = header }),
+         SpvFunctionControlMask.MaskNone,
+         GetSSAId(data, functionTypeIdentifier)
       );
 
       // All OpVariable instructions in a function must be in the first block in the function
       // https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#LogicalLayout
 
-      functionBuilder: String_Builder;
+      functionBuilder: BuilderType;
 
-      GenerateInstructions(data, block, *b, *functionBuilder, header);
-      append_and_steal_buffers(*b, *functionBuilder);
+      GenerateInstructions(data, block, b, *functionBuilder, header);
+      AppendAndStealBuffers(b, *functionBuilder);
 
       if (header.returns.count == 0) {
-         print_to_builder(*b, "OpReturn\n");
+         WriteSingleInstruction(b, .Return);
       }
 
-      print_to_builder(*b, "OpFunctionEnd\n");
+      WriteSingleInstruction(b, .FunctionEnd);
    }
-
-   return builder_to_string(*b);
 }
 
 GenerateInstructionsData :: struct {
@@ -2344,7 +3450,7 @@ GenerateInstructionsData :: struct {
 // returns ssaId if the "node" is something that has an id, if not then output is ignored.
 // function is to be appended to general.
 // the Identifier returned doesnt always make sense if the thing returned doesnt have an identifier. for example result of an addition operation. use ssaId instead
-GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *String_Builder, function: *String_Builder, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData = .{}) -> ssaId: int, Identifier {
+GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData = .{}) -> SSAId, Identifier {
    //
    // is there a way to trigger jai compiler on some of the code nodes?
    // like for example if there is a #run inside the shader code i want to let jai do the #run and return me the result of it
@@ -2498,11 +3604,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                   resultSSAId := GetNextSSAId(data);
                   typeIdentifier: Identifier = .{ type = ._Type, _type = type };
 
-                  compositeConstructBuilder: String_Builder;
-                  print_to_builder(*compositeConstructBuilder, "\%% = OpCompositeConstruct \%%",
-                                                               resultSSAId,
-                                                               GetSSAId(data, typeIdentifier)
-                  );
+                  operands: [..] Any;
+                  array_add(*operands, GetSSAId(data, typeIdentifier));
+                  array_add(*operands, resultSSAId);
 
                   for structLiteralInfo.arguments {
                      found, argumentNodeType := table_find(*data.codeNodeTypes, it);
@@ -2513,13 +3617,14 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                      // argumentIdentifier doesnt have any value if "it" is not a literal
                      argumentSSAId, argumentIdentifier := GenerateInstructions(data, it, general, function, currentFunction, argumentAdditionalData);
 
-                     print_to_builder(*compositeConstructBuilder, " \%%",
-                                                                  argumentSSAId
-                     );
+                     array_add(*operands, ac(argumentSSAId));
                   }
 
-                  print_to_builder(*compositeConstructBuilder, "\n");
-                  append_and_steal_buffers(function, *compositeConstructBuilder);
+                  WriteSingleInstruction(
+                     function,
+                     .CompositeConstruct,
+                     .. operands
+                  );
 
                   return resultSSAId, .{};
                }
@@ -2597,13 +3702,14 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                    type == cast(*Type_Info) Float2 ||
                    type == cast(*Type_Info) Float3 ||
                    type == cast(*Type_Info) Float4) {
-                  instruction := GetFloatInstructionNameFromOperatorType(cbo.operator_type);
-                  print_to_builder(function, "\%% = % \%% \%% \%%\n",
-                                             resultSSAId,
-                                             instruction,
-                                             GetSSAId(data, typeIdentifier),
-                                             leftId,
-                                             rightId
+                  op := GetFloatOpFromOperatorType(cbo.operator_type);
+                  WriteSingleInstruction(
+                     function,
+                     op,
+                     GetSSAId(data, typeIdentifier),
+                     resultSSAId,
+                     leftId,
+                     rightId
                   );
                } else if (type == cast(*Type_Info) Int32 ||
                           type == cast(*Type_Info) Int32x2 ||
@@ -2621,13 +3727,14 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                           type == cast(*Type_Info) UInt64x2 ||
                           type == cast(*Type_Info) UInt64x3 ||
                           type == cast(*Type_Info) UInt64x4) {
-                  instruction := GetIntegerInstructionNameFromOperatorType(cbo.operator_type);
-                  print_to_builder(function, "\%% = % \%% \%% \%%\n",
-                                             resultSSAId,
-                                             instruction,
-                                             GetSSAId(data, typeIdentifier),
-                                             leftId,
-                                             rightId
+                  op := GetIntegerOpFromOperatorType(cbo.operator_type);
+                  WriteSingleInstruction(
+                     function,
+                     op,
+                     GetSSAId(data, typeIdentifier),
+                     resultSSAId,
+                     leftId,
+                     rightId
                   );
                } else {
                   assert(false, "not implemented yet! type: %\n", type.*);
@@ -2647,9 +3754,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
                rightId, rightIdentifier := GenerateInstructions(data, cbo.right, general, function, currentFunction);
                leftId, _ := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ isLValue = true });
 
-               print_to_builder(function, "OpStore \%% \%%\n",
-                                          leftId,
-                                          rightId
+               WriteSingleInstruction(
+                  function,
+                  .Store,
+                  leftId,
+                  rightId
                );
 
                return rightId, rightIdentifier;
@@ -2696,9 +3805,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
             vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, general, function, currentFunction, additionalData = .{ literal = .{ intLiteralBitSize = 32, intLiteralUnsigned = true } });
             primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, general, function, currentFunction, additionalData = .{ literal = .{ intLiteralBitSize = 32, intLiteralUnsigned = true } });
 
-            print_to_builder(function, "OpSetMeshOutputsEXT \%% \%%\n",
-                                       vertexCountSSAId,
-                                       primitiveCountSSAId
+            WriteSingleInstruction(
+               function,
+               .SetMeshOutputsEXT,
+               vertexCountSSAId,
+               primitiveCountSSAId
             );
 
             return -42000, .{}; // doesnt matter since OpSetMeshOutputsEXT doesnt return
@@ -2723,19 +3834,23 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
             sampledImageSSAId := GetNextSSAId(data);
 
-            print_to_builder(function, "\%% = OpSampledImage \%% \%% \%%\n",
-                                       sampledImageSSAId,
-                                       GetSSAId(data, .{ type = ._Type, _type = sampledImageType }),
-                                       imageSSAId,
-                                       samplerSSAId
+            WriteSingleInstruction(
+               function,
+               .SampledImage,
+               GetSSAId(data, .{ type = ._Type, _type = sampledImageType }),
+               sampledImageSSAId,
+               imageSSAId,
+               samplerSSAId
             );
 
             sampledValueSSAId := GetNextSSAId(data);
-            print_to_builder(function, "\%% = OpImageSampleImplicitLod \%% \%% \%%\n",
-                                       sampledValueSSAId,
-                                       GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) Float4 }),
-                                       sampledImageSSAId,
-                                       uvSSAId
+            WriteSingleInstruction(
+               function,
+               .ImageSampleImplicitLod,
+               GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) Float4 }),
+               sampledValueSSAId,
+               sampledImageSSAId,
+               uvSSAId
             );
 
             return sampledValueSSAId, .{};
@@ -2759,36 +3874,51 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          endLabelSSAId := GetNextSSAId(data);
          elseLabelSSAId := ifx ci.else_block == null then endLabelSSAId else GetNextSSAId(data);
 
-         print_to_builder(function, "OpSelectionMerge \%% None\n",
-                                    endLabelSSAId
+         WriteSingleInstruction(
+            function,
+            .SelectionMerge,
+            endLabelSSAId,
+            SpvSelectionControlMask.MaskNone
          );
 
-         print_to_builder(function, "OpBranchConditional \%% \%% \%%\n",
-                                    conditionSSAId,
-                                    thenLabelSSAId,
-                                    elseLabelSSAId
+         WriteSingleInstruction(
+            function,
+            .BranchConditional,
+            conditionSSAId,
+            thenLabelSSAId,
+            elseLabelSSAId
          );
 
-         print_to_builder(function, "\%% = OpLabel\n",
-                                    thenLabelSSAId
+         WriteSingleInstruction(
+            function,
+            .Label,
+            thenLabelSSAId
          );
          GenerateInstructions(data, ci.then_block, general, function, currentFunction);
-         print_to_builder(function, "OpBranch \%%\n",
-                                    endLabelSSAId
+         WriteSingleInstruction(
+            function,
+            .Branch,
+            endLabelSSAId
          );
 
          if (ci.else_block != null) {
-            print_to_builder(function, "\%% = OpLabel\n",
-                                       elseLabelSSAId
+            WriteSingleInstruction(
+               function,
+               .Label,
+               elseLabelSSAId
             );
             GenerateInstructions(data, ci.else_block, general, function, currentFunction);
-            print_to_builder(function, "OpBranch \%%\n",
-                                       endLabelSSAId
+            WriteSingleInstruction(
+               function,
+               .Branch,
+               endLabelSSAId
             );
          }
 
-         print_to_builder(function, "\%% = OpLabel\n",
-                                    endLabelSSAId
+         WriteSingleInstruction(
+            function,
+            .Label,
+            endLabelSSAId
          );
 
          return -321, .{}; // doesnt matter since if doesnt return. need to update this when i implement ifx.
@@ -2801,36 +3931,46 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
          thenLabelSSAId := GetNextSSAId(data);
          endLabelSSAId := GetNextSSAId(data);
-         print_to_builder(function, "OpSelectionMerge \%% None\n",
-                                    endLabelSSAId
-         );
-         print_to_builder(function, "OpBranchConditional \%% \%% \%%\n",
-                                    GetSSAId(data, .{ type = .BoolLiteral, boolLiteral = true }),
-                                    thenLabelSSAId,
-                                    endLabelSSAId
+         WriteSingleInstruction(
+            function,
+            .SelectionMerge,
+            endLabelSSAId,
+            SpvSelectionControlMask.MaskNone
          );
 
-         print_to_builder(function, "\%% = OpLabel\n",
-                                    thenLabelSSAId
+         WriteSingleInstruction(
+            function,
+            .BranchConditional,
+            GetSSAId(data, .{ type = .BoolLiteral, boolLiteral = true }),
+            thenLabelSSAId,
+            endLabelSSAId
+         );
+
+         WriteSingleInstruction(
+            function,
+            .Label,
+            thenLabelSSAId
          );
          {
             if (currentFunction == data.entryFunction) {
                if data.shaderType == {
                   case .Mesh;
-                     print_to_builder(function, "OpReturn\n");
+                     WriteSingleInstruction(function, .Return);
 
                   case .Fragment;
                      assert(cr.arguments_unsorted.count == data.fragmentOutputIdentifiers.count, "cr.arguments_unsorted.count: %, data.fragmentOutputIdentifiers.count: %", cr.arguments_unsorted.count, data.fragmentOutputIdentifiers.count);
 
                      for cr.arguments_unsorted {
                         ssaId := GenerateInstructions(data, it.expression, general, function, currentFunction);
-                        print_to_builder(function, "OpStore \%% \%%\n",
-                                                   GetSSAId(data, data.fragmentOutputIdentifiers[it_index]),
-                                                   ssaId
+                        WriteSingleInstruction(
+                           function,
+                           .Store,
+                           GetSSAId(data, data.fragmentOutputIdentifiers[it_index]),
+                           ssaId
                         );
                      }
 
-                     print_to_builder(function, "OpReturn\n");
+                     WriteSingleInstruction(function, .Return);
 
                   case; assert(false, "not yet implemented! type: %", data.shaderType);
                }
@@ -2844,8 +3984,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          //          - apila, 03/05/26
          //
 
-         print_to_builder(function, "\%% = OpLabel\n",
-                                    endLabelSSAId
+         WriteSingleInstruction(
+            function,
+            .Label,
+            endLabelSSAId
          );
 
          return -543, .{}; // return doesnt return any ssa id
@@ -2863,12 +4005,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
 
          variableType := ConvertJaiTypeIfNecessary(cd.type, cd.notes);
 
-         storageClass := StorageClass.Function;
+         storageClass := SpvStorageClass.Function;
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
          pointerTypeIdentifier := GetPointerTypeIdentifier(variableType, storageClass);
 
          NO_INITIALIZER :: -1;
-         initializerSSAId: int = NO_INITIALIZER;
+         initializerSSAId: SSAId = NO_INITIALIZER;
 
          if (cd.expression != null) {
             if cd.expression.kind == {
@@ -2888,17 +4030,24 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          }
 
          // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
-         print_to_builder(general, "\%% = OpVariable \%% %",
-                                    variableSSAId,
-                                    GetSSAId(data, pointerTypeIdentifier),
-                                    ToSpirvStorageClass(storageClass),
-         );
+         operands: [..] Any;
+         array_add(*operands, GetSSAId(data, pointerTypeIdentifier));
+         array_add(*operands, variableSSAId);
+         array_add(*operands, storageClass);
 
          if (initializerSSAId != NO_INITIALIZER) {
-            print_to_builder(general, " \%%", initializerSSAId);
+            array_add(*operands, initializerSSAId);
          }
 
-         print_to_builder(general, "      ; %\n", GetVariableName(variableIdentifier));
+         #if SPIRV_BUILDER_TYPE == .String {
+            print_to_builder(general, "; %\n", GetVariableName(variableIdentifier));
+         }
+
+         WriteSingleInstruction(
+            general,
+            .Variable,
+            .. operands
+         );
 
          return variableSSAId, variableIdentifier;
       case .CAST;
@@ -2911,10 +4060,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Str
          castToIdentifier: Identifier = .{ type = ._Type, _type = castTo };
 
          resultSSAId := GetNextSSAId(data);
-         print_to_builder(function, "\%% = OpBitcast \%% \%%\n",
-                                    resultSSAId,
-                                    GetSSAId(data, castToIdentifier),
-                                    expressionSSAId
+         WriteSingleInstruction(
+            function,
+            .Bitcast,
+            GetSSAId(data, castToIdentifier),
+            resultSSAId,
+            expressionSSAId
          );
 
          return resultSSAId, .{};
@@ -3309,21 +4460,23 @@ VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhere
 
 // maybe only do Aligned only if you are loading from a physical storage buffer.
 // tho this requires one additional argument to be passed
-Load :: (data: *CompilationData, b: *String_Builder, typeIdentifier: Identifier, lValueSSAId: int, loadingFromPhysicalStorageBuffer: bool) -> ssaId: int {
+Load :: (data: *CompilationData, b: *BuilderType, typeIdentifier: Identifier, lValueSSAId: SSAId, loadingFromPhysicalStorageBuffer: bool) -> SSAId {
    dereferencedSSAId := GetNextSSAId(data);
-   print_to_builder(b, "\%% = OpLoad \%% \%%",
-                        dereferencedSSAId,
-                        GetSSAId(data, typeIdentifier),
-                        lValueSSAId
-   );
+
+   operands: [..] Any;
+   array_add(*operands, GetSSAId(data, typeIdentifier));
+   array_add(*operands, dereferencedSSAId);
+   array_add(*operands, lValueSSAId);
 
    if (loadingFromPhysicalStorageBuffer) {
-      print_to_builder(b, " Aligned %",
-                        VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(typeIdentifier._type)
-      );
+      array_add(*operands, SpvMemoryAccessMask.AlignedMask, VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(typeIdentifier._type));
    }
 
-   print_to_builder(b, "\n");
+   WriteSingleInstruction(
+      b,
+      .Load,
+      .. operands
+   );
 
    return dereferencedSSAId;
 }
@@ -3432,7 +4585,7 @@ GetVariableIdentifier :: (ci: *Code_Ident) -> Identifier {
 
 // this function returns the storage class of the variable. not where the storage class of where it points to
 // if it is a pointer
-GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> StorageClass {
+GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> SpvStorageClass {
    assert(variable.type == .Variable, "type: %", variable.type);
 
    declaration := variable.variable;
@@ -3544,13 +4697,13 @@ GetVariableTypeIdentifier :: (data: *CompilationData, variable: Identifier) -> I
    return .{ type = ._Type, _type = declaration.type };
 }
 
-GetPointerTypeIdentifier :: (typeIdentifier: Identifier, storageClass: StorageClass) -> Identifier {
+GetPointerTypeIdentifier :: (typeIdentifier: Identifier, storageClass: SpvStorageClass) -> Identifier {
    assert(typeIdentifier.type == ._Type, "type: %", typeIdentifier.type);
    return GetPointerTypeIdentifier(typeIdentifier._type, storageClass);
 }
 
 // used to get the result type of OpVariable from jai declared type
-GetPointerTypeIdentifier :: (type: *Type_Info, storageClass: StorageClass) -> Identifier {
+GetPointerTypeIdentifier :: (type: *Type_Info, storageClass: SpvStorageClass) -> Identifier {
    pointerTypeInfo := New(TypeInfoPointer);
    pointerTypeInfo.pointerTo = type;
    pointerTypeInfo.storageClass = storageClass;
@@ -3628,8 +4781,8 @@ DoDotsAndArraySubscriptsBaseVariableData :: enum {
 // code := #code a.b.c;
 // root := compiler_get_nodes(code);
 // root.(*Code_Binary_Operator).left.(*Code_Binary_Operator).right.(*Code_Ident).name // is "b"
-DoDotsAndArraySubscripts :: (data: *CompilationData, b: *String_Builder, cbo: *Code_Binary_Operator, currentFunction: *Code_Procedure_Header, baseArrayElementTypeIfImageHeap: *TypeInfoImage) -> ssaId: int, returnTypeIdentifier: Identifier, baseVariable: DoDotsAndArraySubscriptsBaseVariableData {
-   DoMemberAccess :: (tis: *Type_Info_Struct, right: *Code_Node, indices: *[..] int) #expand {
+DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentFunction: *Code_Procedure_Header, baseArrayElementTypeIfImageHeap: *TypeInfoImage) -> SSAId, returnTypeIdentifier: Identifier, baseVariable: DoDotsAndArraySubscriptsBaseVariableData {
+   DoMemberAccess :: (tis: *Type_Info_Struct, right: *Code_Node, indices: *[..] SSAId) #expand {
       assert(right.kind == .IDENT, "if you are accessing a struct indexer it is not yet implemented! right.kind: %, struct name: %", right.kind, tis.name);
       ci := cast(*Code_Ident) right;
 
@@ -3649,7 +4802,7 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *String_Builder, cbo: *C
    found, baseNodeType := table_find(*data.codeNodeTypes, baseNode);
    assert(found, "baseNode.name: %", baseNode.name);
 
-   indices: [..] int;
+   indices: [..] SSAId;
    currentBaseSSAId := GetSSAId(data, baseIdentifier);
    currentBaseType := baseNodeType;
 
@@ -3677,7 +4830,7 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *String_Builder, cbo: *C
          case TYPE_INFO_POINTER_TAG;
             tip := cast(*TypeInfoPointer) leftType;
 
-            loadFromSSAId: int;
+            loadFromSSAId: SSAId;
 
             if (indices.count > 0) {
                returnTypeIdentifier := GetPointerTypeIdentifier(leftType, tip.storageClass);
@@ -3742,8 +4895,11 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *String_Builder, cbo: *C
 // storageClass: storage class of the pointer returned by OpAccessChain
 // returnType: the type of the access chain in jai, not the one returned by OpAccessChain. (there is a single pointer difference)
 // returns: the ssa id returned by OpAccessChain
-EmitAccessChain :: (data: *CompilationData, b: *String_Builder, returnTypeIdentifier: Identifier, baseSSAId: int, jaiBaseType: *Type_Info, indices: [] int, baseArrayElementTypeIfImageHeap: *Type_Info) -> ssaId: int {
+EmitAccessChain :: (data: *CompilationData, b: *BuilderType, returnTypeIdentifier: Identifier, baseSSAId: SSAId, jaiBaseType: *Type_Info, indices: [] SSAId, baseArrayElementTypeIfImageHeap: *Type_Info) -> SSAId {
    lValueSSAId := GetNextSSAId(data);
+
+   op: SpvOp;
+   operands: [..] Any;
 
    //
    // i dont store if a variable is untyped or not. and there are many restrictions to untyped variables.
@@ -3763,12 +4919,11 @@ EmitAccessChain :: (data: *CompilationData, b: *String_Builder, returnTypeIdenti
       tira.elementType = baseArrayElementTypeIfImageHeap;
       baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
 
-      print_to_builder(b, "\%% = OpUntypedAccessChainKHR \%% \%% \%%",
-                           lValueSSAId,
-                           GetSSAId(data, returnTypeIdentifier),
-                           GetSSAId(data, baseTypeIdentifier),
-                           baseSSAId
-      );
+      op = .UntypedAccessChainKHR;
+      array_add(*operands, GetSSAId(data, returnTypeIdentifier));
+      array_add(*operands, lValueSSAId);
+      array_add(*operands, GetSSAId(data, baseTypeIdentifier));
+      array_add(*operands, baseSSAId);
    } else if (jaiBaseType == cast(*Type_Info) type_of(samplers)) {
       assert(jaiBaseType.type != TYPE_INFO_POINTER_TAG); // required by specs
 
@@ -3779,28 +4934,23 @@ EmitAccessChain :: (data: *CompilationData, b: *String_Builder, returnTypeIdenti
       tira.elementType = tia.element_type;
       baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
 
-      print_to_builder(b, "\%% = OpUntypedAccessChainKHR \%% \%% \%%",
-                           lValueSSAId,
-                           GetSSAId(data, returnTypeIdentifier),
-                           GetSSAId(data, baseTypeIdentifier),
-                           baseSSAId
-      );
+      op = .UntypedAccessChainKHR;
+      array_add(*operands, GetSSAId(data, returnTypeIdentifier));
+      array_add(*operands, lValueSSAId);
+      array_add(*operands, GetSSAId(data, baseTypeIdentifier));
+      array_add(*operands, baseSSAId);
    } else {
-      print_to_builder(b, "\%% = OpAccessChain \%% \%%",
-                           lValueSSAId,
-                           GetSSAId(data, returnTypeIdentifier),
-                           baseSSAId
-      );
+      op = .AccessChain;
+      array_add(*operands, GetSSAId(data, returnTypeIdentifier));
+      array_add(*operands, lValueSSAId);
+      array_add(*operands, baseSSAId);
    }
 
    for indices {
-      print_to_builder(b, " \%%",
-                           it
-      );
+      array_add(*operands, ac(it));
    }
 
-   print_to_builder(b, "\n");
-
+   WriteSingleInstruction(b, op, .. operands);
    return lValueSSAId;
 }
 
@@ -3824,19 +4974,19 @@ GetMemberIndex :: (tis: *Type_Info_Struct, memberName: string) -> int {
    return MEMBER_DOESNT_EXIST;
 }
 
-GetFloatInstructionNameFromOperatorType :: (type: Operator_Type) -> string {
+GetFloatOpFromOperatorType :: (type: Operator_Type) -> SpvOp {
    if type == {
-      case #char "+"; return "OpFAdd";
-      case #char "-"; return "OpFSub";
-      case; assert(false, "type: %", type); return "";
+      case #char "+"; return .FAdd;
+      case #char "-"; return .FSub;
+      case; assert(false, "type: %", type); return 0;
    }
 }
 
-GetIntegerInstructionNameFromOperatorType :: (type: Operator_Type) -> string {
+GetIntegerOpFromOperatorType :: (type: Operator_Type) -> SpvOp {
    if type == {
-      case #char "+"; return "OpIAdd";
-      case #char "-"; return "OpISub";
-      case; assert(false, "type: %", type); return "";
+      case #char "+"; return .IAdd;
+      case #char "-"; return .ISub;
+      case; assert(false, "type: %", type); return 0;
    }
 }
 
@@ -3884,12 +5034,12 @@ GetReturnTypeIdentifier :: (tip: *Type_Info_Procedure) -> Identifier {
    return .{ type = ._Type, _type = returnType };
 }
 
-GetNextSSAId :: (using data: *CompilationData) -> int {
+GetNextSSAId :: (using data: *CompilationData) -> SSAId {
    ssaIota += 1;
    return ssaIota;
 }
 
-GetSSAId :: (using data: *CompilationData, identifier: Identifier) -> int {
+GetSSAId :: (using data: *CompilationData, identifier: Identifier) -> SSAId {
    value, newlyAdded := find_or_add(*identifierToSSAId, identifier);
    if (!newlyAdded) {
       return value.*;
@@ -3899,51 +5049,16 @@ GetSSAId :: (using data: *CompilationData, identifier: Identifier) -> int {
    return value.*;
 }
 
-ToSpirvOutputTopology :: (topology: string) -> string {
+ToSpirvOutputTopology :: (topology: string) -> SpvExecutionMode {
    #if (false) {
    } else if (topology == "points") {
-      return "OutputPoints";
+      return .OutputPoints;
    } else if (topology == "lines") {
-      return "OutputLinesEXT";
+      return .OutputLinesEXT;
    } else if (topology == "triangles") {
-      return "OutputTrianglesEXT";
+      return .OutputTrianglesEXT;
    } else {
       assert(false, "invalid topology: %", topology);
-      return .{};
-   }
-}
-
-ToSpirvStorageClass :: (storageClass: StorageClass) -> string {
-   if #complete storageClass == {
-      case .Invalid; assert(false);
-      case .Function; return "Function";
-      case .PhysicalStorageBuffer; return "PhysicalStorageBuffer";
-      case .Output; return "Output";
-      case .PushConstant; return "PushConstant";
-      case .UniformConstant; return "UniformConstant";
-      case .Image; return "Image";
-      case .Workgroup; return "Workgroup";
-      case .StorageBuffer; return "StorageBuffer";
-      case .Uniform; return "Uniform";
-      case .Private; return "Private";
-      case .Input; return "Input";
-   }
-
-   assert(false, "storageClass: %", storageClass);
-   return "";
-}
-
-ToSpirvDimensionality :: (dimensionality: Dimensionality) -> string {
-   if #complete dimensionality == {
-      case ._1D; return "1D";
-      case ._2D; return "2D";
-      case ._3D; return "3D";
-      case .Cube; return "Cube";
-   }
-}
-
-ToSpirvImageFormat :: (format: __ImageFormat__) -> string {
-   if #complete format == {
-      case .Unknown; return "Unknown";
+      return 0;
    }
 }
