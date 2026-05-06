@@ -39,9 +39,9 @@
 //       - apila, 25/04/26
 //
 
-SSAId :: #type,distinct int;
+SSAId :: #type,distinct u32;
 
-SPIRV_BUILDER_TYPE :: SpirvBuilderType.String;
+SPIRV_BUILDER_TYPE :: SpirvBuilderType.Byte;
 BuilderType :: #run -> Type {
    if #complete SPIRV_BUILDER_TYPE == {
       case .Byte; return [..] u32; // list of words. one word is 4 bytes
@@ -792,6 +792,8 @@ CalculateLocationsConsumed :: (T: Type) -> int {
 //             - apila, 04/04/26
 //
 
+SSA_ID_BOUND_PLACEHOLDER: u32 : 69_420_31;
+
 // local size is provided via notes like so: @x_y_z
 // if you omit y and/or z (or even x) they default to 1
 //
@@ -987,6 +989,29 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
    GenerateFunctions(*data, body, *functionsBuilder);
 
    b: BuilderType;
+   #if SPIRV_BUILDER_TYPE == .Byte {
+      MAGIC_NUMBER: u32 : 0x07230203;
+      array_add(*b, MAGIC_NUMBER);
+      array_add(*b, (1 << 16) | (6 << 8)); // version 1.6
+      array_add(*b, 0); // my entry value goes here (not yet registered)
+
+      //
+      // there are two approaches to determining the ssa id bound:
+      //    - dont write now. write it after you are done generating everything
+      //    - after you traverse the syntax tree before calling WriteTypeOrVariableOrConstant
+      //       call another function that generates ssa ids for all dependencies recursively, so that way you make sure all the ssa ids are generated
+      //
+      // this problem arises becuase i lazily discover the dependencies of types in the WriteTypeOrVariableOrConstant function during i output stuff
+      // i think the second approach is the proper one because you are sure ids are stabilized before you started outputting which i think should be the case
+      // and a better design. and this also helps some other stages prolly (right now i do reordering for that reason, reordering wouldnt be necessary with this design).
+      // but im going with the post patch approach because it is easier to implement for now. if i need the ids to be fully generated for some other reason then i will change it but for now it is okay Clueless.
+      //
+      //                - apila, 06/05/26
+      //
+      array_add(*b, SSA_ID_BOUND_PLACEHOLDER);
+      array_add(*b, 0);
+   }
+
    if type == {
       case .Fragment; #through;
       case .Mesh; {
@@ -1400,6 +1425,11 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          };
 
       case .Byte;
+         write_entire_file("out.spv", b.data, b.count * size_of(type_of(b[69])));
+
+         assert(b[3] == SSA_ID_BOUND_PLACEHOLDER);
+         b[3] = xx (data.ssaIota + 1); // +1 because bound is not inclusive
+
          return .{
             data = xx b.data,
             count = b.count * size_of(type_of(b[69])),
@@ -1424,7 +1454,7 @@ AppendAndStealBuffers :: (builder: *BuilderType, stealFrom: *BuilderType) {
    #if SPIRV_BUILDER_TYPE == .String {
       append_and_steal_buffers(builder, stealFrom);
    } else #if SPIRV_BUILDER_TYPE == .Byte {
-      array_add(builder, .. stealFrom);
+      array_add(builder, .. stealFrom.*);
       array_reset(stealFrom);
    } else {
       #assert(false, "not implemented yet! type: %", SPIRV_BUILDER_TYPE);
@@ -1630,7 +1660,7 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             assert(operands.count == 3);
             assert(operands[0].type == cast(*Type_Info) SSAId);
             assert(operands[1].type == cast(*Type_Info) SSAId);
-            assert(operands[2].type == cast(*Type_Info) s64 || cast(*Type_Info) u64 || cast(*Type_Info) float);
+            assert(operands[2].type.type == .INTEGER || operands[2].type.type == .FLOAT);
 
             resultType := operands[0].value_pointer.(*SSAId).*;
             result     := operands[1].value_pointer.(*SSAId).*;
@@ -2299,7 +2329,835 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             assert(operands[0].type == cast(*Type_Info) SpvCapability);
 
             capability := operands[0].value_pointer.(*SpvCapability).*;
-            array_add(b, OpCodeWordCount(op, operands.count), capability);
+            array_add(b, OpWordCount(op, operands.count), cast(u32) capability);
+         }
+
+         case .Extension; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) string);
+
+            extension := operands[0].value_pointer.(*string).*;
+
+            buffer := ToSpirvString(extension);
+            operandCount := buffer.count;
+
+            array_add(b, OpWordCount(op, operandCount));
+            array_add(b, .. buffer);
+         }
+
+         case .ExtInstImport; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) string);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+            import := operands[1].value_pointer.(*string).*;
+
+            buffer := ToSpirvString(import);
+
+            operandCount := operands.count - 1 + buffer.count; // -1 for double coounting the first word of "import"
+
+            array_add(b, OpWordCount(op, operandCount), cast(u32) result);
+            array_add(b, .. buffer);
+         }
+
+         case .MemoryModel; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SpvAddressingModel);
+            assert(operands[1].type == cast(*Type_Info) SpvMemoryModel);
+
+            addressingModel := operands[0].value_pointer.(*SpvAddressingModel).*;
+            memoryModel     := operands[1].value_pointer.(*SpvMemoryModel).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) addressingModel, cast(u32) memoryModel);
+         }
+
+         case .EntryPoint; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SpvExecutionModel);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) string);
+
+            executionModel := operands[0].value_pointer.(*SpvExecutionModel).*;
+            entryPoint     := operands[1].value_pointer.(*SSAId).*;
+            name           := operands[2].value_pointer.(*string).*;
+
+            buffer := ToSpirvString(name);
+
+            operandCount := operands.count - 1 + buffer.count; // -1 for double coounting the first word of "name"
+
+            array_add(b, OpWordCount(op, operandCount), cast(u32) executionModel, cast(u32) entryPoint);
+            array_add(b, .. buffer);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               operand := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx operand);
+            }
+         }
+
+         case .ExecutionModeId; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvExecutionMode);
+
+            entryPoint    := operands[0].value_pointer.(*SSAId).*;
+            executionMode := operands[1].value_pointer.(*SpvExecutionMode).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) entryPoint, cast(u32) executionMode);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               operand := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx operand);
+            }
+         }
+
+         case .ExecutionMode; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvExecutionMode);
+
+            entryPoint    := operands[0].value_pointer.(*SSAId).*;
+            executionMode := operands[1].value_pointer.(*SpvExecutionMode).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) entryPoint, cast(u32) executionMode);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) int);
+
+               operand := operands[it].value_pointer.(*int).*;
+               array_add(b, xx operand);
+            }
+         }
+
+         case .Decorate; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvDecoration);
+
+            target     := operands[0].value_pointer.(*SSAId).*;
+            decoration := operands[1].value_pointer.(*SpvDecoration).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) target, cast(u32) decoration);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) int || operands[it].type == cast(*Type_Info) SpvBuiltIn);
+
+               if (operands[it].type == cast(*Type_Info) int) {
+                  operand := operands[it].value_pointer.(*int).*;
+                  array_add(b, xx operand);
+               } else if (operands[it].type == cast(*Type_Info) SpvBuiltIn) {
+                  operand := operands[it].value_pointer.(*SpvBuiltIn).*;
+                  array_add(b, xx operand);
+               }
+            }
+         }
+
+         case .MemberDecorate; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) int);
+            assert(operands[2].type == cast(*Type_Info) SpvDecoration);
+
+            structType := operands[0].value_pointer.(*SSAId).*;
+            member     := operands[1].value_pointer.(*int).*;
+            decoration := operands[2].value_pointer.(*SpvDecoration).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) structType, cast(u32) member, cast(u32) decoration);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SpvBuiltIn || operands[it].type == cast(*Type_Info) int);
+
+               if (operands[it].type == cast(*Type_Info) SpvBuiltIn) {
+                  builtin := operands[it].value_pointer.(*SpvBuiltIn).*;
+                  array_add(b, xx builtin);
+               } else if (operands[it].type == cast(*Type_Info) int) {
+                  operand := operands[it].value_pointer.(*int).*;
+                  array_add(b, xx operand);
+               }
+            }
+         }
+
+         case .DecorateId; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvDecoration);
+
+            target     := operands[0].value_pointer.(*SSAId).*;
+            decoration := operands[1].value_pointer.(*SpvDecoration).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) target, cast(u32) decoration);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               ssaId := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx ssaId);
+            }
+         }
+
+         case .Constant; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type.type == .INTEGER || operands[2].type.type == .FLOAT);
+            assert(operands[2].type.runtime_size == 4 || operands[2].type.runtime_size == 8, "not yet implemented! size: %", operands[2].type.runtime_size);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            value      := operands[2];
+
+            operandCount := operands.count + ifx value.type.runtime_size > 4 then 1 else 0;
+            array_add(b, OpWordCount(op, operandCount), cast(u32) resultType, cast(u32) result);
+
+            // for 16 or 8 bits i need to sign extend or just extend to 32 bits
+            if (value.type.runtime_size == 4) {
+               array_add(b, value.value_pointer.(*u32).*);
+            } else if (value.type.runtime_size == 8) {
+               array_add(b, xx (value.value_pointer.(*u64).* & 0xFFFFFFFF));
+               array_add(b, xx (value.value_pointer.(*u64).* >> 32));
+            } else {
+               assert(false);
+            }
+         }
+
+         case .TypeInt; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) int);
+            assert(operands[2].type == cast(*Type_Info) int);
+
+            result     := operands[0].value_pointer.(*SSAId).*;
+            width      := operands[1].value_pointer.(*int).*;
+            signedness := operands[2].value_pointer.(*int).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) width, cast(u32) signedness);
+         }
+
+         case .TypeFloat; {
+            assert(operands.count == 2 || operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) int);
+
+            result     := operands[0].value_pointer.(*SSAId).*;
+            width      := operands[1].value_pointer.(*int).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) width);
+
+            if (operands.count == 3) {
+               assert(operands[2].type == cast(*Type_Info) SpvFPEncoding);
+
+               encoding := operands[1].value_pointer.(*SpvFPEncoding).*;
+               array_add(b, xx encoding);
+            }
+         }
+
+         case .TypeVector; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) int);
+
+            result         := operands[0].value_pointer.(*SSAId).*;
+            componentType  := operands[1].value_pointer.(*SSAId).*;
+            componentCount := operands[2].value_pointer.(*int).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) componentType, cast(u32) componentCount);
+         }
+
+         case .TypeMatrix; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) int);
+
+            result      := operands[0].value_pointer.(*SSAId).*;
+            columnType  := operands[1].value_pointer.(*SSAId).*;
+            columnCount := operands[2].value_pointer.(*int).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) columnType, cast(u32) columnCount);
+         }
+
+         case .TypeBool; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result);
+         }
+
+         case .TypeStruct; {
+            // spirv specs: "It is valid for the structure to have no members"
+            assert(operands.count >= 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result);
+
+            for 1..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               memberType := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx memberType);
+            }
+         }
+
+         case .TypeSampledImage; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            result    := operands[0].value_pointer.(*SSAId).*;
+            imageType := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) imageType);
+         }
+
+         case .TypeSampler; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result);
+         }
+
+         case .TypeImage; {
+            assert(operands.count == 8 || operands.count == 9);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvDim);
+            assert(operands[3].type == cast(*Type_Info) int);
+            assert(operands[4].type == cast(*Type_Info) int);
+            assert(operands[5].type == cast(*Type_Info) int);
+            assert(operands[6].type == cast(*Type_Info) int);
+            assert(operands[7].type == cast(*Type_Info) SpvImageFormat);
+
+            result      := operands[0].value_pointer.(*SSAId).*;
+            sampledType := operands[1].value_pointer.(*SSAId).*;
+            dim         := operands[2].value_pointer.(*SpvDim).*;
+            depth       := operands[3].value_pointer.(*int).*;
+            arrayed     := operands[4].value_pointer.(*int).*;
+            ms          := operands[5].value_pointer.(*int).*;
+            sampled     := operands[6].value_pointer.(*int).*;
+            imageFormat := operands[7].value_pointer.(*SpvImageFormat).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) sampledType, cast(u32) dim, cast(u32) depth, cast(u32) arrayed, cast(u32) ms, cast(u32) sampled, cast(u32) imageFormat);
+
+            if (operands.count == 9) {
+               assert(operands[8].type == cast(*Type_Info) SpvAccessQualifier);
+
+               accessQualifier := operands[8].value_pointer.(*SpvAccessQualifier).*;
+               array_add(b, xx accessQualifier);
+            }
+         }
+
+         case .TypeRuntimeArray; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            result      := operands[0].value_pointer.(*SSAId).*;
+            elementType := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) elementType);
+         }
+
+         case .TypeUntypedPointerKHR; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvStorageClass);
+
+            result       := operands[0].value_pointer.(*SSAId).*;
+            storageClass := operands[1].value_pointer.(*SpvStorageClass).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) storageClass);
+         }
+
+         case .TypePointer; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvStorageClass);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            result       := operands[0].value_pointer.(*SSAId).*;
+            storageClass := operands[1].value_pointer.(*SpvStorageClass).*;
+            type         := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) storageClass, cast(u32) type);
+         }
+
+         case .TypeFunction; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            result     := operands[0].value_pointer.(*SSAId).*;
+            returnType := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) returnType);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               parameterType := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx parameterType);
+            }
+         }
+
+         case .TypeArray; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            result      := operands[0].value_pointer.(*SSAId).*;
+            elementType := operands[1].value_pointer.(*SSAId).*;
+            length      := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result, cast(u32) elementType, cast(u32) length);
+         }
+
+         case .TypeVoid; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result);
+         }
+
+         case .Variable; {
+            assert(operands.count == 3 || operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvStorageClass);
+
+            resultType   := operands[0].value_pointer.(*SSAId).*;
+            result       := operands[1].value_pointer.(*SSAId).*;
+            storageClass := operands[2].value_pointer.(*SpvStorageClass).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) storageClass);
+
+            if (operands.count == 4) {
+               assert(operands[3].type == cast(*Type_Info) SSAId);
+
+               initializer := operands[3].value_pointer.(*SSAId).*;
+               array_add(b, xx initializer);
+            }
+         }
+
+         case .UntypedVariableKHR; {
+            assert(operands.count >= 3 || operands.count <= 5);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvStorageClass);
+
+            resultType   := operands[0].value_pointer.(*SSAId).*;
+            result       := operands[1].value_pointer.(*SSAId).*;
+            storageClass := operands[2].value_pointer.(*SpvStorageClass).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) storageClass);
+
+            if (operands.count > 3) {
+               assert(operands[3].type == cast(*Type_Info) SSAId);
+
+               dataType := operands[3].value_pointer.(*SSAId).*;
+               array_add(b, xx dataType);
+
+               if (operands.count > 4) {
+                  assert(operands[4].type == cast(*Type_Info) SSAId);
+
+                  initializer := operands[4].value_pointer.(*SSAId).*;
+                  array_add(b, xx initializer);
+               }
+            }
+         }
+
+         case .ConstantComposite; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               constituent := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx constituent);
+            }
+         }
+
+         case .ConstantTrue; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result);
+         }
+
+         case .ConstantFalse; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result);
+         }
+
+         case .ConstantSizeOfEXT; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            type       := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) type);
+         }
+
+         case .Function; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvFunctionControlMask);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType      := operands[0].value_pointer.(*SSAId).*;
+            result          := operands[1].value_pointer.(*SSAId).*;
+            functionControl := operands[2].value_pointer.(*SpvFunctionControlMask).*;
+            functionType    := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) functionControl, cast(u32) functionType);
+         }
+
+         case .Label; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result);
+         }
+
+         case .Return; {
+            assert(operands.count == 0);
+            array_add(b, OpWordCount(op, operands.count));
+         }
+
+         case .FunctionEnd; {
+            assert(operands.count == 0);
+            array_add(b, OpWordCount(op, operands.count));
+         }
+
+         case .CompositeConstruct; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result);
+
+            for 2..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               constituent := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx constituent);
+            }
+         }
+
+         case .Store; {
+            assert(operands.count >= 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            pointer := operands[0].value_pointer.(*SSAId).*;
+            object  := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) pointer, cast(u32) object);
+
+            if (operands.count > 2) {
+               assert(operands[2].type == cast(*Type_Info) SpvMemoryAccessMask);
+
+               mask := operands[2].value_pointer.(*SpvMemoryAccessMask).*;
+               array_add(b, xx mask);
+
+               // only Aligned has extra arguments and it should be u32
+               if (operands.count > 3) {
+                  assert(operands.count == 4); // no more operands
+                  assert(mask & .AlignedMask != 0);
+                  assert(operands[3].type == cast(*Type_Info) int);
+
+                  operand := operands[3].value_pointer.(*int).*;
+                  array_add(b, xx operand);
+               }
+            }
+         }
+
+         case .SetMeshOutputsEXT; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+
+            vertexCount    := operands[0].value_pointer.(*SSAId).*;
+            primitiveCount := operands[1].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) vertexCount, cast(u32) primitiveCount);
+         }
+
+         case .SampledImage; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            image      := operands[2].value_pointer.(*SSAId).*;
+            sampler    := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) image, cast(u32) sampler);
+         }
+
+         case .ImageSampleImplicitLod; {
+            assert(operands.count >= 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType   := operands[0].value_pointer.(*SSAId).*;
+            result       := operands[1].value_pointer.(*SSAId).*;
+            sampledImage := operands[2].value_pointer.(*SSAId).*;
+            coordinate   := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) sampledImage, cast(u32) coordinate);
+
+            if (operands.count > 4) {
+               assert(operands[4].type == cast(*Type_Info) SpvImageOperandsMask);
+
+               mask := operands[4].value_pointer.(*SpvImageOperandsMask).*;
+               array_add(b, xx mask);
+
+               // specs mandates that parameters to memory operands are all 32 bit whether it is float or integer
+               // it has to be 32 bit.
+               for 5..operands.count - 1 {
+                  assert(operands[it].type.type == .INTEGER || operands[it].type.type == .FLOAT);
+
+                  assert(operands[it].type.runtime_size == 4 || operands[it].type.runtime_size == 8, "not yet implemented! you need to do signed/unsigned extend. and if you were to do that then also handle endianess so it also works with big endian.");
+
+                  // if your machine is big endian this wont work.
+                  operand := operands[it].value_pointer.(*u32).*;
+                  array_add(b, operand);
+               }
+            }
+         }
+
+         case .SelectionMerge; {
+            assert(operands.count == 2);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SpvSelectionControlMask);
+
+            mergeBlock       := operands[0].value_pointer.(*SSAId).*;
+            selectionControl := operands[1].value_pointer.(*SpvSelectionControlMask).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) mergeBlock, cast(u32) selectionControl);
+         }
+
+         case .BranchConditional; {
+            assert(operands.count == 3 || operands.count == 5);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            condition  := operands[0].value_pointer.(*SSAId).*;
+            trueLabel  := operands[1].value_pointer.(*SSAId).*;
+            falseLabel := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) condition, cast(u32) trueLabel, cast(u32) falseLabel);
+
+            if (operands.count == 5) {
+               assert(operands[3].type == cast(*Type_Info) int);
+               assert(operands[4].type == cast(*Type_Info) int);
+
+               trueWeight  := operands[3].value_pointer.(*int).*;
+               falseWeight := operands[4].value_pointer.(*int).*;
+
+               array_add(b, cast(u32) trueWeight, cast(u32) falseWeight);
+            }
+         }
+
+         case .Branch; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            targetLabel := operands[0].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) targetLabel);
+         }
+
+         case .Bitcast; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand    := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand);
+         }
+
+         case .Load; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            pointer    := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) pointer);
+
+            if (operands.count > 3) {
+               assert(operands[3].type == cast(*Type_Info) SpvMemoryAccessMask);
+
+               mask := operands[3].value_pointer.(*SpvMemoryAccessMask).*;
+               array_add(b, xx mask);
+
+               // only Aligned has extra arguments and it should be u32
+               if (operands.count > 4) {
+                  assert(operands.count == 5); // no more operands
+                  assert(mask & .AlignedMask != 0);
+                  assert(operands[4].type == cast(*Type_Info) int);
+
+                  operand := operands[4].value_pointer.(*int).*;
+                  array_add(b, xx operand);
+               }
+            }
+         }
+
+         case .UntypedAccessChainKHR; {
+            assert(operands.count >= 5);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            baseType   := operands[2].value_pointer.(*SSAId).*;
+            base       := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) baseType, cast(u32) base);
+
+            for 4..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               index := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx index);
+            }
+         }
+
+         case .AccessChain; {
+            assert(operands.count >= 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            base       := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) base);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               index := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx index);
+            }
+         }
+
+         case .FAdd; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand1, cast(u32) operand2);
+         }
+
+         case .FSub; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand1, cast(u32) operand2);
+         }
+
+         case .IAdd; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand1, cast(u32) operand2);
+         }
+
+         case .ISub; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand1, cast(u32) operand2);
          }
 
          case; assert(false, "not yet implemented! op: %", op);
@@ -2307,6 +3165,13 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
    } else {
       #assert(false, "not implemented yet! type: %", SPIRV_BUILDER_TYPE);
    }
+}
+
+ToSpirvString :: (s: string) -> [] u32 #expand {
+   // zero padded
+   buffer := NewArray((s.count + 1 + 3) / 4, u32); // + 1 for the null terminator
+   memcpy(buffer.data, s.data, s.count);
+   return buffer;
 }
 
 SpvFunctionControlMaskToString :: (value: SpvFunctionControlMask) -> string {
@@ -2321,10 +3186,10 @@ SpvFunctionControlMaskToString :: (value: SpvFunctionControlMask) -> string {
    }
 }
 
-OpCodeWordCount :: (op: SpvOp, operandsCount: int) -> u32 #expand {
+OpWordCount :: (op: SpvOp, operandsCount: int) -> u32 #expand {
    // higher 16 bits = word count
    // lower 16 bits  = op
-   return ((operandsCount + 1) << 16) | op; // + 1 for this word
+   return cast(u32) ((operandsCount + 1) << 16) | cast(u32) op; // + 1 for this word
 }
 
 // this function is called for every identifier that exists in the shader program
@@ -2390,9 +3255,21 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
          array_add(*operands, GetSSAId(data, identifier));
 
          if (identifier.intLiteral.unsigned) {
-            array_add(*operands, identifier.intLiteral.value._u64);
+            if (identifier.intLiteral.bitSize == 32) {
+               array_add(*operands, cast(u32) identifier.intLiteral.value._u64);
+            } else if (identifier.intLiteral.bitSize == 64) {
+               array_add(*operands, cast(u64) identifier.intLiteral.value._u64);
+            } else {
+               assert(false);
+            }
          } else {
-            array_add(*operands, identifier.intLiteral.value._s64);
+            if (identifier.intLiteral.bitSize == 32) {
+               array_add(*operands, cast(s32) identifier.intLiteral.value._s64);
+            } else if (identifier.intLiteral.bitSize == 64) {
+               array_add(*operands, cast(s64) identifier.intLiteral.value._s64);
+            } else {
+               assert(false);
+            }
          }
 
          WriteSingleInstruction(
@@ -3812,7 +4689,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                primitiveCountSSAId
             );
 
-            return -42000, .{}; // doesnt matter since OpSetMeshOutputsEXT doesnt return
+            return 42000, .{}; // doesnt matter since OpSetMeshOutputsEXT doesnt return
          } else if (identifierName == TEXTURE_FLOAT_2D_FUNCTION_NAME) {
             assert(arguments.count == 3, "arguments.count: %", arguments.count);
 
@@ -3921,7 +4798,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             endLabelSSAId
          );
 
-         return -321, .{}; // doesnt matter since if doesnt return. need to update this when i implement ifx.
+         return 321321, .{}; // doesnt matter since if doesnt return. need to update this when i implement ifx.
 
       case .CASE;
 
@@ -3990,7 +4867,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             endLabelSSAId
          );
 
-         return -543, .{}; // return doesnt return any ssa id
+         return 543543, .{}; // return doesnt return any ssa id
 
       case .FOR;
       case .TYPE_DEFINITION;
@@ -4009,7 +4886,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
          pointerTypeIdentifier := GetPointerTypeIdentifier(variableType, storageClass);
 
-         NO_INITIALIZER :: -1;
+         NO_INITIALIZER :: U32_MAX;
          initializerSSAId: SSAId = NO_INITIALIZER;
 
          if (cd.expression != null) {
@@ -4075,7 +4952,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
    }
 
    assert(false, "node.kind: %, didnt return!", node.kind);
-   return -69, .{};
+   return 696969, .{};
 }
 
 // assertion failure if exists
