@@ -17,35 +17,54 @@
    }
 };
 
+//
+// swizzling:
+// i want to define the instrinsic vectors like this:
+//    s32x4 :: [4] s32;
+//
+// if i do that i can only use indices, i cant use xyzw. or any other character.
+// i want my spirv compiler to work without a need of metaprogram. so i cant support any swizzle operation, simply becasue jai doesnt have support for them.
+// i proposed a syntax suggestion on discord regarding the swizzle #swizzle but i think it didnt catch attention of jblow. but i do want to support swizzling because a shading langauge without swizzling is no good.
+// so i think my next project is to write a metaprogram that implements swizzling. this is what i have in mind right now (it is different than what ive proposed on discord):
+//    s32x4 :: [4] s32; @"swizzle(xr, yg, zb, wa)"
+//
+// for this i need to first traverse all the declarations and check to see if they have @swizzle, if they have i need to add them into a table. and when traversing the syntax tree when i see an identifier of a swizzled type
+// im gonna decipher it into something that the jai compiler understands.
+// i need to first trverse through all the declarations to figure out if an identifier is swizzled. because if i dont do it and traverse the syntax tree directly then i cant get the notes (the swizzle data) from just the type itself.
+// i think jblow can make it so that there is a function that returns the *Code_Node from given Type or *Type_Info during compilation.
+//
+//                   - apila, 07/05/26
+//
+
 // vvvvvv intrinsics vvvvvvvv
 // s32    :: s32;
-s32x2 :: struct {};
+s32x2 :: struct { x: s32; y: s32; };
 s32x3 :: struct { x: s32; y: s32; z: s32; };
-s32x4 :: struct {};
+s32x4 :: struct { x: s32; y: s32; z: s32; w: s32; };
 
 // u32    :: u32;
-u32x2 :: struct {};
-u32x3 :: struct {};
-u32x4 :: struct {};
+u32x2 :: struct { x: u32; y: u32; };
+u32x3 :: struct { x: u32; y: u32; z: u32; };
+u32x4 :: struct { x: u32; y: u32; z: u32; w: u32; };
 
 // s64    :: s64;
-s64x2 :: struct {};
-s64x3 :: struct {};
-s64x4 :: struct {};
+s64x2 :: struct { x: s64; y: s64; };
+s64x3 :: struct { x: s64; y: s64; z: s64; };
+s64x4 :: struct { x: s64; y: s64; z: s64; w: s64; };
 
 // u64    :: u64;
-u64x2 :: struct {};
-u64x3 :: struct {};
-u64x4 :: struct {};
+u64x2 :: struct { x: u64; y: u64; };
+u64x3 :: struct { x: u64; y: u64; z: u64; };
+u64x4 :: struct { x: u64; y: u64; z: u64; w: u64; };
 
 f32   :: float;
 f32x2 :: struct { x: f32; y: f32; };
-f32x3 :: struct {};
+f32x3 :: struct { x: f32; y: f32; z: f32; };
 f32x4 :: struct { x: f32; y: f32; z: f32; w: f32; };
 
-f32x2x2 :: struct {};
-f32x3x3 :: struct {};
-f32x4x4 :: struct {};
+f32x2x2 :: #type,distinct [2] f32x2;
+f32x3x3 :: #type,distinct [3] f32x3;
+f32x4x4 :: #type,distinct [4] f32x4;
 
 mat2 :: f32x2x2;
 mat3 :: f32x3x3;
@@ -1077,6 +1096,14 @@ CompareType :: (a: *Type_Info, b: *Type_Info) -> bool {
       case .ENUM;
          assert(false, "enums dont exists yet");
          return false;
+
+      case .VARIANT;
+         // i dont create variant myself. only jai ones.
+         // but i still think that there might be problems if the variant is ISA of an intrinsic type.
+         // because it means you created an alias for intrinsic type and now an intrinsic type has more than one identifier (thus ssa id)
+         // and i think thats not gonna work out.
+         //       - apila, 07/05/26
+         return a == b;
 
       case; assert(false, "type: %", type); return false;
    }
@@ -3791,8 +3818,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
             return;
          }
 
-         // not every type is going to be written, so skipping some is fine. this is for debugging
-         print("WARNING    type: %. skipped!\n", type);
+         assert(false, "not yet implemented! if it is a variant then idk. type: %!\n", type.*);
 
       case .Void;
          WriteSingleInstruction(
@@ -5060,7 +5086,18 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          ci := cast(*Code_Ident) node;
          declaration := ci.resolved_declaration;
 
-         newNodeType := ConvertJaiTypeIfNecessary(node.type, declaration.notes);
+         //
+         // unwinding here because now matrices are #type,distinct.
+         // and i want to treat them as if they were normal arrays in the code generation.
+         // but they are distinct types as in a f32x4x4 is not the same as [4] f32x4 if user declares a variable of this type.
+         // one of them is OpTypeMatrix the other is OpTypeArray.
+         // and if you consider user defined types (types that are not intrinsic) i think unwinding has no problem with that Clueless.
+         //
+         //             - apila, 07/05/26
+         //
+         nodeTypeUnwinded := UnwindVariants(node.type);
+
+         newNodeType := ConvertJaiTypeIfNecessary(nodeTypeUnwinded, declaration.notes);
          TableAddIfNotExists(*data.codeNodeTypes, node, newNodeType);
          return newNodeType;
 
@@ -5254,6 +5291,16 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
    assert(false, "didnt return! kind: %", node.kind);
    return null;
+}
+
+UnwindVariants :: (type: *Type_Info) -> *Type_Info {
+   current := type;
+   while (current.type == .VARIANT) {
+      tiv := cast(*Type_Info_Variant) current;
+      current = tiv.variant_of;
+   }
+
+   return current;
 }
 
 GetHeaderFromCodeProcedureCall :: (cpc: *Code_Procedure_Call) -> *Code_Procedure_Header {
