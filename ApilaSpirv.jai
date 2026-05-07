@@ -37,6 +37,11 @@
 //
 
 // vvvvvv intrinsics vvvvvvvv
+// bool :: bool;
+bool2 :: struct { x: bool; y: bool; };
+bool3 :: struct { x: bool; y: bool; z: bool; };
+bool4 :: struct { x: bool; y: bool; z: bool; w: bool; };
+
 // s32    :: s32;
 s32x2 :: struct { x: s32; y: s32; };
 s32x3 :: struct { x: s32; y: s32; z: s32; };
@@ -190,6 +195,10 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
          data.fragmentOutputIdentifiers = NewArray(header.returns.count, Identifier);
          for header.returns {
             if get_type(it.type) == {
+               case bool;
+               case bool2;
+               case bool3;
+               case bool4;
                case s32;
                case s32x2;
                case s32x3;
@@ -633,29 +642,33 @@ CompileToSpirv :: (function: Code, type: ShaderType) -> [] u8 #compile_time {
             if (ti.type != .STRUCT) continue;
 
             if (identifier._type == cast(*Type_Info) MeshPerVertex)  continue; // builtin struct handled seperately
-            if (identifier._type == cast(*Type_Info) s32)          continue;
-            if (identifier._type == cast(*Type_Info) s32x2)        continue;
-            if (identifier._type == cast(*Type_Info) s32x3)        continue;
-            if (identifier._type == cast(*Type_Info) s32x4)        continue;
-            if (identifier._type == cast(*Type_Info) u32)         continue;
-            if (identifier._type == cast(*Type_Info) u32x2)       continue;
-            if (identifier._type == cast(*Type_Info) u32x3)       continue;
-            if (identifier._type == cast(*Type_Info) u32x4)       continue;
-            if (identifier._type == cast(*Type_Info) s64)          continue;
-            if (identifier._type == cast(*Type_Info) s64x2)        continue;
-            if (identifier._type == cast(*Type_Info) s64x3)        continue;
-            if (identifier._type == cast(*Type_Info) s64x4)        continue;
-            if (identifier._type == cast(*Type_Info) u64)         continue;
-            if (identifier._type == cast(*Type_Info) u64x2)       continue;
-            if (identifier._type == cast(*Type_Info) u64x3)       continue;
-            if (identifier._type == cast(*Type_Info) u64x4)       continue;
-            if (identifier._type == cast(*Type_Info) f32)          continue;
-            if (identifier._type == cast(*Type_Info) f32x2)         continue;
-            if (identifier._type == cast(*Type_Info) f32x3)         continue;
-            if (identifier._type == cast(*Type_Info) f32x4)         continue;
-            if (identifier._type == cast(*Type_Info) f32x2x2)       continue;
-            if (identifier._type == cast(*Type_Info) f32x3x3)       continue;
-            if (identifier._type == cast(*Type_Info) f32x4x4)       continue;
+            if (identifier._type == cast(*Type_Info) bool)           continue;
+            if (identifier._type == cast(*Type_Info) bool2)          continue;
+            if (identifier._type == cast(*Type_Info) bool3)          continue;
+            if (identifier._type == cast(*Type_Info) bool4)          continue;
+            if (identifier._type == cast(*Type_Info) s32)            continue;
+            if (identifier._type == cast(*Type_Info) s32x2)          continue;
+            if (identifier._type == cast(*Type_Info) s32x3)          continue;
+            if (identifier._type == cast(*Type_Info) s32x4)          continue;
+            if (identifier._type == cast(*Type_Info) u32)            continue;
+            if (identifier._type == cast(*Type_Info) u32x2)          continue;
+            if (identifier._type == cast(*Type_Info) u32x3)          continue;
+            if (identifier._type == cast(*Type_Info) u32x4)          continue;
+            if (identifier._type == cast(*Type_Info) s64)            continue;
+            if (identifier._type == cast(*Type_Info) s64x2)          continue;
+            if (identifier._type == cast(*Type_Info) s64x3)          continue;
+            if (identifier._type == cast(*Type_Info) s64x4)          continue;
+            if (identifier._type == cast(*Type_Info) u64)            continue;
+            if (identifier._type == cast(*Type_Info) u64x2)          continue;
+            if (identifier._type == cast(*Type_Info) u64x3)          continue;
+            if (identifier._type == cast(*Type_Info) u64x4)          continue;
+            if (identifier._type == cast(*Type_Info) f32)            continue;
+            if (identifier._type == cast(*Type_Info) f32x2)          continue;
+            if (identifier._type == cast(*Type_Info) f32x3)          continue;
+            if (identifier._type == cast(*Type_Info) f32x4)          continue;
+            if (identifier._type == cast(*Type_Info) f32x2x2)        continue;
+            if (identifier._type == cast(*Type_Info) f32x3x3)        continue;
+            if (identifier._type == cast(*Type_Info) f32x4x4)        continue;
             if (identifier._type == cast(*Type_Info) __Image__)      continue;
             if (identifier._type == cast(*Type_Info) __Sampler__)    continue;
 
@@ -1363,23 +1376,23 @@ CompilationData :: struct {
 CalculateLocationsConsumed :: (T: Type) -> int {
    Helper :: (type: Type, accumulator: *int) {
       if type == {
-         case s32;    accumulator.* += 1; return;
-         case s32x2;  accumulator.* += 1; return;
-         case s32x3;  accumulator.* += 1; return;
-         case s32x4;  accumulator.* += 1; return;
-         case u32;   accumulator.* += 1; return;
-         case u32x2; accumulator.* += 1; return;
-         case u32x3; accumulator.* += 1; return;
-         case u32x4; accumulator.* += 1; return;
-         case s64;    accumulator.* += 1; return;
-         case s64x2;  accumulator.* += 1; return;
-         case s64x3;  accumulator.* += 2; return;
-         case s64x4;  accumulator.* += 2; return;
-         case u64;   accumulator.* += 1; return;
-         case u64x2; accumulator.* += 1; return;
-         case u64x3; accumulator.* += 2; return;
-         case u64x4; accumulator.* += 2; return;
-         case f32;    accumulator.* += 1; return;
+         case s32;     accumulator.* += 1; return;
+         case s32x2;   accumulator.* += 1; return;
+         case s32x3;   accumulator.* += 1; return;
+         case s32x4;   accumulator.* += 1; return;
+         case u32;     accumulator.* += 1; return;
+         case u32x2;   accumulator.* += 1; return;
+         case u32x3;   accumulator.* += 1; return;
+         case u32x4;   accumulator.* += 1; return;
+         case s64;     accumulator.* += 1; return;
+         case s64x2;   accumulator.* += 1; return;
+         case s64x3;   accumulator.* += 2; return;
+         case s64x4;   accumulator.* += 2; return;
+         case u64;     accumulator.* += 1; return;
+         case u64x2;   accumulator.* += 1; return;
+         case u64x3;   accumulator.* += 2; return;
+         case u64x4;   accumulator.* += 2; return;
+         case f32;     accumulator.* += 1; return;
          case f32x2;   accumulator.* += 1; return;
          case f32x3;   accumulator.* += 1; return;
          case f32x4;   accumulator.* += 1; return;
@@ -1399,7 +1412,7 @@ CalculateLocationsConsumed :: (T: Type) -> int {
       }
 
       // if i reached here then it means there is a member with a weird type
-      assert(false, "type: %\n", type);
+      assert(false, "if it is bool then it is not allowed. you need to pass an int or something. type: %\n", type);
    }
 
    result := 0;
@@ -2315,6 +2328,47 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             print_to_builder(b, "\%% = OpISub \%% \%% \%%\n", result, resultType, operand1, operand2);
          }
 
+         case .SLessThan; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpSLessThan \%% \%% \%%\n", result, resultType, operand1, operand2);
+         }
+
+         case .SConvert; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand    := operands[2].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpSConvert \%% \%%\n", result, resultType, operand);
+         }
+
+         case .UConvert; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand    := operands[2].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "\%% = OpUConvert \%% \%%\n", result, resultType, operand);
+         }
+
          case; assert(false, "not yet implemented! op: %", op);
       }
    } else #if SPIRV_BUILDER_TYPE == .Byte {
@@ -3155,6 +3209,47 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand1, cast(u32) operand2);
          }
 
+         case .SLessThan; {
+            assert(operands.count == 4);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand1   := operands[2].value_pointer.(*SSAId).*;
+            operand2   := operands[3].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand1, cast(u32) operand2);
+         }
+
+         case .SConvert; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand    := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand);
+         }
+
+         case .UConvert; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand    := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand);
+         }
+
          case; assert(false, "not yet implemented! op: %", op);
       }
    } else {
@@ -3292,6 +3387,57 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
          type := identifier._type;
 
          // intrinsics
+         if (type == cast(*Type_Info) bool) {
+            WriteSingleInstruction(
+               b,
+               .TypeBool,
+               GetSSAId(data, identifier)
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) bool2) {
+            boolIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) bool };
+            WriteTypeOrVariableOrConstant(data, b, boolIdentifier);
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, boolIdentifier),
+               2
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) bool3) {
+            boolIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) bool };
+            WriteTypeOrVariableOrConstant(data, b, boolIdentifier);
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, boolIdentifier),
+               3
+            );
+            return;
+         }
+
+         if (type == cast(*Type_Info) bool4) {
+            boolIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) bool };
+            WriteTypeOrVariableOrConstant(data, b, boolIdentifier);
+
+            WriteSingleInstruction(
+               b,
+               .TypeVector,
+               GetSSAId(data, identifier),
+               GetSSAId(data, boolIdentifier),
+               4
+            );
+            return;
+         }
+
          if (type == cast(*Type_Info) s32) {
             WriteSingleInstruction(
                b,
@@ -3594,15 +3740,6 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                GetSSAId(data, float4Identifier),
                4
-            );
-            return;
-         }
-
-         if (type == cast(*Type_Info) bool) {
-            WriteSingleInstruction(
-               b,
-               .TypeBool,
-               GetSSAId(data, identifier)
             );
             return;
          }
@@ -4581,6 +4718,54 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          cbo := cast(*Code_Binary_Operator) node;
 
          if cbo.operator_type == {
+            case #char "<"; {
+               found1, rightType := table_find(*data.codeNodeTypes, cbo.right);
+               assert(found1);
+               found2, leftType := table_find(*data.codeNodeTypes, cbo.left);
+               assert(found2);
+
+               assert(CompareType(leftType, rightType), "not yet implemented!");
+               type := leftType;
+
+               resultSSAId := GetNextSSAId(data);
+
+               leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ literalShouldHaveBeenType = leftType });
+               rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ literalShouldHaveBeenType = rightType });
+
+               if (type == cast(*Type_Info) s32   ||
+                   type == cast(*Type_Info) s32x2 ||
+                   type == cast(*Type_Info) s32x3 ||
+                   type == cast(*Type_Info) s32x4 ||
+                   type == cast(*Type_Info) s64   ||
+                   type == cast(*Type_Info) s64x2 ||
+                   type == cast(*Type_Info) s64x3 ||
+                   type == cast(*Type_Info) s64x4) {
+                  resultType: *Type_Info;
+                  #if (false) {}
+                  else if (type == cast(*Type_Info) s32)   resultType = cast(*Type_Info) bool;
+                  else if (type == cast(*Type_Info) s32x2) resultType = cast(*Type_Info) bool2;
+                  else if (type == cast(*Type_Info) s32x3) resultType = cast(*Type_Info) bool3;
+                  else if (type == cast(*Type_Info) s32x4) resultType = cast(*Type_Info) bool4;
+                  else if (type == cast(*Type_Info) s64)   resultType = cast(*Type_Info) bool;
+                  else if (type == cast(*Type_Info) s64x2) resultType = cast(*Type_Info) bool2;
+                  else if (type == cast(*Type_Info) s64x3) resultType = cast(*Type_Info) bool3;
+                  else if (type == cast(*Type_Info) s64x4) resultType = cast(*Type_Info) bool4;
+
+                  WriteSingleInstruction(
+                     function,
+                     .SLessThan,
+                     GetSSAId(data, .{ type = ._Type, _type = resultType }),
+                     resultSSAId,
+                     leftSSAId,
+                     rightSSAId
+                  );
+               } else {
+                  assert(false, "not yet implemented!");
+               }
+
+               return resultSSAId, .{};
+            }
+
             case .ARRAY_SUBSCRIPT; #through;
             case #char ".";
                lValueSSAId, typeIdentifier, baseVariableData := DoDotsAndArraySubscripts(data, function, cbo, currentFunction, additionalData.accessChainBaseArrayElementTypeIfImageHeap);
@@ -5004,15 +5189,44 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          cc := cast(*Code_Cast) node;
          found, castTo := table_find(*data.codeNodeTypes, node);
          assert(found);
+         found2, castFrom := table_find(*data.codeNodeTypes, cc.expression);
+         assert(found2);
 
          expressionSSAId, _ := GenerateInstructions(data, cc.expression, general, function, currentFunction);
 
          castToIdentifier: Identifier = .{ type = ._Type, _type = castTo };
+         castFromIdentifier: Identifier = .{ type = ._Type, _type = castFrom };
 
          resultSSAId := GetNextSSAId(data);
+         op: SpvOp;
+
+         if (castTo.runtime_size == castFrom.runtime_size) {
+            op = .Bitcast;
+         } else if (castFrom == cast(*Type_Info) s32   ||
+                    castFrom == cast(*Type_Info) s32x2 ||
+                    castFrom == cast(*Type_Info) s32x3 ||
+                    castFrom == cast(*Type_Info) s32x4 ||
+                    castFrom == cast(*Type_Info) s64   ||
+                    castFrom == cast(*Type_Info) s64x2 ||
+                    castFrom == cast(*Type_Info) s64x3 ||
+                    castFrom == cast(*Type_Info) s64x4) {
+            op = .SConvert;
+         } else if (castFrom == cast(*Type_Info) u32   ||
+                    castFrom == cast(*Type_Info) u32x2 ||
+                    castFrom == cast(*Type_Info) u32x3 ||
+                    castFrom == cast(*Type_Info) u32x4 ||
+                    castFrom == cast(*Type_Info) u64   ||
+                    castFrom == cast(*Type_Info) u64x2 ||
+                    castFrom == cast(*Type_Info) u64x3 ||
+                    castFrom == cast(*Type_Info) u64x4) {
+            op = .UConvert;
+         } else {
+            assert(false, "not yet implemented! castTo: %, castFrom: %", castTo.*, castFrom.*);
+         }
+
          WriteSingleInstruction(
             function,
-            .Bitcast,
+            op,
             GetSSAId(data, castToIdentifier),
             resultSSAId,
             expressionSSAId
@@ -5116,6 +5330,8 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
             case #char "-"; #through;
             case #char "*"; #through;
             case #char "/"; #through;
+            case #char "<"; #through;
+            case #char ">"; #through;
             case #char "%";
                rightType := DetermineCodeNodeTypes(data, cbo.right);
                leftType := DetermineCodeNodeTypes(data, cbo.left);
@@ -5285,6 +5501,29 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          // return statement doesnt have any type
          TableAddIfNotExists(*data.codeNodeTypes, node, cast(*Type_Info) void);
          return cast(*Type_Info) void;
+
+      case .IF; {
+         ci := cast(*Code_If) node;
+         assert(!(ci.if_flags & .IS_SWITCH_STATEMENT), "not yet implemented!");
+         assert(!(ci.if_flags & .IS_IFX), "not yet implemented!");
+         assert(!(ci.if_flags & .IS_STATIC), "not yet implemented!");
+
+         if (ci.condition != null) {
+            DetermineCodeNodeTypes(data, ci.condition);
+         }
+
+         if (ci.then_block != null) {
+            DetermineCodeNodeTypes(data, ci.then_block);
+         }
+
+         if (ci.else_block != null) {
+            DetermineCodeNodeTypes(data, ci.else_block);
+         }
+
+         // this prolly needs to change when i support ifx     - apila, 07/05/26
+         TableAddIfNotExists(*data.codeNodeTypes, node, cast(*Type_Info) void);
+         return cast(*Type_Info) void;
+      }
 
       case; assert(false, "kind: %", node.kind);
    }
