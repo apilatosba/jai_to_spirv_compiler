@@ -894,6 +894,8 @@ Identifier :: struct {
    };
 
    using value: union {
+      // store Type_Info_Integer + value instead?
+      //    - apila, 06/05/26
       intLiteral:                   struct {
                                        unsigned:   bool;
                                        value:      union {
@@ -4280,11 +4282,7 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
 }
 
 GenerateInstructionsData :: struct {
-   literal:                                     struct {
-                                                   intLiteralBitSize:            int = 64;
-                                                   intLiteralUnsigned:           bool = false;
-                                                   autoCastFromIntToFloat:       bool = false;
-                                                };
+   literalShouldHaveBeenType:                   *Type_Info;
    isLValue:                                    bool     = false; // maybe i should have two functions GenerateAddress and GenerateExpression instead of single GenerateInstructions function and a lvalue boolean like this. idk man. - apila, 15/04/26
    accessChainBaseArrayElementTypeIfImageHeap:  *TypeInfoImage;
 }
@@ -4381,32 +4379,90 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          }
          return 0, .{};
 
+      // i think im dumb.
+      // i dont need to do any of the int literal bit size additional data thingies.
+      // jai already provides it dumbass. Type_Info.runtime_size. for some reason i thought it doesnt work with literals.
+      // it does. it even works from int to float. so no need any of the autoCastFromIntToFloat either.
+      //    f: f32x4;
+      //    f.x = 5;
+      //          |
+      //         type of this literal is float.
+      //
+      // so everything works fine. i dont need to do anything except to use data that jai already provides.
+      //
+      // wrong.
+      // this doesnt work with struct literals:
+      //    f: f32x4;
+      //    f = .{ 1, 2, 3, 4 };
+      //
+      // all off the 1, 2, 3, 4 gets reported as 64bit integer.
+      //
+      // yea the above thing is kaputt. what you need to do is:
+      // pass the "literal should have been type" and in whatever form jai stored it cast/convert from there to the "literal should have been type"
+      // because the form jai reports is not consistent.
+      //    - apila, 06/05/26
       case .LITERAL;
+         assert(additionalData.literalShouldHaveBeenType != null, "implement.");
          cl := cast(*Code_Literal) node;
+
+         found, type := table_find(*data.codeNodeTypes, node);
+         assert(found);
+
          if cl.value_type == {
             case .NUMBER;
-               isFloat := cl.value_flags & .FLOAT || additionalData.literal.autoCastFromIntToFloat;
+               if (type.type == .FLOAT) {
+                  // jai doesnt allow casting from float to int so shouldHaveBeenType must also be float
+                  assert(additionalData.literalShouldHaveBeenType.type == .FLOAT);
 
-               if (isFloat) {
-                  identifier: Identifier = .{ type = .FloatLiteral };
-                  if (additionalData.literal.autoCastFromIntToFloat) {
-                     identifier.floatLiteral = xx cl._s64;
+                  identifier: Identifier = .{ type = .FloatLiteral, floatLiteral = xx cl._float64 };
+                  return GetSSAId(data, identifier), identifier;
+               } else if (type.type == .INTEGER) {
+                  assert(type.runtime_size == 4 || type.runtime_size == 8, "type.runtime_size: %, not implemented yet!", type.runtime_size);
+                  tii := cast(*Type_Info_Integer) type;
+                  identifier: Identifier;
+
+                  if (additionalData.literalShouldHaveBeenType.type == .INTEGER) {
+                     // integer to integer
+
+                     tiiShouldHaveBeen := cast(*Type_Info_Integer) additionalData.literalShouldHaveBeenType;
+                     BYTE_SIZE :: 8;
+                     identifier = .{ type = .IntLiteral, intLiteral = .{ bitSize = additionalData.literalShouldHaveBeenType.runtime_size * BYTE_SIZE, unsigned = !tiiShouldHaveBeen.signed } };
+
+                     if (tii.signed) {
+                        if (tiiShouldHaveBeen.signed) {
+                           // s64 to s64
+                           identifier.intLiteral.value._s64 = cl._s64;
+                        } else {
+                           // s64 to u64
+                           identifier.intLiteral.value._u64 = xx cl._s64;
+                        }
+                     } else {
+                        if (tiiShouldHaveBeen.signed) {
+                           // u64 to s64
+                           identifier.intLiteral.value._s64 = xx cl._u64;
+                        } else {
+                           // u64 to u64
+                           identifier.intLiteral.value._u64 = cl._u64;
+                        }
+                     }
+                  } else if (additionalData.literalShouldHaveBeenType.type == .FLOAT) {
+                     // integer to float
+
+                     tifShouldHaveBeen := cast(*Type_Info_Float) additionalData.literalShouldHaveBeenType;
+                     identifier = .{ type = .FloatLiteral };
+
+                     if (tii.signed) {
+                        identifier.floatLiteral = xx cl._s64;
+                     } else {
+                        identifier.floatLiteral = xx cl._u64;
+                     }
                   } else {
-                     identifier.floatLiteral = xx cl._float64;
+                     assert(false);
                   }
 
                   return GetSSAId(data, identifier), identifier;
                } else {
-                  assert(additionalData.literal.intLiteralBitSize == 32 || additionalData.literal.intLiteralBitSize == 64, "additionalData.literal.intLiteralBitSize: %, not implemented yet!", additionalData.literal.intLiteralBitSize);
-
-                  identifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ bitSize = additionalData.literal.intLiteralBitSize, unsigned = additionalData.literal.intLiteralUnsigned } };
-                  if (additionalData.literal.intLiteralUnsigned) {
-                     identifier.intLiteral.value._u64 = cl._u64;
-                  } else {
-                     identifier.intLiteral.value._s64 = cl._s64;
-                  }
-
-                  return GetSSAId(data, identifier), identifier;
+                  assert(false, "type: %", type.type);
                }
 
             // TODO
@@ -4432,9 +4488,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                      found, argumentNodeType := table_find(*data.codeNodeTypes, it);
                      assert(found);
 
-                     argumentAdditionalData := GetAutoCastAdditionalData(tis.members[it_index].type, argumentNodeType);
-
-                     _, argumentIdentifier := GenerateInstructions(data, it, general, function, currentFunction, argumentAdditionalData);
+                     shouldHaveBeenType := ConvertJaiTypeIfNecessary(tis.members[it_index].type, tis.members[it_index].notes);
+                     _, argumentIdentifier := GenerateInstructions(data, it, general, function, currentFunction, .{ literalShouldHaveBeenType = shouldHaveBeenType });
                      assert(argumentIdentifier.type != .Invalid, "struct: %, index: %, loc: %:%", tis.name, it_index, node.c0, node.l0);
 
                      heapCopy := New(Identifier);
@@ -4455,10 +4510,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                      found, argumentNodeType := table_find(*data.codeNodeTypes, it);
                      assert(found);
 
-                     argumentAdditionalData := GetAutoCastAdditionalData(tis.members[it_index].type, argumentNodeType);
+                     shouldHaveBeenType := ConvertJaiTypeIfNecessary(tis.members[it_index].type, tis.members[it_index].notes);
 
                      // argumentIdentifier doesnt have any value if "it" is not a literal
-                     argumentSSAId, argumentIdentifier := GenerateInstructions(data, it, general, function, currentFunction, argumentAdditionalData);
+                     argumentSSAId, argumentIdentifier := GenerateInstructions(data, it, general, function, currentFunction, .{ literalShouldHaveBeenType = shouldHaveBeenType });
 
                      array_add(*operands, ac(argumentSSAId));
                   }
@@ -4533,8 +4588,26 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                found2, rightType := table_find(*data.codeNodeTypes, cbo.right);
                assert(found2);
 
-               leftId := GenerateInstructions(data, cbo.left, general, function, currentFunction);
-               rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction);
+               //
+               // in some cases the jai compiler converts the type, sometimes it doesnt.
+               // in the following it does report the type of literal as float:
+               //    f: f32x4;
+               //    f.x = f.y + 4;
+               //
+               // but in the following it reports as s64:
+               //    f: f32x4;
+               //    f = .{ -1, -1, 0.5, 1 }
+               //
+               // so below i say the type of the node itself but i dont think thats always going to turn out to be true.
+               // the good thing is that the validator can spot this mistake, so as long as i validate the output im fine.
+               // if something doesnt work then i will inspect and fix it, not now.
+               //
+               //       - apila, 07/05/26
+               //
+
+               // not sure about literalShouldHaveBeenTypes here
+               leftId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ literalShouldHaveBeenType = leftType });
+               rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ literalShouldHaveBeenType = rightType });
 
                resultSSAId := GetNextSSAId(data);
 
@@ -4594,7 +4667,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                      "cbo.left.kind: %", cbo.left.kind
                );
 
-               rightId, rightIdentifier := GenerateInstructions(data, cbo.right, general, function, currentFunction);
+               found, leftType := table_find(*data.codeNodeTypes, cbo.left);
+               assert(found);
+
+               rightId, rightIdentifier := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ literalShouldHaveBeenType = leftType });
                leftId, _ := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ isLValue = true });
 
                WriteSingleInstruction(
@@ -4617,6 +4693,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                 "kind: %", procedureExpression.kind
          );
 
+         header := GetHeaderFromCodeProcedureCall(cpc);
 
          identifierExpression: *Code_Ident;
          if (procedureExpression.kind == .IDENT) {
@@ -4645,8 +4722,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             vertexCountExpression := arguments[0].expression;
             primitiveCountExpression := arguments[1].expression;
 
-            vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, general, function, currentFunction, additionalData = .{ literal = .{ intLiteralBitSize = 32, intLiteralUnsigned = true } });
-            primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, general, function, currentFunction, additionalData = .{ literal = .{ intLiteralBitSize = 32, intLiteralUnsigned = true } });
+            // literalShouldHaveBeenType is needed here. meanign that i cant use node.type as literalShouldHaveBeenType. because jai reports literals as s64.
+            // it doesnt do the conversion here. in direct assign it does tho.
+            //    - apila, 07/05/26
+            vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, general, function, currentFunction, .{ literalShouldHaveBeenType = header.arguments[0].type });
+            primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, general, function, currentFunction, .{ literalShouldHaveBeenType = header.arguments[1].type });
 
             WriteSingleInstruction(
                function,
@@ -4846,7 +4926,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          variableIdentifier: Identifier = .{ type = .Variable, variable.declaration = cd };
          variableSSAId := GetSSAId(data, variableIdentifier);
 
-         variableType := ConvertJaiTypeIfNecessary(cd.type, cd.notes);
+         found, variableType := table_find(*data.codeNodeTypes, node);
+         assert(found);
 
          storageClass := SpvStorageClass.Function;
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
@@ -4858,14 +4939,14 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          if (cd.expression != null) {
             if cd.expression.kind == {
                case .LITERAL; {
-                  bitSizeData: GenerateInstructionsData;
-                  BYTE_SIZE :: 8;
-
                   found, expressionType := table_find(*data.codeNodeTypes, cd.expression);
                   assert(found);
 
-                  bitSizeData.literal.intLiteralBitSize = expressionType.runtime_size * BYTE_SIZE;
-                  initializerSSAId = GenerateInstructions(data, cd.expression, general, function, currentFunction, bitSizeData);
+                  // in the declaration apperantly i dont need to explicitly say the literalShouldHaveBeenType because jai does convert in this case.
+                  // but since i cant rely on it because it looks unstable and unfinished im gonna pass the literalShouldHaveBeenType
+                  //    - apila, 07/05/26
+
+                  initializerSSAId = GenerateInstructions(data, cd.expression, general, function, currentFunction, .{ literalShouldHaveBeenType = variableType });
                }
 
                case; assert(false, "cd.expression.kind: %, not implemented yet!", cd.expression.kind);
@@ -5093,32 +5174,11 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
                 "kind: %", cpc.resolved_procedure_expression.kind
          );
 
-         GetHeaderFromCodeIdent :: (ci: *Code_Ident) -> *Code_Procedure_Header #expand {
-            assert(ci.resolved_declaration.type_inst.type_valued_expression.kind == .PROCEDURE_HEADER, "kind: %", ci.resolved_declaration.type_inst.type_valued_expression);
-            return xx ci.resolved_declaration.type_inst.type_valued_expression;
-         }
-
          for cpc.arguments_unsorted {
             DetermineCodeNodeTypes(data, it.expression);
          }
 
-         header: *Code_Procedure_Header;
-         if (cpc.resolved_procedure_expression.kind == .IDENT) {
-            ci := cast(*Code_Ident) cpc.resolved_procedure_expression;
-            header = GetHeaderFromCodeIdent(ci);
-         } else if (cpc.resolved_procedure_expression.kind == .PROCEDURE_HEADER) {
-            header = cast(*Code_Procedure_Header) cpc.resolved_procedure_expression;
-         } else if (cpc.resolved_procedure_expression.kind == .BINARY_OPERATOR) {
-            cbo := cast(*Code_Binary_Operator) cpc.resolved_procedure_expression;
-
-            assert(cbo.right.kind == .IDENT, "type: %", cbo.right.type);
-            ci := cast(*Code_Ident) cbo.right;
-
-            header = GetHeaderFromCodeIdent(ci);
-         } else {
-            assert(false);
-         }
-
+         header := GetHeaderFromCodeProcedureCall(cpc);
          assert(header.returns.count <= 1, "multiple returns not yet implemented! count: %", header.returns.count);
 
          if (header.returns.count == 0) {
@@ -5194,6 +5254,32 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
    assert(false, "didnt return! kind: %", node.kind);
    return null;
+}
+
+GetHeaderFromCodeProcedureCall :: (cpc: *Code_Procedure_Call) -> *Code_Procedure_Header {
+   GetHeaderFromCodeIdent :: (ci: *Code_Ident) -> *Code_Procedure_Header #expand {
+      assert(ci.resolved_declaration.type_inst.type_valued_expression.kind == .PROCEDURE_HEADER, "kind: %", ci.resolved_declaration.type_inst.type_valued_expression);
+      return xx ci.resolved_declaration.type_inst.type_valued_expression;
+   }
+
+   header: *Code_Procedure_Header;
+   if (cpc.resolved_procedure_expression.kind == .IDENT) {
+      ci := cast(*Code_Ident) cpc.resolved_procedure_expression;
+      header = GetHeaderFromCodeIdent(ci);
+   } else if (cpc.resolved_procedure_expression.kind == .PROCEDURE_HEADER) {
+      header = cast(*Code_Procedure_Header) cpc.resolved_procedure_expression;
+   } else if (cpc.resolved_procedure_expression.kind == .BINARY_OPERATOR) {
+      cbo := cast(*Code_Binary_Operator) cpc.resolved_procedure_expression;
+
+      assert(cbo.right.kind == .IDENT, "type: %", cbo.right.type);
+      ci := cast(*Code_Ident) cbo.right;
+
+      header = GetHeaderFromCodeIdent(ci);
+   } else {
+      assert(false);
+   }
+
+   return header;
 }
 
 // jblow said on discord that he will move the alignment field from Code_Struct to Type_Info_Struct. so i can properly implement this function
@@ -5322,50 +5408,6 @@ Load :: (data: *CompilationData, b: *BuilderType, typeIdentifier: Identifier, lV
    );
 
    return dereferencedSSAId;
-}
-
-GetAutoCastAdditionalData :: (memberType: *Type_Info, literalNodeType: *Type_Info) -> GenerateInstructionsData {
-   additionalData: GenerateInstructionsData;
-
-   // wait a minute. i think i dont need to handle the casts manually like this.
-   // becasue there is Code_Cast user needs to cast the type manually anyways.
-   // unless you go from 64 bit to 32 bit. idk
-   //             - apila, 14/04/26
-   //
-   //
-   // doing this autocast thingy only on literals because thats the behaivour of jai
-   // and i want to keep the same behaviour. for example following works on jai:
-   //
-   //    f: float = -1;
-   //
-   // but the following doesnt work in jai:
-   //
-   //    i: int = -1;
-   //    f: float = i; // this is an error
-   //
-   // so i am only doing the autocast if the node is a Code_Literal, otherwise additionalData will not be used
-   // and additional data is not recursed in GenerateInstructions function
-   //       - apila, 18/04/26
-   additionalData.literal.autoCastFromIntToFloat = memberType.type == .FLOAT && literalNodeType.type == .INTEGER;
-
-   if (memberType.type == .INTEGER) {
-      if (false) {
-      } else if (memberType == cast(*Type_Info) s32) {
-         additionalData.literal.intLiteralBitSize = 32;
-         additionalData.literal.intLiteralUnsigned = false;
-      } else if (memberType == cast(*Type_Info) u32) {
-         additionalData.literal.intLiteralBitSize = 32;
-         additionalData.literal.intLiteralUnsigned = true;
-      } else if (memberType == cast(*Type_Info) s64) {
-         additionalData.literal.intLiteralBitSize = 64;
-         additionalData.literal.intLiteralUnsigned = false;
-      } else if (memberType == cast(*Type_Info) u64) {
-         additionalData.literal.intLiteralBitSize = 64;
-         additionalData.literal.intLiteralUnsigned = true;
-      }
-   }
-
-   return additionalData;
 }
 
 // this function is used to determine whether i should use OpConstantComposite or OpCompositeConstruct
@@ -5662,12 +5704,9 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
 
          case .ARRAY;
             // in case it is a literal then it should be 32 bit signed i think (thats what glslangValidator generates)
-            additionalData: GenerateInstructionsData = .{
-               literal.intLiteralBitSize = 32,
-               literal.intLiteralUnsigned = false,
-            };
+            // it doesnt need to be 32bit, 64bit also valid but why waste two words for this if one word is enough.
 
-            ssaId, _ := GenerateInstructions(data, it.right, null, b, currentFunction, additionalData);
+            ssaId, _ := GenerateInstructions(data, it.right, null, b, currentFunction, .{ literalShouldHaveBeenType = cast(*Type_Info) s32 });
             array_add(*indices, ssaId);
 
          case TYPE_INFO_POINTER_TAG;
