@@ -1355,6 +1355,11 @@ CompilationData :: struct {
    shaderType:                               ShaderType;
    entryFunction:                            *Code_Procedure_Header;
    extraTypeDependencies:                    Table(Identifier, [..] Identifier, IdentifierHash, IdentifierCompare);
+   currentLoopData:                          LoopData;
+   isBlockReachable:                         bool = true;   // this is a flag that keep tracks if a block terminating instruction has been seen in the block we are compiling.
+                                                            // this flag is reset every time we start a new block.
+                                                            // if you want to parallelize the compiler then you should store this per thread in a tls (thats easy with ApilaDispatch).
+                                                            //    - apila, 09/05/26
 
 
    HashStringArray :: (x: [] string) -> u32 {
@@ -1370,6 +1375,14 @@ CompilationData :: struct {
 
       return true;
    }
+}
+
+LoopData :: struct {
+   headerLabelSSAId:       SSAId;
+   conditionLabelSSAId:    SSAId;
+   bodyLabelSSAId:         SSAId;
+   continueLabelSSAId:     SSAId;
+   mergeLabelSSAId:        SSAId;
 }
 
 // in depth first order
@@ -1467,6 +1480,41 @@ AppendAndStealBuffers :: (builder: *BuilderType, stealFrom: *BuilderType) {
    } else {
       #assert(false, "not implemented yet! type: %", SPIRV_BUILDER_TYPE);
    }
+}
+
+IsBranchInstruction :: inline (op: SpvOp) -> bool {
+   if op == {
+      case .BranchConditional; return true;
+      case .Branch;            return true;
+      case .Switch;            return true;
+      case; return false;
+   }
+}
+
+IsFunctionTerminationInstruction :: inline (op: SpvOp) -> bool {
+   if op == {
+      case .Return;              return true;
+      case .ReturnValue;         return true;
+      case .Kill;                return true;
+      case .Unreachable;         return true;
+      case .TerminateInvocation; return true;
+      case; return false;
+   }
+}
+
+IsBlockTerminationInstruction :: inline (op: SpvOp) -> bool {
+   return IsBranchInstruction(op) || IsFunctionTerminationInstruction(op);
+}
+
+WriteSingleInstructionIfReachable :: (b: *BuilderType, blockReachableFlag: *bool, op: SpvOp, operands: ..Any) {
+   if (op == .Label) blockReachableFlag.* = true;
+   if (!blockReachableFlag.*) return;
+
+   defer if (IsBlockTerminationInstruction(op)) {
+      blockReachableFlag.* = false;
+   }
+
+   WriteSingleInstruction(b, op, .. operands);
 }
 
 WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
@@ -4420,8 +4468,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
       );
 
       // idk what to do with the label rn
-      WriteSingleInstruction(
+      WriteSingleInstructionIfReachable(
          b,
+         *data.isBlockReachable,
          .Label,
          GetNextSSAId(data)
       );
@@ -4440,7 +4489,7 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
       GenerateInstructions(data, block, b, *functionBuilder, header);
       AppendAndStealBuffers(b, *functionBuilder);
 
-      WriteSingleInstruction(b, .Return);
+      WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .Return);
       WriteSingleInstruction(b, .FunctionEnd);
    }
 
@@ -4480,7 +4529,7 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
       AppendAndStealBuffers(b, *functionBuilder);
 
       if (header.returns.count == 0) {
-         WriteSingleInstruction(b, .Return);
+         WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .Return);
       }
 
       WriteSingleInstruction(b, .FunctionEnd);
@@ -4530,7 +4579,6 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
       case .DIRECTIVE_CONTEXT_TYPE;
          assert(false, "code node kind: %. not valid.", node.kind);
 
-      case .LOOP_CONTROL;              #through;
       case .PROCEDURE_HEADER;          #through;
       case .EXTRACT;                   #through;
       case .MAKE_VARARGS;              #through;
@@ -4724,14 +4772,22 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                      array_add(*operands, ac(argumentSSAId));
                   }
 
-                  WriteSingleInstruction(
+                  WriteSingleInstructionIfReachable(
                      function,
+                     *data.isBlockReachable,
                      .CompositeConstruct,
                      .. operands
                   );
 
                   return resultSSAId, .{};
                }
+
+            case .BOOLEAN; {
+               identifier: Identifier = .{ type = .BoolLiteral };
+               identifier.boolLiteral = cl._u64 != 0;
+
+               return GetSSAId(data, identifier), identifier;
+            }
 
             case; assert(false, "cl.value_type: %\n", cl.value_type);
          }
@@ -4794,8 +4850,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                   else if (type == cast(*Type_Info) s64x3) resultType = cast(*Type_Info) bool3;
                   else if (type == cast(*Type_Info) s64x4) resultType = cast(*Type_Info) bool4;
 
-                  WriteSingleInstruction(
+                  WriteSingleInstructionIfReachable(
                      function,
+                     *data.isBlockReachable,
                      .SLessThan,
                      GetSSAId(data, .{ type = ._Type, _type = resultType }),
                      resultSSAId,
@@ -4873,8 +4930,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                    type == cast(*Type_Info) f32x3 ||
                    type == cast(*Type_Info) f32x4) {
                   op := GetFloatOpFromOperatorType(cbo.operator_type);
-                  WriteSingleInstruction(
+                  WriteSingleInstructionIfReachable(
                      function,
+                     *data.isBlockReachable,
                      op,
                      GetSSAId(data, typeIdentifier),
                      resultSSAId,
@@ -4898,8 +4956,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                           type == cast(*Type_Info) u64x3 ||
                           type == cast(*Type_Info) u64x4) {
                   op := GetIntegerOpFromOperatorType(cbo.operator_type);
-                  WriteSingleInstruction(
+                  WriteSingleInstructionIfReachable(
                      function,
+                     *data.isBlockReachable,
                      op,
                      GetSSAId(data, typeIdentifier),
                      resultSSAId,
@@ -4927,8 +4986,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                rightId, rightIdentifier := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ literalShouldHaveBeenType = leftType });
                leftId, _ := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ isLValue = true });
 
-               WriteSingleInstruction(
+               WriteSingleInstructionIfReachable(
                   function,
+                  *data.isBlockReachable,
                   .Store,
                   leftId,
                   rightId
@@ -4982,8 +5042,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, general, function, currentFunction, .{ literalShouldHaveBeenType = header.arguments[0].type });
             primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, general, function, currentFunction, .{ literalShouldHaveBeenType = header.arguments[1].type });
 
-            WriteSingleInstruction(
+            WriteSingleInstructionIfReachable(
                function,
+               *data.isBlockReachable,
                .SetMeshOutputsEXT,
                vertexCountSSAId,
                primitiveCountSSAId
@@ -5011,8 +5072,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
 
             sampledImageSSAId := GetNextSSAId(data);
 
-            WriteSingleInstruction(
+            WriteSingleInstructionIfReachable(
                function,
+               *data.isBlockReachable,
                .SampledImage,
                GetSSAId(data, .{ type = ._Type, _type = sampledImageType }),
                sampledImageSSAId,
@@ -5021,8 +5083,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             );
 
             sampledValueSSAId := GetNextSSAId(data);
-            WriteSingleInstruction(
+            WriteSingleInstructionIfReachable(
                function,
+               *data.isBlockReachable,
                .ImageSampleImplicitLod,
                GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) f32x4 }),
                sampledValueSSAId,
@@ -5035,8 +5098,30 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
 
          assert(false, "not yet implemented! name: %", identifierName);
 
+      case .LOOP_CONTROL;
+         clc := cast(*Code_Loop_Control) node;
+
+         if clc.control_type == {
+            case .BREAK; {
+               assert(clc.target_ident == null, "not yet implemented! i think this means `break loop_variable;`.");
+
+               WriteSingleInstructionIfReachable(
+                  function,
+                  *data.isBlockReachable,
+                  .Branch,
+                  data.currentLoopData.mergeLabelSSAId
+               );
+
+               return 99999999, .{};
+            }
+            case; assert(false, "not yet implemented! type: %", clc.control_type);
+         }
+
       case .WHILE;
          cw := cast(*Code_While) node;
+
+         found, conditionType := table_find(*data.codeNodeTypes, cw.condition);
+         assert(found);
 
          headerLabelSSAId := GetNextSSAId(data);
          conditionLabelSSAId := GetNextSSAId(data);
@@ -5044,36 +5129,46 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          continueLabelSSAId := GetNextSSAId(data);
          mergeLabelSSAId := GetNextSSAId(data);
 
-         WriteSingleInstruction(function, .Branch, headerLabelSSAId);
-         WriteSingleInstruction(function, .Label, headerLabelSSAId);
+         data.currentLoopData = .{
+            headerLabelSSAId     = headerLabelSSAId,
+            conditionLabelSSAId  = conditionLabelSSAId,
+            bodyLabelSSAId       = bodyLabelSSAId,
+            continueLabelSSAId   = continueLabelSSAId,
+            mergeLabelSSAId      = mergeLabelSSAId,
+         };
 
-         WriteSingleInstruction(
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, headerLabelSSAId);
+
+         WriteSingleInstructionIfReachable(
             function,
+            *data.isBlockReachable,
             .LoopMerge,
             mergeLabelSSAId,
             continueLabelSSAId,
             SpvLoopControlMask.MaskNone
          );
 
-         WriteSingleInstruction(function, .Branch, conditionLabelSSAId);
-         WriteSingleInstruction(function, .Label, conditionLabelSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, conditionLabelSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, conditionLabelSSAId);
 
-         conditionSSAId := GenerateInstructions(data, cw.condition, general, function, currentFunction);
-         WriteSingleInstruction(
+         conditionSSAId := GenerateInstructions(data, cw.condition, general, function, currentFunction, .{ literalShouldHaveBeenType = conditionType });
+         WriteSingleInstructionIfReachable(
             function,
+            *data.isBlockReachable,
             .BranchConditional,
             conditionSSAId,
             bodyLabelSSAId,
             mergeLabelSSAId
          );
 
-         WriteSingleInstruction(function, .Label, bodyLabelSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, bodyLabelSSAId);
 
          GenerateInstructions(data, cw.block, general, function, currentFunction);
-         WriteSingleInstruction(function, .Branch, continueLabelSSAId);
-         WriteSingleInstruction(function, .Label, continueLabelSSAId);
-         WriteSingleInstruction(function, .Branch, headerLabelSSAId);
-         WriteSingleInstruction(function, .Label, mergeLabelSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, continueLabelSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
 
          return 999999, .{};
 
@@ -5092,49 +5187,56 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          endLabelSSAId := GetNextSSAId(data);
          elseLabelSSAId := ifx ci.else_block == null then endLabelSSAId else GetNextSSAId(data);
 
-         WriteSingleInstruction(
+         WriteSingleInstructionIfReachable(
             function,
+            *data.isBlockReachable,
             .SelectionMerge,
             endLabelSSAId,
             SpvSelectionControlMask.MaskNone
          );
 
-         WriteSingleInstruction(
+         WriteSingleInstructionIfReachable(
             function,
+            *data.isBlockReachable,
             .BranchConditional,
             conditionSSAId,
             thenLabelSSAId,
             elseLabelSSAId
          );
 
-         WriteSingleInstruction(
+         WriteSingleInstructionIfReachable(
             function,
+            *data.isBlockReachable,
             .Label,
             thenLabelSSAId
          );
          GenerateInstructions(data, ci.then_block, general, function, currentFunction);
-         WriteSingleInstruction(
+         WriteSingleInstructionIfReachable(
             function,
+            *data.isBlockReachable,
             .Branch,
             endLabelSSAId
          );
 
          if (ci.else_block != null) {
-            WriteSingleInstruction(
+            WriteSingleInstructionIfReachable(
                function,
+               *data.isBlockReachable,
                .Label,
                elseLabelSSAId
             );
             GenerateInstructions(data, ci.else_block, general, function, currentFunction);
-            WriteSingleInstruction(
+            WriteSingleInstructionIfReachable(
                function,
+               *data.isBlockReachable,
                .Branch,
                endLabelSSAId
             );
          }
 
-         WriteSingleInstruction(
+         WriteSingleInstructionIfReachable(
             function,
+            *data.isBlockReachable,
             .Label,
             endLabelSSAId
          );
@@ -5143,70 +5245,35 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
 
       case .CASE;
 
-      // implemented as "if(true) return;"
       case .RETURN;
          cr := cast(*Code_Return) node;
 
-         thenLabelSSAId := GetNextSSAId(data);
-         endLabelSSAId := GetNextSSAId(data);
-         WriteSingleInstruction(
-            function,
-            .SelectionMerge,
-            endLabelSSAId,
-            SpvSelectionControlMask.MaskNone
-         );
+         if (currentFunction == data.entryFunction) {
+            if data.shaderType == {
+               case .Mesh;
+                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
 
-         WriteSingleInstruction(
-            function,
-            .BranchConditional,
-            GetSSAId(data, .{ type = .BoolLiteral, boolLiteral = true }),
-            thenLabelSSAId,
-            endLabelSSAId
-         );
+               case .Fragment;
+                  assert(cr.arguments_unsorted.count == data.fragmentOutputIdentifiers.count, "cr.arguments_unsorted.count: %, data.fragmentOutputIdentifiers.count: %", cr.arguments_unsorted.count, data.fragmentOutputIdentifiers.count);
 
-         WriteSingleInstruction(
-            function,
-            .Label,
-            thenLabelSSAId
-         );
-         {
-            if (currentFunction == data.entryFunction) {
-               if data.shaderType == {
-                  case .Mesh;
-                     WriteSingleInstruction(function, .Return);
+                  for cr.arguments_unsorted {
+                     ssaId := GenerateInstructions(data, it.expression, general, function, currentFunction);
+                     WriteSingleInstructionIfReachable(
+                        function,
+                        *data.isBlockReachable,
+                        .Store,
+                        GetSSAId(data, data.fragmentOutputIdentifiers[it_index]),
+                        ssaId
+                     );
+                  }
 
-                  case .Fragment;
-                     assert(cr.arguments_unsorted.count == data.fragmentOutputIdentifiers.count, "cr.arguments_unsorted.count: %, data.fragmentOutputIdentifiers.count: %", cr.arguments_unsorted.count, data.fragmentOutputIdentifiers.count);
+                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
 
-                     for cr.arguments_unsorted {
-                        ssaId := GenerateInstructions(data, it.expression, general, function, currentFunction);
-                        WriteSingleInstruction(
-                           function,
-                           .Store,
-                           GetSSAId(data, data.fragmentOutputIdentifiers[it_index]),
-                           ssaId
-                        );
-                     }
-
-                     WriteSingleInstruction(function, .Return);
-
-                  case; assert(false, "not yet implemented! type: %", data.shaderType);
-               }
-            } else {
-               assert(false, "not yet implemented!");
+               case; assert(false, "not yet implemented! type: %", data.shaderType);
             }
+         } else {
+            assert(false, "not yet implemented!");
          }
-
-         //
-         // no OpBranch to end label because OpReturn must come last
-         //          - apila, 03/05/26
-         //
-
-         WriteSingleInstruction(
-            function,
-            .Label,
-            endLabelSSAId
-         );
 
          return 543543, .{}; // return doesnt return any ssa id
 
@@ -5262,8 +5329,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             print_to_builder(general, "; %\n", GetVariableName(variableIdentifier));
          }
 
-         WriteSingleInstruction(
+         WriteSingleInstructionIfReachable(
             general,
+            *data.isBlockReachable,
             .Variable,
             .. operands
          );
@@ -5308,8 +5376,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             assert(false, "not yet implemented! castTo: %, castFrom: %", castTo.*, castFrom.*);
          }
 
-         WriteSingleInstruction(
+         WriteSingleInstructionIfReachable(
             function,
+            *data.isBlockReachable,
             op,
             GetSSAId(data, castToIdentifier),
             resultSSAId,
@@ -5793,8 +5862,9 @@ Load :: (data: *CompilationData, b: *BuilderType, typeIdentifier: Identifier, lV
       array_add(*operands, SpvMemoryAccessMask.AlignedMask, VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(typeIdentifier._type));
    }
 
-   WriteSingleInstruction(
+   WriteSingleInstructionIfReachable(
       b,
+      *data.isBlockReachable,
       .Load,
       .. operands
    );
@@ -6224,7 +6294,7 @@ EmitAccessChain :: (data: *CompilationData, b: *BuilderType, returnTypeIdentifie
       array_add(*operands, ac(it));
    }
 
-   WriteSingleInstruction(b, op, .. operands);
+   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, op, .. operands);
    return lValueSSAId;
 }
 
