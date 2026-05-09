@@ -4546,7 +4546,8 @@ GenerateInstructionsData :: struct {
 // returns ssaId if the "node" is something that has an id, if not then output is ignored.
 // function is to be appended to general.
 // the Identifier returned doesnt always make sense if the thing returned doesnt have an identifier. for example result of an addition operation. use ssaId instead
-GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData = .{}) -> SSAId, Identifier {
+// lValueOut: if additionalData.isLValue is false, the lvalue is returned via this pointer. if additionalData.isLValue is true then it is returned by the function
+GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData = .{}, lValueOut: *SSAId = null) -> SSAId, Identifier {
    //
    // is there a way to trigger jai compiler on some of the code nodes?
    // like for example if there is a #run inside the shader code i want to let jai do the #run and return me the result of it
@@ -4810,6 +4811,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
          deferencedSSAId := Load(data, function, variableTypeIdentifier, variableSSAId, variableStorageClass == .PhysicalStorageBuffer);
 
+         if (lValueOut != null) lValueOut.* = variableSSAId;
          return deferencedSSAId, .{};
 
       case .UNARY_OPERATOR;
@@ -4890,6 +4892,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
 
                dereferencedSSAId := Load(data, function, loadedTypeIdentifier, lValueSSAId, tip.storageClass == .PhysicalStorageBuffer);
 
+               if (lValueOut != null) lValueOut.* = lValueSSAId;
                return dereferencedSSAId, .{};
 
             case #char "-"; #through;
@@ -4920,56 +4923,39 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                leftId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ literalShouldHaveBeenType = leftType });
                rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ literalShouldHaveBeenType = rightType });
 
-               resultSSAId := GetNextSSAId(data);
+               return DoPlusOrMinus(data, function, leftType, leftId, rightType, rightId, cbo.operator_type), .{};
+            }
 
-               type := leftType;
+            // c += x;
+            // c = c + x;
+            case .PLUS_ASSIGN; {
+               assert(cbo.left.kind == .IDENT ||
+                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == #char ".") ||
+                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == .ARRAY_SUBSCRIPT),
+                     "cbo.left.kind: %", cbo.left.kind
+               );
 
-               typeIdentifier: Identifier = .{ type = ._Type, _type = type };
-               if (type == cast(*Type_Info) f32 ||
-                   type == cast(*Type_Info) f32x2 ||
-                   type == cast(*Type_Info) f32x3 ||
-                   type == cast(*Type_Info) f32x4) {
-                  op := GetFloatOpFromOperatorType(cbo.operator_type);
-                  WriteSingleInstructionIfReachable(
-                     function,
-                     *data.isBlockReachable,
-                     op,
-                     GetSSAId(data, typeIdentifier),
-                     resultSSAId,
-                     leftId,
-                     rightId
-                  );
-               } else if (type == cast(*Type_Info) s32 ||
-                          type == cast(*Type_Info) s32x2 ||
-                          type == cast(*Type_Info) s32x3 ||
-                          type == cast(*Type_Info) s32x4 ||
-                          type == cast(*Type_Info) u32 ||
-                          type == cast(*Type_Info) u32x2 ||
-                          type == cast(*Type_Info) u32x3 ||
-                          type == cast(*Type_Info) u32x4 ||
-                          type == cast(*Type_Info) s64 ||
-                          type == cast(*Type_Info) s64x2 ||
-                          type == cast(*Type_Info) s64x3 ||
-                          type == cast(*Type_Info) s64x4 ||
-                          type == cast(*Type_Info) u64 ||
-                          type == cast(*Type_Info) u64x2 ||
-                          type == cast(*Type_Info) u64x3 ||
-                          type == cast(*Type_Info) u64x4) {
-                  op := GetIntegerOpFromOperatorType(cbo.operator_type);
-                  WriteSingleInstructionIfReachable(
-                     function,
-                     *data.isBlockReachable,
-                     op,
-                     GetSSAId(data, typeIdentifier),
-                     resultSSAId,
-                     leftId,
-                     rightId
-                  );
-               } else {
-                  assert(false, "not implemented yet! type: %\n", type.*);
-               }
+               found, leftType := table_find(*data.codeNodeTypes, cbo.left);
+               assert(found);
+               found2, rightType := table_find(*data.codeNodeTypes, cbo.right);
+               assert(found2);
 
-               return resultSSAId, .{};
+               rightId, rightIdentifier := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ literalShouldHaveBeenType = leftType });
+
+               leftLValueSSAId: SSAId = U32_MAX;
+               leftRValueSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, lValueOut = *leftLValueSSAId);
+               assert(leftLValueSSAId != U32_MAX, "lvalue was not set");
+
+               additionSSAId := DoPlusOrMinus(data, function, leftType, leftRValueSSAId, rightType, rightId, #char "+");
+               WriteSingleInstructionIfReachable(
+                  function,
+                  *data.isBlockReachable,
+                  .Store,
+                  leftLValueSSAId,
+                  additionSSAId
+               );
+
+               return additionSSAId, .{};
             }
 
             case #char "="; {
@@ -5413,6 +5399,59 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
    return 696969, .{};
 }
 
+DoPlusOrMinus :: (data: *CompilationData, b: *BuilderType, leftType: *Type_Info, leftId: SSAId, rightType: *Type_Info, rightId: SSAId, operatorType: Operator_Type) -> SSAId {
+   resultSSAId := GetNextSSAId(data);
+
+   type := leftType;
+
+   typeIdentifier: Identifier = .{ type = ._Type, _type = type };
+   if (type == cast(*Type_Info) f32 ||
+         type == cast(*Type_Info) f32x2 ||
+         type == cast(*Type_Info) f32x3 ||
+         type == cast(*Type_Info) f32x4) {
+      op := GetFloatOpFromOperatorType(operatorType);
+      WriteSingleInstructionIfReachable(
+         b,
+         *data.isBlockReachable,
+         op,
+         GetSSAId(data, typeIdentifier),
+         resultSSAId,
+         leftId,
+         rightId
+      );
+   } else if (type == cast(*Type_Info) s32 ||
+               type == cast(*Type_Info) s32x2 ||
+               type == cast(*Type_Info) s32x3 ||
+               type == cast(*Type_Info) s32x4 ||
+               type == cast(*Type_Info) u32 ||
+               type == cast(*Type_Info) u32x2 ||
+               type == cast(*Type_Info) u32x3 ||
+               type == cast(*Type_Info) u32x4 ||
+               type == cast(*Type_Info) s64 ||
+               type == cast(*Type_Info) s64x2 ||
+               type == cast(*Type_Info) s64x3 ||
+               type == cast(*Type_Info) s64x4 ||
+               type == cast(*Type_Info) u64 ||
+               type == cast(*Type_Info) u64x2 ||
+               type == cast(*Type_Info) u64x3 ||
+               type == cast(*Type_Info) u64x4) {
+      op := GetIntegerOpFromOperatorType(operatorType);
+      WriteSingleInstructionIfReachable(
+         b,
+         *data.isBlockReachable,
+         op,
+         GetSSAId(data, typeIdentifier),
+         resultSSAId,
+         leftId,
+         rightId
+      );
+   } else {
+      assert(false, "not implemented yet! type: %\n", type.*);
+   }
+
+   return resultSSAId;
+}
+
 // assertion failure if exists
 TableAddIfNotExists :: (table: *Table, key: table.Key_Type, value: table.Value_Type) {
    entry, newlyAdded := find_or_add(table, key);
@@ -5490,6 +5529,11 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          cbo := cast(*Code_Binary_Operator) node;
 
          if cbo.operator_type == {
+            case .TIMES_ASSIGN; #through;
+            case .DIV_ASSIGN;   #through;
+            case .MOD_ASSIGN;   #through;
+            case .MINUS_ASSIGN; #through;
+            case .PLUS_ASSIGN;  #through;
             case #char "=";
                _ := DetermineCodeNodeTypes(data, cbo.left);
                rightType := DetermineCodeNodeTypes(data, cbo.right);
