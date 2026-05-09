@@ -2369,6 +2369,29 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             print_to_builder(b, "\%% = OpUConvert \%% \%%\n", result, resultType, operand);
          }
 
+         case .LoopMerge; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvLoopControlMask);
+
+            mergeBlock     := operands[0].value_pointer.(*SSAId).*;
+            continueTarget := operands[1].value_pointer.(*SSAId).*;
+            loopControl    := operands[2].value_pointer.(*SpvLoopControlMask).*;
+
+            assert(loopControl == .MaskNone, "try byte builder instead!");
+            print_to_builder(b, "OpLoopMerge \%% \%% None", mergeBlock, continueTarget);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) int); // all parameters are u32
+
+               parameter := operands[it].value_pointer.(*int).*;
+               print_to_builder(b, " %", parameter);
+            }
+
+            print_to_builder(b, "\n");
+         }
+
          case; assert(false, "not yet implemented! op: %", op);
       }
    } else #if SPIRV_BUILDER_TYPE == .Byte {
@@ -3248,6 +3271,26 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             operand    := operands[2].value_pointer.(*SSAId).*;
 
             array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand);
+         }
+
+         case .LoopMerge; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SpvLoopControlMask);
+
+            mergeBlock     := operands[0].value_pointer.(*SSAId).*;
+            continueTarget := operands[1].value_pointer.(*SSAId).*;
+            loopControl    := operands[2].value_pointer.(*SpvLoopControlMask).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) mergeBlock, cast(u32) continueTarget, cast(u32) loopControl);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) int); // all parameters are u32
+
+               parameter := operands[it].value_pointer.(*int).*;
+               array_add(b, cast(u32) parameter);
+            }
          }
 
          case; assert(false, "not yet implemented! op: %", op);
@@ -4993,6 +5036,47 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          assert(false, "not yet implemented! name: %", identifierName);
 
       case .WHILE;
+         cw := cast(*Code_While) node;
+
+         headerLabelSSAId := GetNextSSAId(data);
+         conditionLabelSSAId := GetNextSSAId(data);
+         bodyLabelSSAId := GetNextSSAId(data);
+         continueLabelSSAId := GetNextSSAId(data);
+         mergeLabelSSAId := GetNextSSAId(data);
+
+         WriteSingleInstruction(function, .Branch, headerLabelSSAId);
+         WriteSingleInstruction(function, .Label, headerLabelSSAId);
+
+         WriteSingleInstruction(
+            function,
+            .LoopMerge,
+            mergeLabelSSAId,
+            continueLabelSSAId,
+            SpvLoopControlMask.MaskNone
+         );
+
+         WriteSingleInstruction(function, .Branch, conditionLabelSSAId);
+         WriteSingleInstruction(function, .Label, conditionLabelSSAId);
+
+         conditionSSAId := GenerateInstructions(data, cw.condition, general, function, currentFunction);
+         WriteSingleInstruction(
+            function,
+            .BranchConditional,
+            conditionSSAId,
+            bodyLabelSSAId,
+            mergeLabelSSAId
+         );
+
+         WriteSingleInstruction(function, .Label, bodyLabelSSAId);
+
+         GenerateInstructions(data, cw.block, general, function, currentFunction);
+         WriteSingleInstruction(function, .Branch, continueLabelSSAId);
+         WriteSingleInstruction(function, .Label, continueLabelSSAId);
+         WriteSingleInstruction(function, .Branch, headerLabelSSAId);
+         WriteSingleInstruction(function, .Label, mergeLabelSSAId);
+
+         return 999999, .{};
+
       case .IF;
          ci := cast(*Code_If) node;
          assert(!(ci.if_flags & .IS_SWITCH_STATEMENT), "not yet implemented!");
@@ -5525,7 +5609,29 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          return cast(*Type_Info) void;
       }
 
-      case; assert(false, "kind: %", node.kind);
+      case .WHILE; {
+         cw := cast(*Code_While) node;
+
+         if (cw.condition) {
+            DetermineCodeNodeTypes(data, cw.condition);
+         }
+
+         if (cw.block) {
+            DetermineCodeNodeTypes(data, cw.block);
+         }
+
+         TableAddIfNotExists(*data.codeNodeTypes, node, cast(*Type_Info) void);
+         return cast(*Type_Info) void;
+      }
+
+      case .LOOP_CONTROL; {
+         clc := cast(*Code_Loop_Control) node;
+
+         TableAddIfNotExists(*data.codeNodeTypes, node, cast(*Type_Info) void);
+         return cast(*Type_Info) void;
+      }
+
+      case; assert(false, "not yet implemented! kind: %", node.kind);
    }
 
    assert(false, "didnt return! kind: %", node.kind);
