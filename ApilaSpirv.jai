@@ -5101,7 +5101,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
       case .LOOP_CONTROL;
          clc := cast(*Code_Loop_Control) node;
 
-         if clc.control_type == {
+         if #complete clc.control_type == {
             case .BREAK; {
                assert(clc.target_ident == null, "not yet implemented! i think this means `break loop_variable;`.");
 
@@ -5114,6 +5114,24 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
 
                return 99999999, .{};
             }
+
+            case .CONTINUE; {
+               assert(clc.target_ident == null, "not yet implemented! i guess this means `continue loop_variable;`. this is very rarely used anyways");
+
+               WriteSingleInstructionIfReachable(
+                  function,
+                  *data.isBlockReachable,
+                  .Branch,
+                  data.currentLoopData.continueLabelSSAId
+               );
+
+               return 9999998, .{};
+            }
+
+            case .REMOVE; {
+               assert(false, "not yet implemented! please dont use this :)");
+            }
+
             case; assert(false, "not yet implemented! type: %", clc.control_type);
          }
 
