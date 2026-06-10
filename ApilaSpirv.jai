@@ -202,11 +202,32 @@ ProcessMessage :: (message: *Message) {
                                             shaderType, workgroupSize, maxVertices, maxPrimitives, topology := GetParametersFromNotes(header.notes);
             spirv := CompileToSpirv(header, shaderType, workgroupSize, maxVertices, maxPrimitives, topology);
 
+            buildOptions := GetBuildOptions(message.workspace);
             fileName := sprint("%.spv", header.name);
-            write_entire_file(fileName, spirv.data, spirv.count);
+            outputPath := path_join(buildOptions.buildFolder, fileName);
+            write_entire_file(outputPath, spirv.data, spirv.count);
          }
       }
    }
+}
+
+// prolly i need a lock or something when make the compiler run in parallel         - apila, 10/06/26
+workspaceToBuildOptions: Table(Workspace, BuildOptions);
+BuildOptions :: struct {
+   buildFolder: string = ".";
+}
+
+GetBuildOptions :: (w: Workspace) -> BuildOptions {
+   options, newlyAdded := find_or_add(*workspaceToBuildOptions, w);
+   if (newlyAdded) {
+      options.* = .{};
+   }
+
+   return options.*;
+}
+
+SetBuildOptions :: (options: BuildOptions, w: Workspace) {
+   table_set(*workspaceToBuildOptions, w, options);
 }
 
 #scope_module
