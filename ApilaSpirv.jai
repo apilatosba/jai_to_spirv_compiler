@@ -1275,7 +1275,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       MAGIC_NUMBER: u32 : 0x07230203;
       array_add(*b, MAGIC_NUMBER);
       array_add(*b, (1 << 16) | (6 << 8)); // version 1.6
-      array_add(*b, 0); // my entry value goes here (not yet registered)
+      array_add(*b, xx SpvSourceLanguage.ApilaJai);
 
       //
       // there are two approaches to determining the ssa id bound:

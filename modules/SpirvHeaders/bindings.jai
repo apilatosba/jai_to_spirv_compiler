@@ -33,6 +33,8 @@ SpvSourceLanguage_ :: enum u32 {
     Slang          :: 11;
     Zig            :: 12;
     Rust           :: 13;
+    Pred           :: 14;
+    ApilaJai       :: 15;
     Max            :: 2147483647;
 
     SpvSourceLanguageUnknown        :: Unknown;
