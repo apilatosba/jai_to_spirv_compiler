@@ -5,8 +5,8 @@
 *.spv
 *.mesh
 *.spvasm
-shaders
-shaders.jai
+*.rgen
+*.rchit
 test
 test.jai
 main

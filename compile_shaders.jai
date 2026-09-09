@@ -67,11 +67,10 @@ BUILD_FOLDER      :: "build";
          assert(ok);
       }
 
-      // :)) full path. becuase spirv-val has a bug which got fixed but not out yet. thats why.    - apila, 10/06/26
       files := file_list(".");
       for files {
          result := run_command(
-            "/home/apila/source/SPIRV-Tools/build/tools/spirv-val",
+            "spirv-val",
             it,
             "--relax-block-layout",
             "--allow-localsizeid",

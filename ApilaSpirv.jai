@@ -10,10 +10,15 @@
 #import "SpirvHeaders";
 
 
-#module_parameters (SPIRV_BUILDER_TYPE := SpirvBuilderType.Byte) () {
+#module_parameters (SPIRV_BUILDER_TYPE := SpirvBuilderType.Byte, DESCRIPTOR_STRIDE_MODE := DescriptorStrideMode.Byte) () {
    SpirvBuilderType :: enum {
       Byte;
       String;
+   }
+
+   DescriptorStrideMode :: enum {
+      Byte;
+      DescriptorSize;
    }
 };
 
@@ -120,6 +125,7 @@ operator +  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
 #insert #run sprint("%: [] s32x3;", MESH_TRIANGLES_NAME); // gl_PrimitiveTriangleIndicesEXT
 #insert #run sprint("% :: (vertexCount: u32, primitiveCount: u32) {} @%", SET_MESH_OUTPUTS_NAME, INTRINSIC_FUNCTION_NOTE_NAME); // SetMeshOutputsEXT
 #insert #run sprint("%: [] __Image__;", IMAGE_HEAP_VARIABLE_NAME);
+#insert #run sprint("%: [] __TLAS__;", TLAS_HEAP_VARIABLE_NAME);
 #insert #run sprint("%: [] __Sampler__;", SAMPLER_HEAP_VARIABLE_NAME);
 
 // each texture variant corresponds to sampling of one single OpTypeImage.
@@ -128,6 +134,8 @@ operator +  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
 #insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2)            -> s32x4 { return .{}; } @%", TEXTURE_INT_2D_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
 #insert #run sprint("%: u32x3;", WORKGROUP_ID_VARIABLE_NAME);
+#insert #run sprint("%: u32x3;", LAUNCH_ID_VARIABLE_NAME);
+#insert #run sprint("%: u32x3;", LAUNCH_SIZE_VARIABLE_NAME);
 #insert #run sprint("%: u32x3;", LOCAL_INVOCATION_ID_VARIABLE_NAME);
 
 #insert #run sprint("% :: (x: f32,   y: f32)   -> f32   { return   0; } @%", POW_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
@@ -165,6 +173,11 @@ operator +  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
 #insert #run sprint("% :: (y: f32, x: f32) -> f32 { return 0; } @%", ATAN2_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
 #insert #run sprint("% :: (x: f32) -> f32 { return 0; } @%", ASIN_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
+
+// maybe rayFlags should be an enum. tho i never dealt with enums so im skipping it for now.
+// payload is the address of the payload variable.
+//          - apila, 07/09/26
+#insert #run sprint("% :: (tlas: __TLAS__, rayFlags: u32, cullMask: u32, sbtOffset: u32, sbtStride: u32, missIndex: u32, rayOrigin: f32x3, rayTMin: f32, rayDirection: f32x3, rayTMax: f32, payload: *$T) { } @%", TRACE_RAY_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 // ^^^^^^ intrinsics ^^^^^^^^^
 
 ProcessMessage :: (message: *Message) {
@@ -242,6 +255,7 @@ userFunctionArguments:        Table(*Code_Declaration, struct {}); // this conta
 
 MESH_SHADER_NOTE_NAME      :: "mesh";
 FRAGMENT_SHADER_NOTE_NAME  :: "fragment";
+RGEN_SHADER_NOTE_NAME      :: "rgen";
 
 // this is not required for anything. but i have it to debug faster. so that i can check the note to see if it is intrinsic and thats it
 //          - apila, 07/06/26
@@ -318,8 +332,10 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
       shaderType = .Mesh;
    } else if (typeNote == FRAGMENT_SHADER_NOTE_NAME) {
       shaderType = .Fragment;
+   } else if (typeNote == RGEN_SHADER_NOTE_NAME) {
+      shaderType = .Rgen;
    } else {
-      assert(false, "not yet implemented");
+      assert(false, "not yet implemented! note: %", typeNote);
    }
 
    if shaderType == {
@@ -377,6 +393,10 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
          assert(notes.count == 1, "fragment shader must take no additional notes");
       }
 
+      case .Rgen; {
+         assert(notes.count == 1, "rgen shader must take no additional notes");
+      }
+
       case; assert(false, "not yet implemented! type: %", shaderType);
    }
 
@@ -393,7 +413,8 @@ IsProcedureShaderEntryPoint :: (header: *Code_Procedure_Header) -> bool {
    if (header.notes.count < 1) return false;
 
    return header.notes[0].text == MESH_SHADER_NOTE_NAME ||
-          header.notes[0].text == FRAGMENT_SHADER_NOTE_NAME;
+          header.notes[0].text == FRAGMENT_SHADER_NOTE_NAME ||
+          header.notes[0].text == RGEN_SHADER_NOTE_NAME;
 }
 
 // TODO
@@ -457,52 +478,65 @@ BuilderType :: #run -> Type {
    }
 }
 
-MESH_VERTICES_NAME                  :: "meshvertices";
-MESH_TRIANGLES_NAME                 :: "meshtriangles";
-SET_MESH_OUTPUTS_NAME               :: "SetMeshOutputs";
-PUSH_DATA_VARIABLE_NAME             :: "__push_data__";  // this is not gonna be used by the user.
-                                                         // so i picked a name hoping that it is not gonna clash with other variables
-IMAGE_HEAP_VARIABLE_NAME            :: "images";
-SAMPLER_HEAP_VARIABLE_NAME          :: "samplers";
-TEXTURE_FLOAT_2D_FUNCTION_NAME      :: "texture";
-TEXTURE_FLOAT_3D_FUNCTION_NAME      :: "texture3d";
-TEXTURE_INT_2D_FUNCTION_NAME        :: "texturei";
-TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME  :: "texturelod";
-WORKGROUP_ID_VARIABLE_NAME          :: "workgroupid";
-LOCAL_INVOCATION_ID_VARIABLE_NAME   :: "localinvocationid";
-POW_FUNCTION_NAME                   :: "pow";
-MUL_FUNCTION_NAME                   :: "mul"; // check comments above matrix type definitions
-CLAMP_FUNCTION_NAME                 :: "clamp";
-DDX_FUNCTION_NAME                   :: "ddx"; // OpDPdx
-DDY_FUNCTION_NAME                   :: "ddy"; // OpDPdy
-INVERSE_FUNCTION_NAME               :: "inverse";
-MAX_FUNCTION_NAME                   :: "max";
-DOT_FUNCTION_NAME                   :: "dot";
-NORMALIZE_FUNCTION_NAME             :: "normalize";
-CROSS_FUNCTION_NAME                 :: "cross";
-REFLECT_FUNCTION_NAME               :: "reflect";
-LERP_FUNCTION_NAME                  :: "lerp"; // FMix;
-LENGTH_FUNCTION_NAME                :: "length";
-ATAN2_FUNCTION_NAME                 :: "atan2";
-ASIN_FUNCTION_NAME                  :: "asin";
+MESH_VERTICES_NAME                        :: "meshvertices";
+MESH_TRIANGLES_NAME                       :: "meshtriangles";
+SET_MESH_OUTPUTS_NAME                     :: "SetMeshOutputs";
+MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME     :: "__mesh_push_data__";   // this is not gonna be used by the user.
+                                                                     // so i picked a name hoping that it is not gonna clash with other variables
+RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME      :: "__rtx_push_data__";
+IMAGE_HEAP_VARIABLE_NAME                  :: "images";   // these two are resource heaps but they return different type.
+TLAS_HEAP_VARIABLE_NAME                   :: "tlases";   // i couldve made it so there is only one resource heap that returns *void (or a generic resource handle) but idk.
+SAMPLER_HEAP_VARIABLE_NAME                :: "samplers";
+TEXTURE_FLOAT_2D_FUNCTION_NAME            :: "texture";
+TEXTURE_FLOAT_3D_FUNCTION_NAME            :: "texture3d";
+TEXTURE_INT_2D_FUNCTION_NAME              :: "texturei";
+TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME        :: "texturelod";
+WORKGROUP_ID_VARIABLE_NAME                :: "workgroupid";
+LOCAL_INVOCATION_ID_VARIABLE_NAME         :: "localinvocationid";
+LAUNCH_ID_VARIABLE_NAME                   :: "launchid"; // LaunchIdKHR
+LAUNCH_SIZE_VARIABLE_NAME                 :: "launchsize"; // LaunchSizeKHR
+POW_FUNCTION_NAME                         :: "pow";
+MUL_FUNCTION_NAME                         :: "mul"; // check comments above matrix type definitions
+CLAMP_FUNCTION_NAME                       :: "clamp";
+DDX_FUNCTION_NAME                         :: "ddx"; // OpDPdx
+DDY_FUNCTION_NAME                         :: "ddy"; // OpDPdy
+INVERSE_FUNCTION_NAME                     :: "inverse";
+MAX_FUNCTION_NAME                         :: "max";
+DOT_FUNCTION_NAME                         :: "dot";
+NORMALIZE_FUNCTION_NAME                   :: "normalize";
+CROSS_FUNCTION_NAME                       :: "cross";
+REFLECT_FUNCTION_NAME                     :: "reflect";
+LERP_FUNCTION_NAME                        :: "lerp"; // FMix;
+LENGTH_FUNCTION_NAME                      :: "length";
+ATAN2_FUNCTION_NAME                       :: "atan2";
+ASIN_FUNCTION_NAME                        :: "asin";
+TRACE_RAY_FUNCTION_NAME                   :: "TraceRay";
 
 // qualifiers
-FUNCTION_QUALIFIER                  :: "function";
-PHYSICAL_STORAGE_BUFFER_QUALIFIER   :: "physical";
+FUNCTION_QUALIFIER                        :: "function";
+PHYSICAL_STORAGE_BUFFER_QUALIFIER         :: "physical";
+RAY_PAYLOAD_QUALIFIER                     :: "payload";
 
-PushData :: struct {
+MeshPipelinePushData :: struct {
    taskData:      *void;
    meshData:      *void;
    fragmentData:  *void;
 }
 
-#insert #run sprint("%: PushData;", PUSH_DATA_VARIABLE_NAME);
+RtxPipelinePushData :: struct {
+   rgenData:   *void;
+   rchitData:  *void;
+}
+
+#insert #run sprint("%: MeshPipelinePushData;", MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME);
+#insert #run sprint("%: RtxPipelinePushData;", RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME);
 
 __Sampler__ :: struct { } // OpTypeSampler
 __Image__ :: struct { } // base type for what OpTypeImage returns. i dont use this.
                         // this is here to make the jai compiler happy. so it typechecks and stuff.
                         // i use TypeInfoImage.
                         //       - apila, 03/05/26
+__TLAS__ :: struct { } // OpTypeAccelerationStructureKHR
 
 //
 // a pointer in the gpu program.
@@ -854,6 +888,7 @@ ShaderType :: enum {
    Mesh;
    Fragment;
    Compute;
+   Rgen;
 }
 
 // == must be defined on T
@@ -1089,6 +1124,7 @@ CompilationData :: struct {
                                                             // if you want to parallelize the compiler then you should store this per thread in a tls (thats easy with ApilaDispatch).
                                                             //    - apila, 09/05/26
    glslStd450:                               SSAId;
+   rayPayloadVariableIdentifiers:            [..] Identifier;
 
    HashStringArray :: (x: [] string) -> u32 {
       #import "Hash";
@@ -1217,6 +1253,20 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             data.shaderDataPointerVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
          }
 
+      case .Rgen; {
+         index := 0;
+
+         // first argument: data: *RgenData
+         {
+            defer index += 1;
+
+            assert(header.arguments.count > index, "not enough arguments");
+            assert(header.arguments[index].type.type == .POINTER, "first argument wrong");
+            tip := cast(*Type_Info_Pointer) header.arguments[index].type;
+            data.shaderDataPointerVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
+         }
+      }
+
       case; assert(false, "not implemented yet. type: %", type);
    }
 
@@ -1263,6 +1313,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             data.fragmentOutputIdentifiers[it_index] = .{ type = .Variable, variable.declaration = it };
          }
 
+      case .Rgen; {
+         assert(header.returns.count == 0, "rgen shader must return nothing");
+      }
+
       case; assert(false, "not implemented yet. type: %", type);
    }
 
@@ -1295,423 +1349,566 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    }
 
    if type == {
-      case .Fragment; #through;
-      case .Mesh; {
-         // capabilities
-         {
-            WriteSingleInstruction(*b, .Capability, SpvCapability.Int64);
-            WriteSingleInstruction(*b, .Capability, SpvCapability.Int8);
+      case .Mesh;
+      case .Fragment;
+      case .Rgen;
+      case; assert(false, "not yet implemented! following code is not written for this type in mind yet. type: %", type);
+   }
+
+   // capabilities
+   {
+      WriteSingleInstruction(*b, .Capability, SpvCapability.Int64);
+      WriteSingleInstruction(*b, .Capability, SpvCapability.Int8);
+      WriteSingleInstruction(*b, .Capability, SpvCapability.UntypedPointersKHR);
+      WriteSingleInstruction(*b, .Capability, SpvCapability.DescriptorHeapEXT);
+      WriteSingleInstruction(*b, .Capability, SpvCapability.PhysicalStorageBufferAddresses);
+      WriteSingleInstruction(*b, .Capability, SpvCapability.StorageImageWriteWithoutFormat);
+
+      if type == {
+         case .Mesh; {
             WriteSingleInstruction(*b, .Capability, SpvCapability.MeshShadingEXT);
-            WriteSingleInstruction(*b, .Capability, SpvCapability.UntypedPointersKHR);
-            WriteSingleInstruction(*b, .Capability, SpvCapability.DescriptorHeapEXT);
-            WriteSingleInstruction(*b, .Capability, SpvCapability.PhysicalStorageBufferAddresses);
-
-            if (type == .Fragment) {
-               WriteSingleInstruction(*b, .Capability, SpvCapability.Shader);
-            }
          }
 
-         // extensions
-         WriteSingleInstruction(*b, .Extension, "SPV_EXT_mesh_shader");
-         WriteSingleInstruction(*b, .Extension, "SPV_EXT_descriptor_heap");
-         WriteSingleInstruction(*b, .Extension, "SPV_KHR_untyped_pointers");
-         WriteSingleInstruction(*b, .Extension, "SPV_KHR_8bit_storage");
-         WriteSingleInstruction(*b, .Extension, "SPV_KHR_physical_storage_buffer");
-
-         WriteSingleInstruction(*b, .ExtInstImport, data.glslStd450, "GLSL.std.450");
-         WriteSingleInstruction(*b, .MemoryModel, SpvAddressingModel.PhysicalStorageBuffer64, SpvMemoryModel.GLSL450);
-
-         // entry point
-         if (type == .Mesh) {
-            WriteSingleInstruction(
-               *b,
-               .EntryPoint,
-               SpvExecutionModel.MeshEXT,
-               GetSSAId(*data, .{ type = .Function, function = header }),
-               "ApilaMS",
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_VERTICES_NAME } }),
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = PUSH_DATA_VARIABLE_NAME } }),
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
-               GetSSAId(*data, data.meshVertexOutVariableIdentifier),
-               GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
-               GetSSAId(*data, data.shaderDataPointerVariableIdentifier),
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = WORKGROUP_ID_VARIABLE_NAME } }),
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LOCAL_INVOCATION_ID_VARIABLE_NAME } })
-            );
-         } else if (type == .Fragment) {
-            operands: [..] Any;
-            array_add(*operands, SpvExecutionModel.Fragment);
-            array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
-            array_add(*operands, "ApilaFS");
-            array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
-            array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
-            array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = PUSH_DATA_VARIABLE_NAME } }));
-            array_add(*operands, GetSSAId(*data, data.fragmentVertexInVariableIdentifier));
-            array_add(*operands, GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier));
-            array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
-
-            for data.fragmentOutputIdentifiers {
-               array_add(*operands, ac(GetSSAId(*data, it)));
-            }
-
-            WriteSingleInstruction(
-               *b,
-               .EntryPoint,
-               .. operands
-            );
-         } else {
-            assert(false, "should have been unreachable because of the outer case.");
+         case .Fragment; {
+            WriteSingleInstruction(*b, .Capability, SpvCapability.MeshShadingEXT);
+            WriteSingleInstruction(*b, .Capability, SpvCapability.Shader);
          }
 
-         // execution modes
-         if (type == .Mesh) {
-            WriteSingleInstruction(
-               *b,
-               .ExecutionModeId,
-               GetSSAId(*data, .{ type = .Function, function = header }),
-               SpvExecutionMode.LocalSizeId,
-               GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[0], bitSize = 32 } }),
-               GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[1], bitSize = 32 } }),
-               GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[2], bitSize = 32 } })
-            );
-            WriteSingleInstruction(
-               *b,
-               .ExecutionMode,
-               GetSSAId(*data, .{ type = .Function, function = header }),
-               SpvExecutionMode.OutputVertices,
-               data.maxVertices
-            );
-            WriteSingleInstruction(
-               *b,
-               .ExecutionMode,
-               GetSSAId(*data, .{ type = .Function, function = header }),
-               SpvExecutionMode.OutputPrimitivesEXT,
-               data.maxPrimitives
-            );
-            WriteSingleInstruction(
-               *b,
-               .ExecutionMode,
-               GetSSAId(*data, .{ type = .Function, function = header }),
-               ToSpirvOutputTopology(data.primitiveTopology)
-            );
-         } else if (type == .Fragment) {
-            WriteSingleInstruction(
-               *b,
-               .ExecutionMode,
-               GetSSAId(*data, .{ type = .Function, function = header }),
-               SpvExecutionMode.OriginUpperLeft
-            );
-         } else {
-            assert(false, "should have been unreachable because of the outer case.");
+         case .Rgen; {
+            WriteSingleInstruction(*b, .Capability, SpvCapability.RayTracingKHR);
          }
 
+         case; assert(false, "should be unreachable because of the if check above.");
+      }
+   }
 
+   // extensions
+   {
+      WriteSingleInstruction(*b, .Extension, "SPV_EXT_descriptor_heap");
+      WriteSingleInstruction(*b, .Extension, "SPV_KHR_untyped_pointers");
+      WriteSingleInstruction(*b, .Extension, "SPV_KHR_8bit_storage");
+      WriteSingleInstruction(*b, .Extension, "SPV_KHR_physical_storage_buffer");
 
-         // skip debug info
-
-
-
-         // annotations (decorations)
-         #if SPIRV_BUILDER_TYPE == .String {
-            print_to_builder(*b, "\n; annotations (decorations)\n");
+      if type == {
+         case .Fragment; #through;
+         case .Mesh; {
+            WriteSingleInstruction(*b, .Extension, "SPV_EXT_mesh_shader");
          }
 
-         if (type == .Mesh) {
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
-               SpvDecoration.Block
-            );
-            WriteSingleInstruction(
-               *b,
-               .MemberDecorate,
-               GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
-               0,
-               SpvDecoration.BuiltIn,
-               SpvBuiltIn.Position
-            );
-            WriteSingleInstruction(
-               *b,
-               .MemberDecorate,
-               GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
-               1,
-               SpvDecoration.BuiltIn,
-               SpvBuiltIn.PointSize
-            );
+         case .Rgen; {
+            WriteSingleInstruction(*b, .Extension, "SPV_KHR_ray_tracing");
          }
+      }
+   }
 
-         //
-         // i say location 0, and location 1. but idk if this is correct. for example glsl disallows this if meshVertexOut is a struct with more than one member
-         // saying that there is an overlap. slang generates a location decoration for each member of the struct seperately.
-         // i wrote the spirv assembly then assembled it and it worked. so idk. also spirv-val didnt complain about anything. so im gonn keep this for now
-         // but i feel like this is wrong.
-         // also in the specs there is no mention of this. it just says it applies to variables or struct members.
-         // this overlap thingy happens if you use matrices as well. but there is no documentation for this so idk how to handle it other than reverse engineer and find out which sucks
-         //
-         // update: https://docs.vulkan.org/spec/latest/chapters/interfaces.html#interfaces-iointerfaces-limits
-         // you can use 128 bit per location. one location has four components you can assign members to components
-         // each component 32 bit.
-         // so i cant say meshPrimitiveOut has location 1. i need to calculate its location from MeshVertexOut struct.
-         // look for an implementation in glslangValidator, they must have something similar.
-         //
-         if (type == .Mesh) {
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, data.meshVertexOutVariableIdentifier),
-               SpvDecoration.Location,
-               0
-            );
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
-               SpvDecoration.Location,
-               data.locationsConsumedByPerVertexUserStruct
-            );
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
-               SpvDecoration.PerPrimitiveEXT
-            );
-         } else if (type == .Fragment) {
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, data.fragmentVertexInVariableIdentifier),
-               SpvDecoration.Location,
-               0
-            );
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier),
-               SpvDecoration.Location,
-               data.locationsConsumedByPerVertexUserStruct
-            );
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier),
-               SpvDecoration.PerPrimitiveEXT
-            );
-         } else {
-            assert(false, "should have been unreachable because of the outer case.");
-         }
+   WriteSingleInstruction(*b, .ExtInstImport, data.glslStd450, "GLSL.std.450");
+   WriteSingleInstruction(*b, .MemoryModel, SpvAddressingModel.PhysicalStorageBuffer64, SpvMemoryModel.GLSL450);
 
-         // print_to_builder(*b, "OpDecorate \%% Block\n",
-         //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
-         // );
-         // print_to_builder(*b, "OpMemberDecorate \%% 0 Offset 0\n", // task data pointer
-         //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
-         // );
-         // print_to_builder(*b, "OpMemberDecorate \%% 1 Offset 8\n", // mesh data pointer
-         //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
-         // );
-         // print_to_builder(*b, "OpMemberDecorate \%% 2 Offset 16\n", // fragment data pointer
-         //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
-         // );
-         GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData });
-
-         if (type == .Mesh) {
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
-               SpvDecoration.BuiltIn,
-               SpvBuiltIn.PrimitiveTriangleIndicesEXT
-            );
-
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = WORKGROUP_ID_VARIABLE_NAME } }),
-               SpvDecoration.BuiltIn,
-               SpvBuiltIn.WorkgroupId
-            );
-
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LOCAL_INVOCATION_ID_VARIABLE_NAME } }),
-               SpvDecoration.BuiltIn,
-               SpvBuiltIn.LocalInvocationId
-            );
-         }
-
+   // entry point
+   if type == {
+      case .Mesh; {
          WriteSingleInstruction(
             *b,
-            .Decorate,
+            .EntryPoint,
+            SpvExecutionModel.MeshEXT,
+            GetSSAId(*data, .{ type = .Function, function = header }),
+            "ApilaMS",
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_VERTICES_NAME } }),
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME } }),
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
+            GetSSAId(*data, data.meshVertexOutVariableIdentifier),
+            GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
             GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
-            SpvDecoration.BuiltIn,
-            SpvBuiltIn.ResourceHeapEXT
-         );
-         WriteSingleInstruction(
-            *b,
-            .Decorate,
             GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
-            SpvDecoration.BuiltIn,
-            SpvBuiltIn.SamplerHeapEXT
-         );
-
-         // not necessary but voila. Restrict is already the default. if you wanted to alias you would have to type it here.
-         // it is restrict becasue __push_data__.meshData is basically a dead pointer, never used (except to initialize shader data pointer).
-         WriteSingleInstruction(
-            *b,
-            .Decorate,
             GetSSAId(*data, data.shaderDataPointerVariableIdentifier),
-            SpvDecoration.RestrictPointer
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = WORKGROUP_ID_VARIABLE_NAME } }),
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LOCAL_INVOCATION_ID_VARIABLE_NAME } })
          );
-
-         if (type == .Fragment) {
-            for data.fragmentOutputIdentifiers {
-               WriteSingleInstruction(
-                  *b,
-                  .Decorate,
-                  GetSSAId(*data, it),
-                  SpvDecoration.Location,
-                  it_index
-               );
-            }
-         }
-
-         // runtime arrays
-         for ssaId, identifier: data.identifierToSSAId {
-            if (identifier.type != ._Type) continue;
-
-            type := identifier._type;
-            if (type.type != TYPE_INFO_RUNTIME_ARRAY_TAG) continue;
-
-            tira := cast(*TypeInfoRuntimeArray) type;
-            if (tira.elementType.type == TYPE_INFO_IMAGE_TAG ||
-                  CompareType(tira.elementType, cast(*Type_Info) __Sampler__)) {
-               constantSizeOfIdentifier: Identifier = .{ type = .ConstantSizeOf, constantSizeOf = tira.elementType };
-
-               // specs mandates that: All <id> Extra Operands must appear before Target.
-               AddTypeDependency(*data.extraTypeDependencies, identifier, constantSizeOfIdentifier);
-
-               WriteSingleInstruction(
-                  *b,
-                  .DecorateId,
-                  GetSSAId(*data, identifier),
-                  SpvDecoration.ArrayStrideIdEXT,
-                  GetSSAId(*data, constantSizeOfIdentifier)
-               );
-            } else {
-               assert(false, "not yet implemented! element type: %", tira.elementType.*);
-            }
-         }
-
-
-         // Types, variables and constants
-         //
-         // the reason i need a seperate array is that WriteTypeOrVariableOrConstant might modify CompilationData.identifierToSSAId
-         // i can avoid this and can make sure that all the identifiers are already added into CompilationData.identifierToSSAId before calling
-         // WriteTypeOrVariableOrConstant but there is no need. WriteTypeOrVariableOrConstant is recursive so it suffices to iterate over what has been seen so far
-         //             - apila, 13/04/26
-         //
-         typesConstantsVariables: [..] Identifier;
-         for ssaId, identifier: data.identifierToSSAId {
-            array_add(*typesConstantsVariables, identifier);
-         }
-
-         typesConstantsVariablesBuilder: BuilderType;
-
-         #if SPIRV_BUILDER_TYPE == .String {
-            print_to_builder(*b, "\n; Types, variables and constants\n");
-         }
-
-         for typesConstantsVariables {
-            WriteTypeOrVariableOrConstant(*data, *typesConstantsVariablesBuilder, it);
-         }
-
-
-         // idk if i need this?
-         //    apila, 12/04/26
-         //
-         // struct annotate infos
-         #if SPIRV_BUILDER_TYPE == .String {
-            print_to_builder(*b, "\n; struct annotate infos\n");
-         }
-
-         for ssaId, identifier: data.identifierToSSAId {
-            if (identifier.type != ._Type) continue;
-            ti := cast(*Type_Info) identifier._type;
-            if (ti.type != .STRUCT) continue;
-
-            if (CompareType(identifier._type, cast(*Type_Info) MeshPerVertex))  continue; // builtin struct handled seperately
-            if (CompareType(identifier._type, cast(*Type_Info) bool))           continue;
-            if (CompareType(identifier._type, cast(*Type_Info) bool2))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) bool3))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) bool4))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u8))             continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u8x2))           continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u8x3))           continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u8x4))           continue;
-            if (CompareType(identifier._type, cast(*Type_Info) s32))            continue;
-            if (CompareType(identifier._type, cast(*Type_Info) s32x2))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) s32x3))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) s32x4))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u32))            continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u32x2))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u32x3))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u32x4))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) s64))            continue;
-            if (CompareType(identifier._type, cast(*Type_Info) s64x2))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) s64x3))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) s64x4))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u64))            continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u64x2))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u64x3))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) u64x4))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) f32))            continue;
-            if (CompareType(identifier._type, cast(*Type_Info) f32x2))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) f32x3))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) f32x4))          continue;
-            if (CompareType(identifier._type, cast(*Type_Info) f32x2x2))        continue;
-            if (CompareType(identifier._type, cast(*Type_Info) f32x3x3))        continue;
-            if (CompareType(identifier._type, cast(*Type_Info) f32x4x4))        continue;
-            if (CompareType(identifier._type, cast(*Type_Info) __Image__))      continue;
-            if (CompareType(identifier._type, cast(*Type_Info) __Sampler__))    continue;
-
-            annotateInfo := GetAnnotateInfoFromStruct(identifier._type);
-            structIdentifier: Identifier = .{ type = ._Type, _type = identifier._type };
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, structIdentifier),
-               SpvDecoration.Block
-            );
-
-            for annotateInfo.memberInfos {
-               WriteSingleInstruction(
-                  *b,
-                  .MemberDecorate,
-                  GetSSAId(*data, structIdentifier),
-                  it.memberIndex,
-                  SpvDecoration.Offset,
-                  it.offset
-               );
-            }
-         }
-
-         AppendAndStealBuffers(*b, *typesConstantsVariablesBuilder);
-
-
-         // functions
-         #if SPIRV_BUILDER_TYPE == .String {
-            print_to_builder(*b, "\n; functions\n");
-         }
-
-         AppendAndStealBuffers(*b, *functionsBuilder);
       }
 
-      case; assert(false, "not yet implemented! type: %", type);
+      case .Fragment; {
+         operands: [..] Any;
+         array_add(*operands, SpvExecutionModel.Fragment);
+         array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
+         array_add(*operands, "ApilaFS");
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, data.fragmentVertexInVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
+
+         for data.fragmentOutputIdentifiers {
+            array_add(*operands, ac(GetSSAId(*data, it)));
+         }
+
+         WriteSingleInstruction(
+            *b,
+            .EntryPoint,
+            .. operands
+         );
+      }
+
+      case .Rgen; {
+         operands: [..] Any;
+         array_add(*operands, SpvExecutionModel.RayGenerationKHR);
+         array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
+         array_add(*operands, "ApilaRgen");
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = TLAS_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }));
+
+         for data.rayPayloadVariableIdentifiers {
+            array_add(*operands, ac(GetSSAId(*data, it)));
+         }
+
+         WriteSingleInstruction(*b, .EntryPoint, ..operands);
+      }
+
+      case; assert(false, "should have been unreachable because of the if check above.");
    }
+
+   // execution modes
+   if type == {
+      case .Mesh; {
+         WriteSingleInstruction(
+            *b,
+            .ExecutionModeId,
+            GetSSAId(*data, .{ type = .Function, function = header }),
+            SpvExecutionMode.LocalSizeId,
+            GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[0], bitSize = 32 } }),
+            GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[1], bitSize = 32 } }),
+            GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[2], bitSize = 32 } })
+         );
+         WriteSingleInstruction(
+            *b,
+            .ExecutionMode,
+            GetSSAId(*data, .{ type = .Function, function = header }),
+            SpvExecutionMode.OutputVertices,
+            data.maxVertices
+         );
+         WriteSingleInstruction(
+            *b,
+            .ExecutionMode,
+            GetSSAId(*data, .{ type = .Function, function = header }),
+            SpvExecutionMode.OutputPrimitivesEXT,
+            data.maxPrimitives
+         );
+         WriteSingleInstruction(
+            *b,
+            .ExecutionMode,
+            GetSSAId(*data, .{ type = .Function, function = header }),
+            ToSpirvOutputTopology(data.primitiveTopology)
+         );
+      }
+
+      case .Fragment; {
+         WriteSingleInstruction(
+            *b,
+            .ExecutionMode,
+            GetSSAId(*data, .{ type = .Function, function = header }),
+            SpvExecutionMode.OriginUpperLeft
+         );
+      }
+
+      case .Rgen; {
+         // nothing i guess Clueless
+      }
+
+      case; assert(false, "should have been unreachable because of the outer case.");
+   }
+
+
+   // skip debug info
+
+
+
+   // annotations (decorations)
+   #if SPIRV_BUILDER_TYPE == .String {
+      print_to_builder(*b, "\n; annotations (decorations)\n");
+   }
+
+   if (type == .Mesh) {
+      WriteSingleInstruction(
+         *b,
+         .Decorate,
+         GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
+         SpvDecoration.Block
+      );
+      WriteSingleInstruction(
+         *b,
+         .MemberDecorate,
+         GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
+         0,
+         SpvDecoration.BuiltIn,
+         SpvBuiltIn.Position
+      );
+      WriteSingleInstruction(
+         *b,
+         .MemberDecorate,
+         GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPerVertex }),
+         1,
+         SpvDecoration.BuiltIn,
+         SpvBuiltIn.PointSize
+      );
+   }
+
+   //
+   // i say location 0, and location 1. but idk if this is correct. for example glsl disallows this if meshVertexOut is a struct with more than one member
+   // saying that there is an overlap. slang generates a location decoration for each member of the struct seperately.
+   // i wrote the spirv assembly then assembled it and it worked. so idk. also spirv-val didnt complain about anything. so im gonn keep this for now
+   // but i feel like this is wrong.
+   // also in the specs there is no mention of this. it just says it applies to variables or struct members.
+   // this overlap thingy happens if you use matrices as well. but there is no documentation for this so idk how to handle it other than reverse engineer and find out which sucks
+   //
+   // update: https://docs.vulkan.org/spec/latest/chapters/interfaces.html#interfaces-iointerfaces-limits
+   // you can use 128 bit per location. one location has four components you can assign members to components
+   // each component 32 bit.
+   // so i cant say meshPrimitiveOut has location 1. i need to calculate its location from MeshVertexOut struct.
+   // look for an implementation in glslangValidator, they must have something similar.
+   //
+   if type == {
+      case .Mesh; {
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, data.meshVertexOutVariableIdentifier),
+            SpvDecoration.Location,
+            0
+         );
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
+            SpvDecoration.Location,
+            data.locationsConsumedByPerVertexUserStruct
+         );
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
+            SpvDecoration.PerPrimitiveEXT
+         );
+      }
+
+      case .Fragment; {
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, data.fragmentVertexInVariableIdentifier),
+            SpvDecoration.Location,
+            0
+         );
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier),
+            SpvDecoration.Location,
+            data.locationsConsumedByPerVertexUserStruct
+         );
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier),
+            SpvDecoration.PerPrimitiveEXT
+         );
+      }
+
+      case .Rgen; {
+         // nothing i guess. there is no Location stuff in rgen.
+      }
+
+      case; assert(false, "should have been unreachable because of the outer case.");
+   }
+
+   // print_to_builder(*b, "OpDecorate \%% Block\n",
+   //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
+   // );
+   // print_to_builder(*b, "OpMemberDecorate \%% 0 Offset 0\n", // task data pointer
+   //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
+   // );
+   // print_to_builder(*b, "OpMemberDecorate \%% 1 Offset 8\n", // mesh data pointer
+   //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
+   // );
+   // print_to_builder(*b, "OpMemberDecorate \%% 2 Offset 16\n", // fragment data pointer
+   //                      GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) PushData })
+   // );
+   GetSSAId(*data, .{ type = ._Type, _type = cast(*Type_Info) MeshPipelinePushData });
+
+   if type == {
+      case .Mesh; {
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.PrimitiveTriangleIndicesEXT
+         );
+
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = WORKGROUP_ID_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.WorkgroupId
+         );
+
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LOCAL_INVOCATION_ID_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.LocalInvocationId
+         );
+      }
+
+      // william tins:
+      //    LaunchIdKHR
+      //    LaunchSizeKHR
+      //    InstanceCustomIndexKHR
+      //    RayGeometryIndexKHR
+      //    WorldRayOriginKHR
+      //    WorldRayDirectionKHR
+      //    ObjectRayOriginKHR
+      //    ObjectRayDirectionKHR
+      //    RayTminKHR
+      //    RayTmaxKHR
+      //    ObjectToWorldKHR
+      //    WorldToObjectKHR
+      //    HitKindKHR
+      //    IncomingRayFlagsKHR
+      case .Rgen; {
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.LaunchIdKHR
+         );
+
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.LaunchSizeKHR
+         );
+      }
+
+      case .Fragment; {
+         // nothing to do Clueless
+      }
+
+      case; assert(false, "not yet implemented!");
+   }
+
+   // i use the variable type itself (basically the variable itself) to determine the base type of the untyped access chain.
+   // and since now i have more than one type of descriptor stored in the resource heap, maybe i should have a resource heap variable rather than image heap.
+   // and i should create a acceleration structure heap similar to image heap but they are only used to determine the base type of the untyped access chain and also to do type checking
+   // at high level jai code.
+   //       - apila, 06/09/26
+   //
+   // well i just created two "BuiltIn ResourceHeapEXT" and spirv-val doesnt complain. idk. if that becomes an issue then you should create a single resource heap variable and only use
+   // "images" and "tlases" to determine the base type. and since in that case resource heap wouldnt be a "variable" you can maybe idk just create an identifier enum entry just for that.
+   // (it is an OpVariable but whatever)
+   //       - apila, 07/09/26
+   WriteSingleInstruction(
+      *b,
+      .Decorate,
+      GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
+      SpvDecoration.BuiltIn,
+      SpvBuiltIn.ResourceHeapEXT
+   );
+   WriteSingleInstruction(
+      *b,
+      .Decorate,
+      GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = TLAS_HEAP_VARIABLE_NAME } }),
+      SpvDecoration.BuiltIn,
+      SpvBuiltIn.ResourceHeapEXT
+   );
+   WriteSingleInstruction(
+      *b,
+      .Decorate,
+      GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
+      SpvDecoration.BuiltIn,
+      SpvBuiltIn.SamplerHeapEXT
+   );
+
+   // not necessary but voila. Restrict is already the default. if you wanted to alias you would have to type it here.
+   // it is restrict becasue __push_data__.meshData is basically a dead pointer, never used (except to initialize shader data pointer).
+   WriteSingleInstruction(
+      *b,
+      .Decorate,
+      GetSSAId(*data, data.shaderDataPointerVariableIdentifier),
+      SpvDecoration.RestrictPointer
+   );
+
+   if (type == .Fragment) {
+      for data.fragmentOutputIdentifiers {
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, it),
+            SpvDecoration.Location,
+            it_index
+         );
+      }
+   }
+
+   // need to copy because GetSSAId might modify identifierToSSAId while iterating over it      - apila, 09/09/26
+   // runtime arrays
+   runtimeArrays: [..] Identifier;
+   for ssaId, identifier: data.identifierToSSAId {
+      if (identifier.type != ._Type) continue;
+
+      type := identifier._type;
+      if (type.type != TYPE_INFO_RUNTIME_ARRAY_TAG) continue;
+
+      array_add(*runtimeArrays, identifier);
+   }
+
+   for identifier: runtimeArrays {
+      type := identifier._type;
+      tira := cast(*TypeInfoRuntimeArray) type;
+      if (!(tira.elementType.type == TYPE_INFO_IMAGE_TAG ||
+            CompareType(tira.elementType, cast(*Type_Info) __TLAS__) ||
+            CompareType(tira.elementType, cast(*Type_Info) __Sampler__))) {
+         assert(false, "not yet implemented! element type: %", tira.elementType.*);
+      }
+
+      strideIdentifier: Identifier;
+      #if DESCRIPTOR_STRIDE_MODE == .DescriptorSize {
+         strideIdentifier = .{ type = .ConstantSizeOf, constantSizeOf = tira.elementType };
+      } else #if DESCRIPTOR_STRIDE_MODE == .Byte {
+         strideIdentifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = 1, bitSize = 32 } };
+      } else {
+         #assert(false, "not yet implemented!");
+      }
+
+      // specs mandates that: All <id> Extra Operands must appear before Target.
+      AddTypeDependency(*data.extraTypeDependencies, identifier, strideIdentifier);
+
+      WriteSingleInstruction(
+         *b,
+         .DecorateId,
+         GetSSAId(*data, identifier),
+         SpvDecoration.ArrayStrideIdEXT,
+         GetSSAId(*data, strideIdentifier)
+      );
+   }
+
+
+   // Types, variables and constants
+   //
+   // the reason i need a seperate array is that WriteTypeOrVariableOrConstant might modify CompilationData.identifierToSSAId
+   // i can avoid this and can make sure that all the identifiers are already added into CompilationData.identifierToSSAId before calling
+   // WriteTypeOrVariableOrConstant but there is no need. WriteTypeOrVariableOrConstant is recursive so it suffices to iterate over what has been seen so far
+   //             - apila, 13/04/26
+   //
+   typesConstantsVariables: [..] Identifier;
+   for ssaId, identifier: data.identifierToSSAId {
+      array_add(*typesConstantsVariables, identifier);
+   }
+
+   typesConstantsVariablesBuilder: BuilderType;
+
+   #if SPIRV_BUILDER_TYPE == .String {
+      print_to_builder(*b, "\n; Types, variables and constants\n");
+   }
+
+   for typesConstantsVariables {
+      WriteTypeOrVariableOrConstant(*data, *typesConstantsVariablesBuilder, it);
+   }
+
+
+   // idk if i need this?
+   //    apila, 12/04/26
+   //
+   // struct annotate infos
+   #if SPIRV_BUILDER_TYPE == .String {
+      print_to_builder(*b, "\n; struct annotate infos\n");
+   }
+
+   structsToAnnotate: [..] Identifier;
+   for ssaId, identifier: data.identifierToSSAId {
+      if (identifier.type != ._Type) continue;
+      ti := cast(*Type_Info) identifier._type;
+      if (ti.type != .STRUCT) continue;
+
+      if (CompareType(identifier._type, cast(*Type_Info) MeshPerVertex))  continue; // builtin struct handled seperately
+      if (CompareType(identifier._type, cast(*Type_Info) bool))           continue;
+      if (CompareType(identifier._type, cast(*Type_Info) bool2))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) bool3))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) bool4))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u8))             continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u8x2))           continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u8x3))           continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u8x4))           continue;
+      if (CompareType(identifier._type, cast(*Type_Info) s32))            continue;
+      if (CompareType(identifier._type, cast(*Type_Info) s32x2))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) s32x3))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) s32x4))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u32))            continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u32x2))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u32x3))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u32x4))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) s64))            continue;
+      if (CompareType(identifier._type, cast(*Type_Info) s64x2))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) s64x3))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) s64x4))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u64))            continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u64x2))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u64x3))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) u64x4))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) f32))            continue;
+      if (CompareType(identifier._type, cast(*Type_Info) f32x2))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) f32x3))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) f32x4))          continue;
+      if (CompareType(identifier._type, cast(*Type_Info) f32x2x2))        continue;
+      if (CompareType(identifier._type, cast(*Type_Info) f32x3x3))        continue;
+      if (CompareType(identifier._type, cast(*Type_Info) f32x4x4))        continue;
+      if (CompareType(identifier._type, cast(*Type_Info) __Image__))      continue;
+      if (CompareType(identifier._type, cast(*Type_Info) __Sampler__))    continue;
+      if (CompareType(identifier._type, cast(*Type_Info) __TLAS__))       continue;
+
+      array_add(*structsToAnnotate, identifier);
+   }
+
+   for identifier: structsToAnnotate {
+      annotateInfo := GetAnnotateInfoFromStruct(identifier._type);
+      structIdentifier: Identifier = .{ type = ._Type, _type = identifier._type };
+      WriteSingleInstruction(
+         *b,
+         .Decorate,
+         GetSSAId(*data, structIdentifier),
+         SpvDecoration.Block
+      );
+
+      for annotateInfo.memberInfos {
+         WriteSingleInstruction(
+            *b,
+            .MemberDecorate,
+            GetSSAId(*data, structIdentifier),
+            it.memberIndex,
+            SpvDecoration.Offset,
+            it.offset
+         );
+      }
+   }
+
+   AppendAndStealBuffers(*b, *typesConstantsVariablesBuilder);
+
+
+   // functions
+   #if SPIRV_BUILDER_TYPE == .String {
+      print_to_builder(*b, "\n; functions\n");
+   }
+
+   AppendAndStealBuffers(*b, *functionsBuilder);
 
    #if SPIRV_BUILDER_TYPE == {
       case .String;
@@ -3131,6 +3328,35 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             print_to_builder(b, "\n");
          }
 
+         case .TraceRayKHR; {
+            assert(operands.count == 11);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+            assert(operands[4].type == cast(*Type_Info) SSAId);
+            assert(operands[5].type == cast(*Type_Info) SSAId);
+            assert(operands[6].type == cast(*Type_Info) SSAId);
+            assert(operands[7].type == cast(*Type_Info) SSAId);
+            assert(operands[8].type == cast(*Type_Info) SSAId);
+            assert(operands[9].type == cast(*Type_Info) SSAId);
+            assert(operands[10].type == cast(*Type_Info) SSAId);
+
+            tlas           := operands[0].value_pointer.(*SSAId).*;
+            rayFlags       := operands[1].value_pointer.(*SSAId).*;
+            cullMask       := operands[2].value_pointer.(*SSAId).*;
+            sbtOffset      := operands[3].value_pointer.(*SSAId).*;
+            sbtStride      := operands[4].value_pointer.(*SSAId).*;
+            missIndex      := operands[5].value_pointer.(*SSAId).*;
+            rayOrigin      := operands[6].value_pointer.(*SSAId).*;
+            rayTMin        := operands[7].value_pointer.(*SSAId).*;
+            rayDirection   := operands[8].value_pointer.(*SSAId).*;
+            rayTMax        := operands[9].value_pointer.(*SSAId).*;
+            payload        := operands[10].value_pointer.(*SSAId).*;
+
+            print_to_builder(b, "OpTraceRayKHR \%% \%% \%% \%% \%% \%% \%% \%% \%% \%% \%%\n", tlas, rayFlags, cullMask, sbtOffset, sbtStride, missIndex, rayOrigin, rayTMin, rayDirection, rayTMax, payload);
+         }
+
          case; assert(false, "not yet implemented! op: %", op);
       }
    } else #if SPIRV_BUILDER_TYPE == .Byte {
@@ -3591,7 +3817,7 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          }
 
          case .ConstantComposite; {
-            assert(operands.count >= 3);
+            assert(operands.count >= 3, "count: %", operands.count);
             assert(operands[0].type == cast(*Type_Info) SSAId);
             assert(operands[1].type == cast(*Type_Info) SSAId);
 
@@ -4253,6 +4479,44 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             }
          }
 
+         case .TraceRayKHR; {
+            assert(operands.count == 11);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+            assert(operands[3].type == cast(*Type_Info) SSAId);
+            assert(operands[4].type == cast(*Type_Info) SSAId);
+            assert(operands[5].type == cast(*Type_Info) SSAId);
+            assert(operands[6].type == cast(*Type_Info) SSAId);
+            assert(operands[7].type == cast(*Type_Info) SSAId);
+            assert(operands[8].type == cast(*Type_Info) SSAId);
+            assert(operands[9].type == cast(*Type_Info) SSAId);
+            assert(operands[10].type == cast(*Type_Info) SSAId);
+
+            tlas           := operands[0].value_pointer.(*SSAId).*;
+            rayFlags       := operands[1].value_pointer.(*SSAId).*;
+            cullMask       := operands[2].value_pointer.(*SSAId).*;
+            sbtOffset      := operands[3].value_pointer.(*SSAId).*;
+            sbtStride      := operands[4].value_pointer.(*SSAId).*;
+            missIndex      := operands[5].value_pointer.(*SSAId).*;
+            rayOrigin      := operands[6].value_pointer.(*SSAId).*;
+            rayTMin        := operands[7].value_pointer.(*SSAId).*;
+            rayDirection   := operands[8].value_pointer.(*SSAId).*;
+            rayTMax        := operands[9].value_pointer.(*SSAId).*;
+            payload        := operands[10].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) tlas, cast(u32) rayFlags, cast(u32) cullMask, cast(u32) sbtOffset, cast(u32) sbtStride, cast(u32) missIndex, cast(u32) rayOrigin, cast(u32) rayTMin, cast(u32) rayDirection, cast(u32) rayTMax, cast(u32) payload);
+         }
+
+         case .TypeAccelerationStructureKHR; {
+            assert(operands.count == 1);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+
+            result := operands[0].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) result);
+         }
+
          case; assert(false, "not yet implemented! op: %", op);
       }
    } else {
@@ -4797,7 +5061,10 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
             return;
          }
 
-         if (CompareType(type, cast(*Type_Info) PushData)) {
+         // do i need this seperately?
+         // doesnt the general .STRUCT case below already do the same?
+         //       - apila, 07/09/26
+         if (CompareType(type, cast(*Type_Info) MeshPipelinePushData)) {
             tip := New(TypeInfoPointer);
             tip.pointerTo = cast(*Type_Info) void;
             tip.storageClass = .PhysicalStorageBuffer;
@@ -4834,6 +5101,15 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
             WriteSingleInstruction(
                b,
                .TypeSampler,
+               GetSSAId(data, identifier)
+            );
+            return;
+         }
+
+         if (CompareType(type, cast(*Type_Info) __TLAS__)) {
+            WriteSingleInstruction(
+               b,
+               .TypeAccelerationStructureKHR,
                GetSSAId(data, identifier)
             );
             return;
@@ -5091,9 +5367,28 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.Private
             );
-         } else if(name == PUSH_DATA_VARIABLE_NAME) {
+         } else if(name == MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
             pointerType := New(TypeInfoPointer);
-            pointerType.pointerTo = cast(*Type_Info) PushData;
+            pointerType.pointerTo = cast(*Type_Info) MeshPipelinePushData;
+            pointerType.storageClass = .PushConstant;
+
+            pointerTypeIdentifier: Identifier = .{ type = ._Type, _type = pointerType };
+            WriteTypeOrVariableOrConstant(data, b, pointerTypeIdentifier);
+
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; push data variable\n");
+            }
+
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, pointerTypeIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.PushConstant
+            );
+         } else if(name == RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
+            pointerType := New(TypeInfoPointer);
+            pointerType.pointerTo = cast(*Type_Info) RtxPipelinePushData;
             pointerType.storageClass = .PushConstant;
 
             pointerTypeIdentifier: Identifier = .{ type = ._Type, _type = pointerType };
@@ -5148,6 +5443,25 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.UniformConstant
             );
+         } else if(name == TLAS_HEAP_VARIABLE_NAME) {
+            voidStarUC := New(TypeInfoPointer);
+            voidStarUC.pointerTo = cast(*Type_Info) void;
+            voidStarUC.storageClass = .UniformConstant;
+
+            typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
+            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; tlas heap variable\n");
+            }
+
+            WriteSingleInstruction(
+               b,
+               .UntypedVariableKHR,
+               GetSSAId(data, typeIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.UniformConstant
+            );
          } else if(name == WORKGROUP_ID_VARIABLE_NAME) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) u32x3;
@@ -5158,6 +5472,44 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
 
             #if SPIRV_BUILDER_TYPE == .String {
                print_to_builder(b, "; workgroup id variable\n");
+            }
+
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, typeIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.Input
+            );
+         } else if(name == LAUNCH_ID_VARIABLE_NAME) {
+            pointerType := New(TypeInfoPointer);
+            pointerType.pointerTo = cast(*Type_Info) u32x3;
+            pointerType.storageClass = .Input;
+
+            typeIdentifier: Identifier = .{ type = ._Type, _type = pointerType };
+            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; launch id variable\n");
+            }
+
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, typeIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.Input
+            );
+         } else if(name == LAUNCH_SIZE_VARIABLE_NAME) {
+            pointerType := New(TypeInfoPointer);
+            pointerType.pointerTo = cast(*Type_Info) u32x3;
+            pointerType.storageClass = .Input;
+
+            typeIdentifier: Identifier = .{ type = ._Type, _type = pointerType };
+            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; launch size variable\n");
             }
 
             WriteSingleInstruction(
@@ -5203,6 +5555,28 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                      GetSSAId(data, returnTypeIdentifier),
                      GetSSAId(data, identifier),
                      storageClass,
+                  );
+
+                  return;
+               }
+            }
+
+            for data.rayPayloadVariableIdentifiers {
+               if (IdentifierCompare(identifier, it)) {
+                  storageClass := SpvStorageClass.RayPayloadKHR;
+                  returnTypeIdentifier := GetPointerTypeIdentifier(it.variable.declaration.type, storageClass);
+                  WriteTypeOrVariableOrConstant(data, b, returnTypeIdentifier);
+
+                  #if SPIRV_BUILDER_TYPE == .String {
+                     print_to_builder(b, "; payload [%]\n", it_index);
+                  }
+
+                  WriteSingleInstruction(
+                     b,
+                     .Variable,
+                     GetSSAId(data, returnTypeIdentifier),
+                     GetSSAId(data, identifier),
+                     storageClass
                   );
 
                   return;
@@ -5307,8 +5681,9 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
 
    castedExpressionCode: Code;
    if shaderType == {
-      case .Mesh;       castedExpressionCode = code_of(__push_data__.meshData);
-      case .Fragment;   castedExpressionCode = code_of(__push_data__.fragmentData);
+      case .Mesh;       castedExpressionCode = code_of(__mesh_push_data__.meshData);
+      case .Fragment;   castedExpressionCode = code_of(__mesh_push_data__.fragmentData);
+      case .Rgen;       castedExpressionCode = code_of(__rtx_push_data__.rgenData);
       case; assert(false, "not yet implemented! type: %", shaderType);
    }
 
@@ -5317,9 +5692,11 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
 }
 
 GetStorageClassFromNote :: (note: string) -> SpvStorageClass {
-   if (false) {}
-   else if (note == PHYSICAL_STORAGE_BUFFER_QUALIFIER)   return .PhysicalStorageBuffer;
-   else if (note == FUNCTION_QUALIFIER)                  return .Function;
+   if note == {
+      case PHYSICAL_STORAGE_BUFFER_QUALIFIER;   return .PhysicalStorageBuffer;
+      case FUNCTION_QUALIFIER;                  return .Function;
+      case RAY_PAYLOAD_QUALIFIER;               return .RayPayloadKHR;
+   }
 
    assert(false, "note: %", note);
    return 0;
@@ -5873,7 +6250,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             case .STRUCT;
                success, type := table_find(*data.codeNodeTypes, node);
                assert(success);
-               assert(type.type == .STRUCT, "type: %, loc: %:%", type.*, node.location.enclosing_load.fully_pathed_filename, node.location);
+               assert(type.type == .STRUCT, "type: %, loc: %", type.*, GetLocationString(node));
 
                tis := cast(*Type_Info_Struct) type;
                structLiteralInfo := cl.values.struct_literal_info;
@@ -6254,6 +6631,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                RETURN(binaryArithmeticSSAId, null);
             }
 
+            // there is a problem with this. i assume that this is assignment operator. but it is not always one. i mean a little different sometimes.
+            // for example consider this:
+            //       payload: RgenPayload = .{ visible = true };
+            // the right handside should generate a constant struct. it shouldnt emit a OpStore instruction. even if it were to emit OpStore instruction the lvalue calculations below needs to change.
+            //             - apila, 09/09/26
             case #char "="; {
                // either a variable or access chain or pointer deference
                assert(cbo.left.kind == .IDENT ||
@@ -6822,6 +7204,72 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
 
                RETURN(resultSSAId, type);
             }
+
+            case TRACE_RAY_FUNCTION_NAME; {
+               // OpTraceRayKHR
+               tlasNode := arguments[0].expression;
+               tlasType := header.arguments[0].type;
+               tlasSSAId := GenerateInstructions(data, tlasNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = tlasType });
+
+               rayFlagsNode := arguments[1].expression;
+               rayFlagsType := header.arguments[1].type;
+               rayFlagsSSAId := GenerateInstructions(data, rayFlagsNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayFlagsType });
+
+               cullMaskNode := arguments[2].expression;
+               cullMaskType := header.arguments[2].type;
+               cullMaskSSAId := GenerateInstructions(data, cullMaskNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = cullMaskType });
+
+               sbtOffsetNode := arguments[3].expression;
+               sbtOffsetType := header.arguments[3].type;
+               sbtOffsetSSAId := GenerateInstructions(data, sbtOffsetNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = sbtOffsetType });
+
+               sbtStrideNode := arguments[4].expression;
+               sbtStrideType := header.arguments[4].type;
+               sbtStrideSSAId := GenerateInstructions(data, sbtStrideNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = sbtStrideType });
+
+               missIndexNode := arguments[5].expression;
+               missIndexType := header.arguments[5].type;
+               missIndexSSAId := GenerateInstructions(data, missIndexNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = missIndexType });
+
+               rayOriginNode := arguments[6].expression;
+               rayOriginType := header.arguments[6].type;
+               rayOriginSSAId := GenerateInstructions(data, rayOriginNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayOriginType });
+
+               rayTMinNode := arguments[7].expression;
+               rayTMinType := header.arguments[7].type;
+               rayTMinSSAId := GenerateInstructions(data, rayTMinNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayTMinType });
+
+               rayDirectionNode := arguments[8].expression;
+               rayDirectionType := header.arguments[8].type;
+               rayDirectionSSAId := GenerateInstructions(data, rayDirectionNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayDirectionType });
+
+               rayTMaxNode := arguments[9].expression;
+               rayTMaxType := header.arguments[9].type;
+               rayTMaxSSAId := GenerateInstructions(data, rayTMaxNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayTMaxType });
+
+               payloadNode := arguments[10].expression;
+               payloadType  := GetNodeType(payloadNode);
+               payloadSSAId := GenerateInstructions(data, payloadNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = payloadType });
+
+               WriteSingleInstructionIfReachable(
+                  function,
+                  *data.isBlockReachable,
+                  .TraceRayKHR,
+                  tlasSSAId,
+                  rayFlagsSSAId,
+                  cullMaskSSAId,
+                  sbtOffsetSSAId,
+                  sbtStrideSSAId,
+                  missIndexSSAId,
+                  rayOriginSSAId,
+                  rayTMinSSAId,
+                  rayDirectionSSAId,
+                  rayTMaxSSAId,
+                  payloadSSAId,
+               );
+
+               RETURN(0, null);
+            }
          }
 
          if (header.notes.count > 0) {
@@ -7110,10 +7558,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          variableIdentifier: Identifier = .{ type = .Variable, variable.declaration = cd };
          variableSSAId := GetSSAId(data, variableIdentifier);
 
+         isPayload := IsPayloadVariable(cd);
+
          found, variableType := table_find(*data.codeNodeTypes, node);
          assert(found);
 
-         storageClass := SpvStorageClass.Function;
+         storageClass: SpvStorageClass = ifx isPayload then .RayPayloadKHR else .Function;
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
          pointerTypeIdentifier := GetPointerTypeIdentifier(variableType, storageClass);
 
@@ -7133,7 +7583,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             // here what im checking is if the expression is constant. and in case if it is constant its identifier is returned so it can't be invalid
             // hacky stinky solution.
             //          - apila, 08/06/26
-            if (cd.expression.kind == .LITERAL && expressionIdentifier.type != .Invalid) {
+            //
+            // and shouldnt be a payload variable.
+            //          - apila, 07/09/26
+            if (cd.expression.kind == .LITERAL && expressionIdentifier.type != .Invalid && !isPayload) {
                useInitializer = true;
             } else {
                // if you just declared something you cant be storing into PhysicalStorageBuffer therefore i dont need to use the dedicated Store function
@@ -7147,26 +7600,31 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             }
          }
 
-         // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
-         operands: [..] Any;
-         array_add(*operands, GetSSAId(data, pointerTypeIdentifier));
-         array_add(*operands, variableSSAId);
-         array_add(*operands, storageClass);
+         if (isPayload) {
+            // this variable gets written to "Types, variables and constants" section.
+            array_add(*data.rayPayloadVariableIdentifiers, variableIdentifier);
+         } else {
+            // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
+            operands: [..] Any;
+            array_add(*operands, GetSSAId(data, pointerTypeIdentifier));
+            array_add(*operands, variableSSAId);
+            array_add(*operands, storageClass);
 
-         if (useInitializer) {
-            array_add(*operands, expressionSSAId);
+            if (useInitializer) {
+               array_add(*operands, expressionSSAId);
+            }
+
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(general, "; %\n", GetVariableName(variableIdentifier));
+            }
+
+            WriteSingleInstructionIfReachable(
+               general,
+               *data.isBlockReachable,
+               .Variable,
+               .. operands
+            );
          }
-
-         #if SPIRV_BUILDER_TYPE == .String {
-            print_to_builder(general, "; %\n", GetVariableName(variableIdentifier));
-         }
-
-         WriteSingleInstructionIfReachable(
-            general,
-            *data.isBlockReachable,
-            .Variable,
-            .. operands
-         );
 
          if (identifierOut != null) identifierOut.* = variableIdentifier;
          RETURN(variableSSAId, pointerTypeIdentifier._type);
@@ -7193,6 +7651,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
    return 696969;
 }
 
+IsPayloadVariable :: (cd: *Code_Declaration) -> bool {
+   return cd.notes.count == 1 && cd.notes[0].text == "payload";
+}
+
 GetNodeType :: (node: *Code_Node) -> *Type_Info #expand {
    found, type := table_find(*`data.codeNodeTypes, node);
    assert(found);
@@ -7206,7 +7668,7 @@ Signedness :: enum {
 }
 
 //
-// following functions would be trivial if i vectors were not structs. thats so dumb but i dont have anything better. kayu
+// following functions would be trivial if vectors were not to be structs. thats so dumb but i dont have anything better. kayu
 //       - apila, 06/06/26
 //
 
@@ -7293,7 +7755,7 @@ DoCast :: (data: *CompilationData, b: *BuilderType, castTo: *Type_Info, castFrom
    }
 
    // then neither pointer
-   assert(castTo.type != TYPE_INFO_POINTER_TAG && castFrom.type != TYPE_INFO_POINTER_TAG);
+   assert(castTo.type != TYPE_INFO_POINTER_TAG && castFrom.type != TYPE_INFO_POINTER_TAG, "castTo: %, castFrom: %", castTo.*, castFrom.*);
 
    // doing vector or scalar cast for integers (floats not yet implemented)
    // this is a two stage cast:
@@ -7808,6 +8270,19 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
       case .PROCEDURE_HEADER; {
          cph := cast(*Code_Procedure_Header) node;
 
+         // jai doesnt allow adding notes to the Code_Declaration if it is an argument.
+         // thats why i am doing this hack here. i just add the "payload" note to the TraceRay payload.
+         //          - apila, 08/09/26
+         if(IsTraceRayFunction(cph)) {
+            // last argument is the payload
+            assert(cph.arguments[cph.arguments.count - 1].type.type == .POINTER);
+
+            notes := NewArray(1, *Code_Note);
+            notes[0] = New(Code_Note);
+            notes[0].text = RAY_PAYLOAD_QUALIFIER;
+            cph.arguments[cph.arguments.count - 1].notes = notes;
+         }
+
          for cph.arguments {
             DetermineCodeNodeTypes(data, it);
          }
@@ -7835,7 +8310,7 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          cpc := cast(*Code_Procedure_Call) node;
          assert(cpc.resolved_procedure_expression != null, "loc: %", cpc.location);
          assert(cpc.resolved_procedure_expression.kind == .PROCEDURE_HEADER || // constant function
-                cpc.resolved_procedure_expression.kind == .IDENT || // not constant function (intrinsics go here)
+                cpc.resolved_procedure_expression.kind == .IDENT || // not constant function
                 cpc.resolved_procedure_expression.kind == .BINARY_OPERATOR, // namespaces
                 "kind: %", cpc.resolved_procedure_expression.kind
          );
@@ -8051,6 +8526,10 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
    assert(false, "didnt return! kind: %", node.kind);
    return null;
+}
+
+IsTraceRayFunction :: (cph: *Code_Procedure_Header) -> bool {
+   return cph.name == TRACE_RAY_FUNCTION_NAME;
 }
 
 UnwindVariantsUpToDistinct :: #bake_arguments UnwindVariants(ignoreDistinct = false);
@@ -8300,12 +8779,16 @@ IsStructLiteralConstant :: (literal: *Code_Literal) -> bool {
 }
 
 GetVariableIdentifier :: (ci: *Code_Ident) -> Identifier {
-   if (ci.name == MESH_VERTICES_NAME            ||
-       ci.name == MESH_TRIANGLES_NAME           ||
-       ci.name == PUSH_DATA_VARIABLE_NAME       ||
-       ci.name == IMAGE_HEAP_VARIABLE_NAME      ||
-       ci.name == SAMPLER_HEAP_VARIABLE_NAME    ||
-       ci.name == WORKGROUP_ID_VARIABLE_NAME    ||
+   if (ci.name == MESH_VERTICES_NAME                     ||
+       ci.name == MESH_TRIANGLES_NAME                    ||
+       ci.name == MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME  ||
+       ci.name == RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME   ||
+       ci.name == IMAGE_HEAP_VARIABLE_NAME               ||
+       ci.name == SAMPLER_HEAP_VARIABLE_NAME             ||
+       ci.name == TLAS_HEAP_VARIABLE_NAME                ||
+       ci.name == WORKGROUP_ID_VARIABLE_NAME             ||
+       ci.name == LAUNCH_ID_VARIABLE_NAME                ||
+       ci.name == LAUNCH_SIZE_VARIABLE_NAME              ||
        ci.name == LOCAL_INVOCATION_ID_VARIABLE_NAME) {
       return .{ type = .Variable, variable = .{ useName = true, name = ci.name } };
    }
@@ -8328,7 +8811,11 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
       return .Output;
    }
 
-   if (name == PUSH_DATA_VARIABLE_NAME) {
+   if (name == MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
+      return .PushConstant;
+   }
+
+   if (name == RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
       return .PushConstant;
    }
 
@@ -8340,7 +8827,19 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
       return .UniformConstant;
    }
 
+   if (name == TLAS_HEAP_VARIABLE_NAME) {
+      return .UniformConstant;
+   }
+
    if (name == WORKGROUP_ID_VARIABLE_NAME) {
+      return .Input;
+   }
+
+   if (name == LAUNCH_ID_VARIABLE_NAME) {
+      return .Input;
+   }
+
+   if (name == LAUNCH_SIZE_VARIABLE_NAME) {
       return .Input;
    }
 
@@ -8366,6 +8865,10 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
 
    if (IdentifierCompare(variable, data.fragmentPrimitiveInVariableIdentifier)) {
       return .Input;
+   }
+
+   if (IsPayloadVariable(declaration.declaration)) {
+      return .RayPayloadKHR;
    }
 
    // user declared variables are always in a function.
@@ -8768,6 +9271,11 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
          baseVariableData = .SamplerHeapVariable;
       }
 
+      case TLAS_HEAP_VARIABLE_NAME; {
+         jaiReturnType = cast(*Type_Info) void;
+         baseVariableData = .TLASHeapVariable;
+      }
+
       case; {
          jaiReturnType = lastAccessOperationJaiType;
          baseVariableData = .Another;
@@ -8825,6 +9333,8 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
          loadedTypeIdentifier = .{ type = ._Type, _type = baseArrayElementTypeIfImageHeap };
       case .SamplerHeapVariable;
          loadedTypeIdentifier = .{ type = ._Type, _type = cast(*Type_Info) __Sampler__ };
+      case .TLASHeapVariable;
+         loadedTypeIdentifier = .{ type = ._Type, _type = cast(*Type_Info) __TLAS__ };
       case .Another;
          loadedTypeIdentifier = .{ type = ._Type, _type = tip.pointerTo };
    }
@@ -8838,6 +9348,7 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
 DoDotsAndArraySubscriptsBaseVariableData :: enum {
    ImageHeapVariable;
    SamplerHeapVariable;
+   TLASHeapVariable;
    Another;
 }
 
@@ -8884,6 +9395,21 @@ EmitAccessChain :: (data: *CompilationData, b: *BuilderType, returnTypeIdentifie
 
       tira := New(TypeInfoRuntimeArray);
       tira.elementType = baseArrayElementTypeIfImageHeap;
+      baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
+
+      op = .UntypedAccessChainKHR;
+      array_add(*operands, GetSSAId(data, returnTypeIdentifier));
+      array_add(*operands, lValueSSAId);
+      array_add(*operands, GetSSAId(data, baseTypeIdentifier));
+      array_add(*operands, baseSSAId);
+   } else if (CompareType(spirvBaseType.pointerTo, cast(*Type_Info) type_of(tlases))) {
+      assert(spirvBaseType.pointerTo.type != TYPE_INFO_POINTER_TAG); // required by specs
+
+      assert(spirvBaseType.pointerTo.type == .ARRAY);
+      tia := cast(*Type_Info_Array) spirvBaseType.pointerTo;
+
+      tira := New(TypeInfoRuntimeArray);
+      tira.elementType = tia.element_type;
       baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
 
       op = .UntypedAccessChainKHR;

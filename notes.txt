@@ -43,3 +43,37 @@ FragmentMain :: (data: *FragmentData) -> vec4, vec4, ... /* returns a color for 
 JAI
 
       - apila, 02/04/26
+
+
+Rgen :: (/* idk about the parameters */, data: *RgenData) {
+   // maybe something like this. if this is a parameter then we cant modify it so i have to make it a local/global variable.
+   // or idk maybe the note is not necessary since i can figure out the variable from the TraceRay() function parameters.
+   payload: Payload @payload;
+} @rgen
+
+Rchit :: (/* idk about the parameters */, data: *RchitData) {
+   // again it would be better the declare this as a parameter but in jai you cant do that.
+   // this variable can be global too, in that case you dont have to declare it twice but need to be careful not to cause name clash
+   payload: Payload @payload;
+} @rchit
+
+there is a kind of nasty workaround to the payload cannot be a parameter problem. if you make the Rgen and Rchit a macro then you can have the payload as a parameter.
+i think this might be a valid solution considering the alternatives.
+
+Rgen :: (payload: Payload, data: *RgenData) #expand {
+   payload.visible = true;
+   TraceRay(..., payload);
+}
+
+Rchit :: (payload: Payload, data: *RchitData) #expand {
+   payload.visible = false;
+}
+
+i also dont like the idea of the #expand because a thing like the following doesnt generate a compile error:
+   F :: (v: Vector3) #expand {
+      v.x = 0;
+      totallyNotValidButParseble = 10;
+      adasd;
+   }
+
+      - apila, 05/09/26
