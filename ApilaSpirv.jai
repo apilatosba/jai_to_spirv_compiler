@@ -256,6 +256,7 @@ userFunctionArguments:        Table(*Code_Declaration, struct {}); // this conta
 MESH_SHADER_NOTE_NAME      :: "mesh";
 FRAGMENT_SHADER_NOTE_NAME  :: "fragment";
 RGEN_SHADER_NOTE_NAME      :: "rgen";
+RCHIT_SHADER_NOTE_NAME     :: "rchit";
 
 // this is not required for anything. but i have it to debug faster. so that i can check the note to see if it is intrinsic and thats it
 //          - apila, 07/06/26
@@ -328,14 +329,12 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
    // shader type
    assert(notes.count >= 1, "no notes on entry point!");
    typeNote := notes[0];
-   if (typeNote == MESH_SHADER_NOTE_NAME) {
-      shaderType = .Mesh;
-   } else if (typeNote == FRAGMENT_SHADER_NOTE_NAME) {
-      shaderType = .Fragment;
-   } else if (typeNote == RGEN_SHADER_NOTE_NAME) {
-      shaderType = .Rgen;
-   } else {
-      assert(false, "not yet implemented! note: %", typeNote);
+   if typeNote == {
+      case MESH_SHADER_NOTE_NAME;      shaderType = .Mesh;
+      case FRAGMENT_SHADER_NOTE_NAME;  shaderType = .Fragment;
+      case RGEN_SHADER_NOTE_NAME;      shaderType = .Rgen;
+      case RCHIT_SHADER_NOTE_NAME;     shaderType = .Rchit;
+      case; assert(false, "not yet implemented! note: %", typeNote);
    }
 
    if shaderType == {
@@ -397,6 +396,10 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
          assert(notes.count == 1, "rgen shader must take no additional notes");
       }
 
+      case .Rchit; {
+         assert(notes.count == 1, "rchit shader must take no additional notes");
+      }
+
       case; assert(false, "not yet implemented! type: %", shaderType);
    }
 
@@ -414,7 +417,8 @@ IsProcedureShaderEntryPoint :: (header: *Code_Procedure_Header) -> bool {
 
    return header.notes[0].text == MESH_SHADER_NOTE_NAME ||
           header.notes[0].text == FRAGMENT_SHADER_NOTE_NAME ||
-          header.notes[0].text == RGEN_SHADER_NOTE_NAME;
+          header.notes[0].text == RGEN_SHADER_NOTE_NAME ||
+          header.notes[0].text == RCHIT_SHADER_NOTE_NAME;
 }
 
 // TODO
@@ -516,6 +520,7 @@ TRACE_RAY_FUNCTION_NAME                   :: "TraceRay";
 FUNCTION_QUALIFIER                        :: "function";
 PHYSICAL_STORAGE_BUFFER_QUALIFIER         :: "physical";
 RAY_PAYLOAD_QUALIFIER                     :: "payload";
+INCOMING_RAY_PAYLOAD_QUALIFIER            :: "payloadin"; // IncomingRayPayloadKHR
 
 MeshPipelinePushData :: struct {
    taskData:      *void;
@@ -889,6 +894,7 @@ ShaderType :: enum {
    Fragment;
    Compute;
    Rgen;
+   Rchit;
 }
 
 // == must be defined on T
@@ -1125,6 +1131,7 @@ CompilationData :: struct {
                                                             //    - apila, 09/05/26
    glslStd450:                               SSAId;
    rayPayloadVariableIdentifiers:            [..] Identifier;
+   incomingRayPayloadVariableIdentifier:     Identifier;
 
    HashStringArray :: (x: [] string) -> u32 {
       #import "Hash";
@@ -1267,6 +1274,20 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          }
       }
 
+      case .Rchit; {
+         index := 0;
+
+         // first argument: data: *RchitData
+         {
+            defer index += 1;
+
+            assert(header.arguments.count > index, "not enough arguments");
+            assert(header.arguments[index].type.type == .POINTER, "first argument wrong");
+            tip := cast(*Type_Info_Pointer) header.arguments[index].type;
+            data.shaderDataPointerVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
+         }
+      }
+
       case; assert(false, "not implemented yet. type: %", type);
    }
 
@@ -1317,6 +1338,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          assert(header.returns.count == 0, "rgen shader must return nothing");
       }
 
+      case .Rchit; {
+         assert(header.returns.count == 0, "rchit shader must return nothing");
+      }
+
       case; assert(false, "not implemented yet. type: %", type);
    }
 
@@ -1352,6 +1377,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       case .Mesh;
       case .Fragment;
       case .Rgen;
+      case .Rchit;
       case; assert(false, "not yet implemented! following code is not written for this type in mind yet. type: %", type);
    }
 
@@ -1374,6 +1400,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             WriteSingleInstruction(*b, .Capability, SpvCapability.Shader);
          }
 
+         case .Rchit; #through;
          case .Rgen; {
             WriteSingleInstruction(*b, .Capability, SpvCapability.RayTracingKHR);
          }
@@ -1395,6 +1422,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             WriteSingleInstruction(*b, .Extension, "SPV_EXT_mesh_shader");
          }
 
+         case .Rchit; #through;
          case .Rgen; {
             WriteSingleInstruction(*b, .Extension, "SPV_KHR_ray_tracing");
          }
@@ -1469,6 +1497,27 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(*b, .EntryPoint, ..operands);
       }
 
+      case .Rchit; {
+         operands: [..] Any;
+         array_add(*operands, SpvExecutionModel.ClosestHitKHR);
+         array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
+         array_add(*operands, "ApilaRchit");
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = TLAS_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, data.incomingRayPayloadVariableIdentifier));
+
+         for data.rayPayloadVariableIdentifiers {
+            array_add(*operands, ac(GetSSAId(*data, it)));
+         }
+
+         WriteSingleInstruction(*b, .EntryPoint, ..operands);
+      }
+
       case; assert(false, "should have been unreachable because of the if check above.");
    }
 
@@ -1516,6 +1565,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       }
 
       case .Rgen; {
+         // nothing i guess Clueless
+      }
+
+      case .Rchit; {
          // nothing i guess Clueless
       }
 
@@ -1622,6 +1675,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          // nothing i guess. there is no Location stuff in rgen.
       }
 
+      case .Rchit; {
+         // nothing i guess. there is no Location stuff in rgen.
+      }
+
       case; assert(false, "should have been unreachable because of the outer case.");
    }
 
@@ -1682,6 +1739,24 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       //    HitKindKHR
       //    IncomingRayFlagsKHR
       case .Rgen; {
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.LaunchIdKHR
+         );
+
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.LaunchSizeKHR
+         );
+      }
+
+      case .Rchit; {
          WriteSingleInstruction(
             *b,
             .Decorate,
@@ -5367,6 +5442,22 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.Private
             );
+         } else if(IdentifierCompare(identifier, data.incomingRayPayloadVariableIdentifier)) {
+            storageClass := SpvStorageClass.IncomingRayPayloadKHR;
+            returnTypeIdentifier := GetPointerTypeIdentifier(identifier.variable.declaration.type, storageClass);
+            WriteTypeOrVariableOrConstant(data, b, returnTypeIdentifier);
+
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; payload [%]\n", it_index);
+            }
+
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, returnTypeIdentifier),
+               GetSSAId(data, identifier),
+               storageClass
+            );
          } else if(name == MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) MeshPipelinePushData;
@@ -5684,6 +5775,7 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
       case .Mesh;       castedExpressionCode = code_of(__mesh_push_data__.meshData);
       case .Fragment;   castedExpressionCode = code_of(__mesh_push_data__.fragmentData);
       case .Rgen;       castedExpressionCode = code_of(__rtx_push_data__.rgenData);
+      case .Rchit;      castedExpressionCode = code_of(__rtx_push_data__.rchitData);
       case; assert(false, "not yet implemented! type: %", shaderType);
    }
 
@@ -5696,6 +5788,7 @@ GetStorageClassFromNote :: (note: string) -> SpvStorageClass {
       case PHYSICAL_STORAGE_BUFFER_QUALIFIER;   return .PhysicalStorageBuffer;
       case FUNCTION_QUALIFIER;                  return .Function;
       case RAY_PAYLOAD_QUALIFIER;               return .RayPayloadKHR;
+      case INCOMING_RAY_PAYLOAD_QUALIFIER;      return .IncomingRayPayloadKHR;
    }
 
    assert(false, "note: %", note);
@@ -7559,11 +7652,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          variableSSAId := GetSSAId(data, variableIdentifier);
 
          isPayload := IsPayloadVariable(cd);
+         isIncomingPayload := IsIncomingPayloadVariable(cd);
 
          found, variableType := table_find(*data.codeNodeTypes, node);
          assert(found);
 
-         storageClass: SpvStorageClass = ifx isPayload then .RayPayloadKHR else .Function;
+         storageClass := GetVariableStorageClass(data, variableIdentifier);
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
          pointerTypeIdentifier := GetPointerTypeIdentifier(variableType, storageClass);
 
@@ -7586,7 +7680,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             //
             // and shouldnt be a payload variable.
             //          - apila, 07/09/26
-            if (cd.expression.kind == .LITERAL && expressionIdentifier.type != .Invalid && !isPayload) {
+            if (cd.expression.kind == .LITERAL && expressionIdentifier.type != .Invalid && !isPayload && !isIncomingPayload) {
                useInitializer = true;
             } else {
                // if you just declared something you cant be storing into PhysicalStorageBuffer therefore i dont need to use the dedicated Store function
@@ -7603,6 +7697,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          if (isPayload) {
             // this variable gets written to "Types, variables and constants" section.
             array_add(*data.rayPayloadVariableIdentifiers, variableIdentifier);
+         } else if (isIncomingPayload) {
+            // this variable gets written to "Types, variables and constants" section.
+            assert(data.incomingRayPayloadVariableIdentifier.type == .Invalid, "only one payloadin variable is allowed");
+            data.incomingRayPayloadVariableIdentifier = variableIdentifier;
          } else {
             // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
             operands: [..] Any;
@@ -7652,7 +7750,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
 }
 
 IsPayloadVariable :: (cd: *Code_Declaration) -> bool {
-   return cd.notes.count == 1 && cd.notes[0].text == "payload";
+   return cd.notes.count == 1 && cd.notes[0].text == RAY_PAYLOAD_QUALIFIER;
+}
+
+IsIncomingPayloadVariable :: (cd: *Code_Declaration) -> bool {
+   return cd.notes.count == 1 && cd.notes[0].text == INCOMING_RAY_PAYLOAD_QUALIFIER;
 }
 
 GetNodeType :: (node: *Code_Node) -> *Type_Info #expand {
@@ -8869,6 +8971,10 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
 
    if (IsPayloadVariable(declaration.declaration)) {
       return .RayPayloadKHR;
+   }
+
+   if (IsIncomingPayloadVariable(declaration.declaration)) {
+      return .IncomingRayPayloadKHR;
    }
 
    // user declared variables are always in a function.

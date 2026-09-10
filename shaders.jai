@@ -15,6 +15,15 @@ RgenShader :: (data: *RgenData) {
    TraceRay(tlases[data.tlasOffset], 0, 0, 0, 0, 0, f32x3.{0,0,0}, 0, f32x3.{0,0,0}, 0, *payload);
 } @rgen
 
+RchitData :: struct {
+   imageOffset: s32;
+}
+
+RchitShader :: (data: *RchitData) {
+   payload: RgenPayload; @payloadin
+   payload.visible = false;
+} @rchit
+
 MeshOutVertex :: struct {
    uv: f32x2;
 }
