@@ -265,6 +265,7 @@ MESH_SHADER_NOTE_NAME      :: "mesh";
 FRAGMENT_SHADER_NOTE_NAME  :: "fragment";
 RGEN_SHADER_NOTE_NAME      :: "rgen";
 RCHIT_SHADER_NOTE_NAME     :: "rchit";
+RMISS_SHADER_NOTE_NAME     :: "rmiss";
 
 // this is not required for anything. but i have it to debug faster. so that i can check the note to see if it is intrinsic and thats it
 //          - apila, 07/06/26
@@ -342,6 +343,7 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
       case FRAGMENT_SHADER_NOTE_NAME;  shaderType = .Fragment;
       case RGEN_SHADER_NOTE_NAME;      shaderType = .Rgen;
       case RCHIT_SHADER_NOTE_NAME;     shaderType = .Rchit;
+      case RMISS_SHADER_NOTE_NAME;     shaderType = .Rmiss;
       case; assert(false, "not yet implemented! note: %", typeNote);
    }
 
@@ -408,6 +410,10 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
          assert(notes.count == 1, "rchit shader must take no additional notes");
       }
 
+      case .Rmiss; {
+         assert(notes.count == 1, "rmiss shader must take no additional notes");
+      }
+
       case; assert(false, "not yet implemented! type: %", shaderType);
    }
 
@@ -423,10 +429,11 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
 IsProcedureShaderEntryPoint :: (header: *Code_Procedure_Header) -> bool {
    if (header.notes.count < 1) return false;
 
-   return header.notes[0].text == MESH_SHADER_NOTE_NAME ||
-          header.notes[0].text == FRAGMENT_SHADER_NOTE_NAME ||
-          header.notes[0].text == RGEN_SHADER_NOTE_NAME ||
-          header.notes[0].text == RCHIT_SHADER_NOTE_NAME;
+   return header.notes[0].text == MESH_SHADER_NOTE_NAME        ||
+          header.notes[0].text == FRAGMENT_SHADER_NOTE_NAME    ||
+          header.notes[0].text == RGEN_SHADER_NOTE_NAME        ||
+          header.notes[0].text == RCHIT_SHADER_NOTE_NAME       ||
+          header.notes[0].text == RMISS_SHADER_NOTE_NAME;
 }
 
 // TODO
@@ -540,6 +547,7 @@ MeshPipelinePushData :: struct {
 RtxPipelinePushData :: struct {
    rgenData:   *void;
    rchitData:  *void;
+   rmissData:  *void;
 }
 
 #insert #run sprint("%: MeshPipelinePushData;", MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME);
@@ -904,6 +912,7 @@ ShaderType :: enum {
    Compute;
    Rgen;
    Rchit;
+   Rmiss;
 }
 
 // == must be defined on T
@@ -1297,6 +1306,20 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          }
       }
 
+      case .Rmiss; {
+         index := 0;
+
+         // first argument: data: *RmissData
+         {
+            defer index += 1;
+
+            assert(header.arguments.count > index, "not enough arguments");
+            assert(header.arguments[index].type.type == .POINTER, "first argument wrong");
+            tip := cast(*Type_Info_Pointer) header.arguments[index].type;
+            data.shaderDataPointerVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[index] };
+         }
+      }
+
       case; assert(false, "not implemented yet. type: %", type);
    }
 
@@ -1351,6 +1374,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          assert(header.returns.count == 0, "rchit shader must return nothing");
       }
 
+      case .Rmiss; {
+         assert(header.returns.count == 0, "rmiss shader must return nothing");
+      }
+
       case; assert(false, "not implemented yet. type: %", type);
    }
 
@@ -1387,6 +1414,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       case .Fragment;
       case .Rgen;
       case .Rchit;
+      case .Rmiss;
       case; assert(false, "not yet implemented! following code is not written for this type in mind yet. type: %", type);
    }
 
@@ -1410,6 +1438,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          }
 
          case .Rchit; #through;
+         case .Rmiss; #through;
          case .Rgen; {
             WriteSingleInstruction(*b, .Capability, SpvCapability.RayTracingKHR);
          }
@@ -1431,6 +1460,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             WriteSingleInstruction(*b, .Extension, "SPV_EXT_mesh_shader");
          }
 
+         case .Rmiss; #through;
          case .Rchit; #through;
          case .Rgen; {
             WriteSingleInstruction(*b, .Extension, "SPV_KHR_ray_tracing");
@@ -1527,6 +1557,27 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(*b, .EntryPoint, ..operands);
       }
 
+      case .Rmiss; {
+         operands: [..] Any;
+         array_add(*operands, SpvExecutionModel.MissKHR);
+         array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
+         array_add(*operands, "ApilaRmiss");
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = TLAS_HEAP_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, data.incomingRayPayloadVariableIdentifier));
+
+         for data.rayPayloadVariableIdentifiers {
+            array_add(*operands, ac(GetSSAId(*data, it)));
+         }
+
+         WriteSingleInstruction(*b, .EntryPoint, ..operands);
+      }
+
       case; assert(false, "should have been unreachable because of the if check above.");
    }
 
@@ -1578,6 +1629,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       }
 
       case .Rchit; {
+         // nothing i guess Clueless
+      }
+
+      case .Rmiss; {
          // nothing i guess Clueless
       }
 
@@ -1688,6 +1743,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          // nothing i guess. there is no Location stuff in rgen.
       }
 
+      case .Rmiss; {
+         // nothing i guess. there is no Location stuff in rgen.
+      }
+
       case; assert(false, "should have been unreachable because of the outer case.");
    }
 
@@ -1766,6 +1825,24 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       }
 
       case .Rchit; {
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.LaunchIdKHR
+         );
+
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }),
+            SpvDecoration.BuiltIn,
+            SpvBuiltIn.LaunchSizeKHR
+         );
+      }
+
+      case .Rmiss; {
          WriteSingleInstruction(
             *b,
             .Decorate,
@@ -5818,6 +5895,7 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
       case .Fragment;   castedExpressionCode = code_of(__mesh_push_data__.fragmentData);
       case .Rgen;       castedExpressionCode = code_of(__rtx_push_data__.rgenData);
       case .Rchit;      castedExpressionCode = code_of(__rtx_push_data__.rchitData);
+      case .Rmiss;      castedExpressionCode = code_of(__rtx_push_data__.rmissData);
       case; assert(false, "not yet implemented! type: %", shaderType);
    }
 

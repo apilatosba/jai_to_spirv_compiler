@@ -70,7 +70,17 @@ RchitData :: struct {
 RchitShader :: (data: *RchitData) {
    payload: RgenPayload; @payloadin
    payload.visible = false;
+   payload.hitColor = f32x4.{1,0,0,1};
 } @rchit
+
+RmissData :: struct {
+}
+
+RmissShader :: (data: *RmissData) {
+   payload: RgenPayload; @payloadin
+   payload.visible = true;
+   payload.hitColor = f32x4.{0,0,1,1};
+} @rmiss
 
 MeshOutVertex :: struct {
    uv: f32x2;
