@@ -3,16 +3,64 @@
 
 RgenData :: struct {
    tlasOffset: s32;
+   imageOffset: s32;
    lights: *s32;
 }
 
 RgenPayload :: struct {
    visible: bool;
+   hitColor: f32x4;
 }
 
 RgenShader :: (data: *RgenData) {
+   // // Get the coordinates of the current pixel
+   // ivec2 pixelCoords = ivec2(gl_LaunchIDEXT.xy);
+   // vec2 dims = vec2(gl_LaunchSizeEXT.xy);
+
+   // // Normalize coordinates to a range from -1.0 to 1.0
+   // vec2 uv = (vec2(pixelCoords) + vec2(0.5)) / dims;
+   // vec2 d = uv * 2.0 - 1.0;
+
+   // // Set up a simple camera looking forward down the Z axis
+   // vec3 origin    = vec3(0.0, 0.0, -2.0);
+   // vec3 direction = normalize(vec3(d.x, d.y, 1.0));
+
+   // uint rayFlags = gl_RayFlagsOpaqueEXT;
+   // float tMin    = 0.001;
+   // float tMax    = 1000.0;
+
+   // // this doesnt terminate (program behaves the same if i put an infinite loop here instead)
+   // traceRayEXT(
+   //    tlas[rgenData.tlasOffset],           // acceleration structure
+   //    rayFlags,       // rayFlags
+   //    0xFF,           // cullMask
+   //    0,              // sbtRecordOffset
+   //    0,              // sbtRecordStride
+   //    0,              // missIndex
+   //    origin,         // ray origin
+   //    tMin,           // ray min range
+   //    direction,      // ray direction
+   //    tMax,           // ray max range
+   //    0               // payload location index
+   // );
+
+   // // Write the color returned by the hit or miss shader to our image
+   // imageStore(image[rgenData.imageOffset], pixelCoords, vec4(hitColor, 1.0));
    payload: RgenPayload; @payload
-   TraceRay(tlases[data.tlasOffset], 0, 0, 0, 0, 0, f32x3.{0,0,0}, 0, f32x3.{0,0,0}, 0, *payload);
+
+   pixelCoordinates := s32x2.{xx launchid.x, xx launchid.y};
+   dimensions := f32x2.{xx launchsize.x, xx launchsize.y};
+   uv := (cast,force(f32x2, pixelCoordinates) + f32x2.{0.5, 0.5}) / dimensions;
+   d := uv * f32x2.{2, 2} - f32x2.{1, 1}; // :broadcast
+   origin := f32x3.{0,0,-2};
+   direction := normalize(f32x3.{d.x, d.y, 1});
+   rayFlags: u32 = 1;
+   tMin := 0.0001;
+   tMax := 1000.0;
+
+   payload.hitColor = f32x4.{1,0,1,1};
+   TraceRay(tlases[data.tlasOffset], rayFlags, 0xFF, 0, 0, 0, origin, tMin, direction, tMax, *payload);
+   ImageWrite(images[data.imageOffset], pixelCoordinates, payload.hitColor);
 } @rgen
 
 RchitData :: struct {

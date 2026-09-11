@@ -109,12 +109,16 @@ operator *  :: (a: mat4, b: mat4)   -> mat4  { return .{}; }; // this is not val
 operator *  :: (v: f32x3, s: f32)   -> f32x3 { return .{}; }
 operator *  :: (a: f32x3, b: f32x3) -> f32x3 { return .{}; }
 operator *  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
+operator *  :: (a: f32x2, b: f32)   -> f32x2 { return .{}; }
 operator *  :: (s: f32, v: f32x3)   -> f32x3 { return .{}; }
 operator -  :: (v: f32x3, s: f32)   -> f32x3 { return .{}; }
+operator -  :: (v: f32x2, s: f32)   -> f32x2 { return .{}; }
 operator -  :: (a: f32x3, b: f32x3) -> f32x3 { return .{}; }
+operator -  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
 operator -  :: (a: f32x3)           -> f32x3 { return .{}; }
 operator -  :: (s: f32, v: f32x3)   -> f32x3 { return .{}; }
 operator /  :: (a: f32x3, b: f32x3) -> f32x3 { return .{}; }
+operator /  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
 operator /  :: (v: f32x3, s: f32)   -> f32x3 { return .{}; }
 operator +  :: (v: f32x3, s: f32)   -> f32x3 { return .{}; }
 operator +  :: (v: f32x2, s: f32)   -> f32x2 { return .{}; }
@@ -132,6 +136,10 @@ operator +  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
 #insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2)            -> f32x4 { return .{}; } @%", TEXTURE_FLOAT_2D_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 #insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2, lod: f32)  -> f32x4 { return .{}; } @%", TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 #insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2)            -> s32x4 { return .{}; } @%", TEXTURE_INT_2D_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
+
+// overloads determine the type of some stuff.
+// type of texel determines the sampled type of OpTypeImage.
+#insert #run sprint("% :: (image: __Image__, coordinate: s32x2, texel: f32x4) { } @%", IMAGE_WRITE_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
 #insert #run sprint("%: u32x3;", WORKGROUP_ID_VARIABLE_NAME);
 #insert #run sprint("%: u32x3;", LAUNCH_ID_VARIABLE_NAME);
@@ -495,6 +503,7 @@ TEXTURE_FLOAT_2D_FUNCTION_NAME            :: "texture";
 TEXTURE_FLOAT_3D_FUNCTION_NAME            :: "texture3d";
 TEXTURE_INT_2D_FUNCTION_NAME              :: "texturei";
 TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME        :: "texturelod";
+IMAGE_WRITE_FUNCTION_NAME                 :: "ImageWrite";
 WORKGROUP_ID_VARIABLE_NAME                :: "workgroupid";
 LOCAL_INVOCATION_ID_VARIABLE_NAME         :: "localinvocationid";
 LAUNCH_ID_VARIABLE_NAME                   :: "launchid"; // LaunchIdKHR
@@ -4371,6 +4380,19 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand);
          }
 
+         case .ConvertSToF; {
+            assert(operands.count == 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            resultType := operands[0].value_pointer.(*SSAId).*;
+            result     := operands[1].value_pointer.(*SSAId).*;
+            operand    := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) resultType, cast(u32) result, cast(u32) operand);
+         }
+
          case .LoopMerge; {
             assert(operands.count >= 3);
             assert(operands[0].type == cast(*Type_Info) SSAId);
@@ -4590,6 +4612,26 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
             result := operands[0].value_pointer.(*SSAId).*;
 
             array_add(b, OpWordCount(op, operands.count), cast(u32) result);
+         }
+
+         case .ImageWrite; {
+            assert(operands.count >= 3);
+            assert(operands[0].type == cast(*Type_Info) SSAId);
+            assert(operands[1].type == cast(*Type_Info) SSAId);
+            assert(operands[2].type == cast(*Type_Info) SSAId);
+
+            image       := operands[0].value_pointer.(*SSAId).*;
+            coordinate  := operands[1].value_pointer.(*SSAId).*;
+            texel       := operands[2].value_pointer.(*SSAId).*;
+
+            array_add(b, OpWordCount(op, operands.count), cast(u32) image, cast(u32) coordinate, cast(u32) texel);
+
+            for 3..operands.count - 1 {
+               assert(operands[it].type == cast(*Type_Info) SSAId);
+
+               operand := operands[it].value_pointer.(*SSAId).*;
+               array_add(b, xx operand);
+            }
          }
 
          case; assert(false, "not yet implemented! op: %", op);
@@ -6898,6 +6940,44 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                RETURN(sampledValueSSAId, cast(*Type_Info) f32x4);
             }
 
+            case IMAGE_WRITE_FUNCTION_NAME; {
+               imageNode := arguments[0].expression;
+
+               coordinateNode := arguments[1].expression;
+               coordinateType := GetNodeType(header.arguments[1]);
+
+               texelNode := arguments[2].expression;
+               texelType := GetNodeType(header.arguments[2]);
+
+               sampledType := GetScalarTypeOrVectorElementType(texelType);
+
+               imageType := New(TypeInfoImage);
+               imageType.* = .{
+                  sampledType       = sampledType,
+                  dimensionality    = ._2D,
+                  depth             = 0, // maybe use 2 idk. in texture functions i have seperate overloads for depth i think, but for this idk.    - apila, 11/09/26
+                  arrayed           = 0,
+                  ms                = 0,
+                  sampled           = 2,
+                  imageFormat       = .Unknown,
+               };
+
+               imageSSAId        := GenerateInstructions(data, imageNode,      general, function, currentFunction, .{ accessChainBaseArrayElementTypeIfImageHeap = imageType });
+               coordinateSSAId   := GenerateInstructions(data, coordinateNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = coordinateType });
+               texelSSAId        := GenerateInstructions(data, texelNode,      general, function, currentFunction, .{ spirvShouldHaveBeenType = texelType });
+
+               WriteSingleInstructionIfReachable(
+                  function,
+                  *data.isBlockReachable,
+                  .ImageWrite,
+                  imageSSAId,
+                  coordinateSSAId,
+                  texelSSAId
+               );
+
+               RETURN(0, null);
+            }
+
             case MUL_FUNCTION_NAME; {
                // i use mul only for matrix x matrix multiplications
                // for the others i use the * operator. the reason is jai doesnt let me use the * operator for matrix types
@@ -7341,7 +7421,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                rayTMaxSSAId := GenerateInstructions(data, rayTMaxNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayTMaxType });
 
                payloadNode := arguments[10].expression;
-               payloadType  := GetNodeType(payloadNode);
+               payloadType  := GetNodeType(header.arguments[10]);
                payloadSSAId := GenerateInstructions(data, payloadNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = payloadType });
 
                WriteSingleInstructionIfReachable(
@@ -8448,8 +8528,8 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
          type := ConvertJaiTypeIfNecessary(cd.type, cd.notes);
 
-         isGlobalConstant := table_contains(*globalConstantDeclarations, cd);
-         isLocalDeclaration := !isGlobalConstant;
+         storageClass := GetVariableStorageClass(data, .{ type = .Variable, variable.declaration = cd });
+         isLocalDeclaration := storageClass == .Function;
 
          // i am not sure but this might need to be recursive.
          // that is if a member is also a struct i might need to recurse into it too. idk
@@ -8977,10 +9057,20 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
       return .IncomingRayPayloadKHR;
    }
 
+   isGlobalConstant := table_contains(*globalConstantDeclarations, declaration.declaration);
+   if (isGlobalConstant) {
+      // they dont really exists.
+      // idk. maybe probably this is true for any constant? not just global scope.
+      return .Max;
+   }
+
    // user declared variables are always in a function.
    //
    // the note above is true since i do not allow global variables yet. idk what to do when i do allow global variables. maybe qualifiers may come in handy
    //    - apila, 29/05/26
+   //
+   // i only allow global variables if it is a constant or if it is some allowed stuff like ray payload (which is checked above).
+   //       - apila, 11/09/26
    return .Function;
 }
 
