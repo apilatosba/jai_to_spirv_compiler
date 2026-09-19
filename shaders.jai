@@ -1,6 +1,22 @@
 #import "File";
 #import,file "ApilaSpirv.jai";
 
+FixedArrayTest :: (data: *RgenData) {
+   x: [3] f32;
+   x[1] = x[0];
+} @rgen
+
+ArrayShaderData :: struct {
+   lights: [] s32;
+}
+
+ArrayShader :: (data: *ArrayShaderData) {
+   payload: RgenPayload; @payload
+
+   light := data.lights[2];
+   TraceRay(tlases[light], 0, 0, 0, 0, 0, f32x3.{}, 0, f32x3.{}, 0, *payload);
+} // @rgen
+
 RgenData :: struct {
    tlasOffset: s32;
    imageOffset: s32;

@@ -47,33 +47,47 @@
 //       - apila, 14/05/26
 //
 
+//
+// new vector type stuff:
+// im thinking to have this:
+//    f32x2 :: #type,distinct [2] f32;
+// #type,distinct because in spirv OpTypeArray and OpTypeVector exist.
+// i thought maybe doing "[2] f32 @vector" but then the jai type checking wont help me and i have to do vector vs array distinction in DetermineCodeNodeTypes(), which i dont want to do.
+// the reason im doing this is beacuse i want to have proper vector types rather than hard coding every vector type like i do know.
+// but i think i cant get proper vector types if i use #type,distinct. i still have to compare one by one. i think what im gonna do is im gonna add one more flag to Type_Info_Array.Array_Type: .VECTOR.
+// then i need to update the code node types in DetermineCodeNodeTypes(). if i have something like that then i can just check "tia.array_flags" to see if it is a vector or not.
+// i think i can apply the same idea to matrix types which uses #type,distinct as of yet. they should be something like:
+//    f32x2x2 :: [2] f32x2 @matrix;
+// without @matrix it would mean an array of f32x2 (an OpTypeArray of f32x2). @matrix requires that the element type must be a vector type which i can check during compilation.
+// this would mean that a new entry to Type_Info_Array.Array_Type: .MATRIX;
+// but i dont think this is gonna work out because if i declare a variable of, lets say, a vector type, lets say, f32x3 then since jai compiler thinks that it is just [3] f32, i will basically
+// cannot make use of this type because jai will report the type as [3] float. holy shit i just realized you cant add notes to constant declarations. crazy.
+// anyways then it doesnt matter wheter you keep the structs or you just turn them into #type,distinct arrays. either way you have to compare types one by one.
+//             - apila, 16/09/26
+//
+
 // vvvvvv intrinsics vvvvvvvv
 // bool :: bool;
 bool2 :: struct { x: bool; y: bool; };
 bool3 :: struct { x: bool; y: bool; z: bool; };
 bool4 :: struct { x: bool; y: bool; z: bool; w: bool; };
 
-// u8   :: u8;
 u8x2 :: struct { x: u8; y: u8; };
 u8x3 :: struct { x: u8; y: u8; z: u8; };
 u8x4 :: struct { x: u8; y: u8; z: u8; w: u8; };
 
-// s32    :: s32;
 s32x2 :: struct { x: s32; y: s32; };
 s32x3 :: struct { x: s32; y: s32; z: s32; };
 s32x4 :: struct { x: s32; y: s32; z: s32; w: s32; };
 
-// u32    :: u32;
 u32x2 :: struct { x: u32; y: u32; };
 u32x3 :: struct { x: u32; y: u32; z: u32; };
 u32x4 :: struct { x: u32; y: u32; z: u32; w: u32; };
 
-// s64    :: s64;
 s64x2 :: struct { x: s64; y: s64; };
 s64x3 :: struct { x: s64; y: s64; z: s64; };
 s64x4 :: struct { x: s64; y: s64; z: s64; w: s64; };
 
-// u64    :: u64;
 u64x2 :: struct { x: u64; y: u64; };
 u64x3 :: struct { x: u64; y: u64; z: u64; };
 u64x4 :: struct { x: u64; y: u64; z: u64; w: u64; };
@@ -127,10 +141,11 @@ operator +  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
 
 #insert #run sprint("%: [] MeshPerVertex;", MESH_VERTICES_NAME); // gl_MeshVerticesEXT
 #insert #run sprint("%: [] s32x3;", MESH_TRIANGLES_NAME); // gl_PrimitiveTriangleIndicesEXT
-#insert #run sprint("% :: (vertexCount: u32, primitiveCount: u32) {} @%", SET_MESH_OUTPUTS_NAME, INTRINSIC_FUNCTION_NOTE_NAME); // SetMeshOutputsEXT
 #insert #run sprint("%: [] __Image__;", IMAGE_HEAP_VARIABLE_NAME);
 #insert #run sprint("%: [] __TLAS__;", TLAS_HEAP_VARIABLE_NAME);
 #insert #run sprint("%: [] __Sampler__;", SAMPLER_HEAP_VARIABLE_NAME);
+
+#insert #run sprint("% :: (vertexCount: u32, primitiveCount: u32) {} @%", SET_MESH_OUTPUTS_NAME, INTRINSIC_FUNCTION_NOTE_NAME); // SetMeshOutputsEXT
 
 // each texture variant corresponds to sampling of one single OpTypeImage.
 #insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2)            -> f32x4 { return .{}; } @%", TEXTURE_FLOAT_2D_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
@@ -210,6 +225,70 @@ ProcessMessage :: (message: *Message) {
             if (it.expression.flags & .IS_CONSTANT) {
                TableAdd(*globalConstantDeclarations, it.expression, .{});
             }
+
+            // the following doesnt work:
+            //    if (starts_with(it.expression.enclosing_load.enclosing_import.module_name, MODULE_NAME));
+            // because the variables are "#insert #run ..." so the "module_name" is an empty string.
+            // jai thinks it comes from a string, not from the module it is written in.
+            // for that reason i think detecting variables via a note is a better approach than detecting by its name.
+            //          - apila, 19/09/26
+
+            if it.expression.name == {
+               case MESH_VERTICES_NAME; {
+                  assert(meshVerticesVariableIdentifier.type == .Invalid);
+                  meshVerticesVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case MESH_TRIANGLES_NAME; {
+                  assert(meshTrianglesVariableIdentifier.type == .Invalid);
+                  meshTrianglesVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case IMAGE_HEAP_VARIABLE_NAME; {
+                  assert(imageHeapVariableIdentifier.type == .Invalid);
+                  imageHeapVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case TLAS_HEAP_VARIABLE_NAME; {
+                  assert(tlasHeapVariableIdentifier.type == .Invalid);
+                  tlasHeapVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case SAMPLER_HEAP_VARIABLE_NAME; {
+                  assert(samplerHeapVariableIdentifier.type == .Invalid);
+                  samplerHeapVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME; {
+                  assert(meshPipelinePushDataVariableIdentifier.type == .Invalid);
+                  meshPipelinePushDataVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME; {
+                  assert(rtxPipelinePushDataVariableIdentifier.type == .Invalid);
+                  rtxPipelinePushDataVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case WORKGROUP_ID_VARIABLE_NAME; {
+                  assert(workGroupIdVariableIdentifier.type == .Invalid);
+                  workGroupIdVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case LOCAL_INVOCATION_ID_VARIABLE_NAME; {
+                  assert(localInvocationIdVariableIdentifier.type == .Invalid);
+                  localInvocationIdVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case LAUNCH_ID_VARIABLE_NAME; {
+                  assert(launchIdVariableIdentifier.type == .Invalid);
+                  launchIdVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+
+               case LAUNCH_SIZE_VARIABLE_NAME; {
+                  assert(launchSizeVariableIdentifier.type == .Invalid);
+                  launchSizeVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
+               }
+            }
          }
       }
 
@@ -217,6 +296,20 @@ ProcessMessage :: (message: *Message) {
       case .COMPLETE; {
          mc := cast(*Message_Complete) message;
          if (mc.error_code != .NONE) return;
+
+         {
+            assert(meshVerticesVariableIdentifier.type            != .Invalid);
+            assert(meshTrianglesVariableIdentifier.type           != .Invalid);
+            assert(imageHeapVariableIdentifier.type               != .Invalid);
+            assert(tlasHeapVariableIdentifier.type                != .Invalid);
+            assert(samplerHeapVariableIdentifier.type             != .Invalid);
+            assert(meshPipelinePushDataVariableIdentifier.type    != .Invalid);
+            assert(rtxPipelinePushDataVariableIdentifier.type     != .Invalid);
+            assert(workGroupIdVariableIdentifier.type             != .Invalid);
+            assert(localInvocationIdVariableIdentifier.type       != .Invalid);
+            assert(launchIdVariableIdentifier.type                != .Invalid);
+            assert(launchSizeVariableIdentifier.type              != .Invalid);
+         }
 
          for _, header: entryPoints {
             // top tier formatting right there
@@ -252,6 +345,33 @@ SetBuildOptions :: (options: BuildOptions, w: Workspace) {
 }
 
 #scope_module
+
+meshVerticesVariableIdentifier:           Identifier;
+meshTrianglesVariableIdentifier:          Identifier;
+imageHeapVariableIdentifier:              Identifier;
+tlasHeapVariableIdentifier:               Identifier;
+samplerHeapVariableIdentifier:            Identifier;
+meshPipelinePushDataVariableIdentifier:   Identifier;
+rtxPipelinePushDataVariableIdentifier:    Identifier;
+workGroupIdVariableIdentifier:            Identifier;
+localInvocationIdVariableIdentifier:      Identifier;
+launchIdVariableIdentifier:               Identifier;
+launchSizeVariableIdentifier:             Identifier;
+
+MODULE_NAME :: #run GetModuleName();
+
+GetFolderName :: (path: string) -> string {
+   return path_filename(trim_right(path_strip_filename(path), "/\\"));
+}
+
+GetModuleName :: () -> string {
+   fileName := path_filename(#file);
+   if (fileName == "module.jai") {
+      return GetFolderName(#filepath);
+   } else {
+      return path_strip_extension(fileName);
+   }
+}
 
 DEFAULT_MAT4: mat4 : .[.{}, .{}, .{}, .{}];
 
@@ -680,29 +800,7 @@ Identifier :: struct {
       _type:                        *Type_Info;
       // _void: // Void doesnt have a value
       variable:                     struct {
-                                       //
-                                       // the declaration is the default. but there some variables that their declaration is above the scope of the shader
-                                       // for example intrinsics that i predefined, meshvertices, meshtriangles and such.
-                                       // when i use code_of it doesnt behave the way i want. i think it generates competely new tree instead of referencing to the one generated
-                                       // by the compiler during the compilation. so for that reason i use the name of these variables and this is fine since they are
-                                       // treated as a keyword anyways.
-                                       // and you shouldnt mix using name or using declaration for a single variable. either use name or the declaration. not both at the same time
-                                       //          - apila, 18/04/26
-                                       //
-                                       // BUG
-                                       // useName approach is faulty. instead i should use the declaration pointer but the way jai works right now it is not possible to my knowledge.
-                                       // the problem is for example consider this scenario:
-                                       // user has a named module in which they declared a variable meshvertices. if they try to access this using the named module:
-                                       // UserModule.meshvertices then i wrongly think that this is the meshvertices from this module. declaration pointer would have solved this problem.
-                                       //          - apila, 05/05/26
-                                       //
-                                       // i dont need useName anymore since i switched to a metaprogram. i can just get the *Code_Node and store them safely.
-                                       // tho while getting it i still need to determine which variable is which somehow but when it comes to Identifier i dont need useName.
-                                       //          - apila, 29/05/26
-                                       //
-                                       declaration:   *Code_Declaration;
-                                       useName:       bool;
-                                       name:          string;
+                                       declaration: *Code_Declaration;
                                     };
       compositeLiteral:             struct {
                                        type:       *Type_Info;
@@ -939,11 +1037,7 @@ IdentifierHash :: (using identifier: Identifier) -> u32 {
       case ._Type; return HashType(_type);
       case .Void; return 69; // does the hash matter here?
       case .Variable;
-         if (variable.useName) {
-            return get_hash(variable.name);
-         } else {
-            return get_hash(variable.declaration.name);
-         }
+            return get_hash(variable.declaration);
       case .CompositeLiteral;
          hash: u32 = 17;
          hash = hash * 31 + get_hash(compositeLiteral.type);
@@ -985,13 +1079,6 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
 
       case .Void; return true;
       case .Variable;
-         if (a.variable.useName != b.variable.useName) return false;
-
-         useName := a.variable.useName; // or b.variable.useName. they are the same at this point
-         if (useName) {
-            return a.variable.name == b.variable.name;
-         }
-
          return a.variable.declaration == b.variable.declaration; // two variables are equal if they have the same declaration
       case .CompositeLiteral;
          if (a.compositeLiteral.type != b.compositeLiteral.type) return false;
@@ -1480,16 +1567,16 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             SpvExecutionModel.MeshEXT,
             GetSSAId(*data, .{ type = .Function, function = header }),
             "ApilaMS",
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_VERTICES_NAME } }),
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME } }),
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
+            GetSSAId(*data, meshVerticesVariableIdentifier),
+            GetSSAId(*data, meshPipelinePushDataVariableIdentifier),
+            GetSSAId(*data, meshTrianglesVariableIdentifier),
             GetSSAId(*data, data.meshVertexOutVariableIdentifier),
             GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
+            GetSSAId(*data, imageHeapVariableIdentifier),
+            GetSSAId(*data, samplerHeapVariableIdentifier),
             GetSSAId(*data, data.shaderDataPointerVariableIdentifier),
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = WORKGROUP_ID_VARIABLE_NAME } }),
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LOCAL_INVOCATION_ID_VARIABLE_NAME } })
+            GetSSAId(*data, workGroupIdVariableIdentifier),
+            GetSSAId(*data, localInvocationIdVariableIdentifier)
          );
       }
 
@@ -1498,9 +1585,9 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          array_add(*operands, SpvExecutionModel.Fragment);
          array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
          array_add(*operands, "ApilaFS");
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, imageHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, samplerHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, meshPipelinePushDataVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.fragmentVertexInVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.fragmentPrimitiveInVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
@@ -1521,13 +1608,13 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          array_add(*operands, SpvExecutionModel.RayGenerationKHR);
          array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
          array_add(*operands, "ApilaRgen");
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = TLAS_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, imageHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, samplerHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, tlasHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, rtxPipelinePushDataVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, launchIdVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, launchSizeVariableIdentifier));
 
          for data.rayPayloadVariableIdentifiers {
             array_add(*operands, ac(GetSSAId(*data, it)));
@@ -1541,13 +1628,13 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          array_add(*operands, SpvExecutionModel.ClosestHitKHR);
          array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
          array_add(*operands, "ApilaRchit");
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = TLAS_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, imageHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, samplerHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, tlasHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, rtxPipelinePushDataVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, launchIdVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, launchSizeVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.incomingRayPayloadVariableIdentifier));
 
          for data.rayPayloadVariableIdentifiers {
@@ -1562,13 +1649,13 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          array_add(*operands, SpvExecutionModel.MissKHR);
          array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
          array_add(*operands, "ApilaRmiss");
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = TLAS_HEAP_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, imageHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, samplerHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, tlasHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, rtxPipelinePushDataVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }));
-         array_add(*operands, GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }));
+         array_add(*operands, GetSSAId(*data, launchIdVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, launchSizeVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.incomingRayPayloadVariableIdentifier));
 
          for data.rayPayloadVariableIdentifiers {
@@ -1769,7 +1856,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = MESH_TRIANGLES_NAME } }),
+            GetSSAId(*data, meshTrianglesVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.PrimitiveTriangleIndicesEXT
          );
@@ -1777,7 +1864,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = WORKGROUP_ID_VARIABLE_NAME } }),
+            GetSSAId(*data, workGroupIdVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.WorkgroupId
          );
@@ -1785,7 +1872,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LOCAL_INVOCATION_ID_VARIABLE_NAME } }),
+            GetSSAId(*data, localInvocationIdVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.LocalInvocationId
          );
@@ -1810,7 +1897,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }),
+            GetSSAId(*data, launchIdVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.LaunchIdKHR
          );
@@ -1818,7 +1905,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }),
+            GetSSAId(*data, launchSizeVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.LaunchSizeKHR
          );
@@ -1828,7 +1915,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }),
+            GetSSAId(*data, launchIdVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.LaunchIdKHR
          );
@@ -1836,7 +1923,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }),
+            GetSSAId(*data, launchSizeVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.LaunchSizeKHR
          );
@@ -1846,7 +1933,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_ID_VARIABLE_NAME } }),
+            GetSSAId(*data, launchIdVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.LaunchIdKHR
          );
@@ -1854,7 +1941,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          WriteSingleInstruction(
             *b,
             .Decorate,
-            GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = LAUNCH_SIZE_VARIABLE_NAME } }),
+            GetSSAId(*data, launchSizeVariableIdentifier),
             SpvDecoration.BuiltIn,
             SpvBuiltIn.LaunchSizeKHR
          );
@@ -1880,21 +1967,21 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    WriteSingleInstruction(
       *b,
       .Decorate,
-      GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = IMAGE_HEAP_VARIABLE_NAME } }),
+      GetSSAId(*data, imageHeapVariableIdentifier),
       SpvDecoration.BuiltIn,
       SpvBuiltIn.ResourceHeapEXT
    );
    WriteSingleInstruction(
       *b,
       .Decorate,
-      GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = TLAS_HEAP_VARIABLE_NAME } }),
+      GetSSAId(*data, tlasHeapVariableIdentifier),
       SpvDecoration.BuiltIn,
       SpvBuiltIn.ResourceHeapEXT
    );
    WriteSingleInstruction(
       *b,
       .Decorate,
-      GetSSAId(*data, .{ type = .Variable, variable = .{ useName = true, name = SAMPLER_HEAP_VARIABLE_NAME } }),
+      GetSSAId(*data, samplerHeapVariableIdentifier),
       SpvDecoration.BuiltIn,
       SpvBuiltIn.SamplerHeapEXT
    );
@@ -5496,11 +5583,10 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
          );
 
       case .Variable;
-         name := GetVariableName(identifier);
          if (IdentifierCompare(identifier, data.meshVertexOutVariableIdentifier) || // [] MeshVertexOut
                IdentifierCompare(identifier, data.meshPrimitiveOutVariableIdentifier) || // [] MeshPrimitiveOut
-               name == MESH_VERTICES_NAME ||
-               name == MESH_TRIANGLES_NAME
+               IdentifierCompare(identifier, meshVerticesVariableIdentifier) ||
+               IdentifierCompare(identifier, meshTrianglesVariableIdentifier)
             ) {
 
             storageClass: SpvStorageClass = .Output;
@@ -5577,7 +5663,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                storageClass
             );
-         } else if(name == MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, meshPipelinePushDataVariableIdentifier)) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) MeshPipelinePushData;
             pointerType.storageClass = .PushConstant;
@@ -5596,7 +5682,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.PushConstant
             );
-         } else if(name == RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, rtxPipelinePushDataVariableIdentifier)) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) RtxPipelinePushData;
             pointerType.storageClass = .PushConstant;
@@ -5615,7 +5701,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.PushConstant
             );
-         } else if(name == SAMPLER_HEAP_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, samplerHeapVariableIdentifier)) {
             voidStarUC := New(TypeInfoPointer);
             voidStarUC.pointerTo = cast(*Type_Info) void;
             voidStarUC.storageClass = .UniformConstant;
@@ -5634,7 +5720,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.UniformConstant
             );
-         } else if(name == IMAGE_HEAP_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, imageHeapVariableIdentifier)) {
             voidStarUC := New(TypeInfoPointer);
             voidStarUC.pointerTo = cast(*Type_Info) void;
             voidStarUC.storageClass = .UniformConstant;
@@ -5653,7 +5739,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.UniformConstant
             );
-         } else if(name == TLAS_HEAP_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, tlasHeapVariableIdentifier)) {
             voidStarUC := New(TypeInfoPointer);
             voidStarUC.pointerTo = cast(*Type_Info) void;
             voidStarUC.storageClass = .UniformConstant;
@@ -5672,7 +5758,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.UniformConstant
             );
-         } else if(name == WORKGROUP_ID_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, workGroupIdVariableIdentifier)) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) u32x3;
             pointerType.storageClass = .Input;
@@ -5691,7 +5777,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.Input
             );
-         } else if(name == LAUNCH_ID_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, launchIdVariableIdentifier)) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) u32x3;
             pointerType.storageClass = .Input;
@@ -5710,7 +5796,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.Input
             );
-         } else if(name == LAUNCH_SIZE_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, launchSizeVariableIdentifier)) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) u32x3;
             pointerType.storageClass = .Input;
@@ -5729,7 +5815,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                GetSSAId(data, identifier),
                SpvStorageClass.Input
             );
-         } else if(name == LOCAL_INVOCATION_ID_VARIABLE_NAME) {
+         } else if(IdentifierCompare(identifier, localInvocationIdVariableIdentifier)) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) u32x3;
             pointerType.storageClass = .Input;
@@ -5900,7 +5986,37 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
    }
 
    right.expression = compiler_get_nodes(castedExpressionCode);
+
+   // i am being a cheeky bastard here. code_of creates new Code_Nodes. it doesnt refer to the ones that are already created
+   // by the compiler during the compilation of this file. and i do variable compare, which is just pointer equality, so
+   // pointers must be the same. this is what i "fix". i know i only use the variable declaration so i only fix that.
+   // i think a better way to do this would be i think idk. maybe just emit the spirv directly rather than trying to create jai syntax tree.
+   //          - apila, 19/09/26
+   assert(right.expression.kind == .BINARY_OPERATOR);
+   dot := cast(*Code_Binary_Operator) right.expression;
+   assert(dot.left.kind == .IDENT);
+   ci := cast(*Code_Ident) dot.left;
+   if shaderType == {
+      case .Mesh; #through;
+      case .Fragment;
+         ci.resolved_declaration = meshPipelinePushDataVariableIdentifier.variable.declaration;
+      case .Rgen; #through;
+      case .Rchit; #through;
+      case .Rmiss;
+         ci.resolved_declaration = rtxPipelinePushDataVariableIdentifier.variable.declaration;
+      case; assert(false, "not yet implemented! type: %", shaderType);
+   }
+
    return assignment;
+}
+
+nameof :: ($c: Code, $loc := #caller_location) -> string #expand {
+   return #run -> string {
+      using _ :: #import "Compiler";
+      node := compiler_get_nodes(c);
+      assert(node.kind == .IDENT, "Argument to nameof must be identifier", loc=loc);
+      return node.(*Code_Ident).name;
+   };
 }
 
 GetStorageClassFromNote :: (note: string) -> SpvStorageClass {
@@ -6752,7 +6868,24 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                RETURN(resultSSAId, resultType);
             }
 
-            case .ARRAY_SUBSCRIPT; #through;
+            case .ARRAY_SUBSCRIPT;
+               // // checking if the variable is an intrinsic array.
+               // if (cbo.left.kind == .IDENT) {
+               //    ci := cast(*Code_Ident) cbo.left;
+               //    type := GetNodeType(ci);
+               //    if ci.name == {
+               //       case MESH_VERTICES_NAME;
+               //    }
+               //    baseIdentifier := GetVariableIdentifier(ci);
+               //    currentBaseSSAId.* = GetSSAId(data, baseIdentifier);
+
+               //    baseSpirvType := New(TypeInfoPointer);
+               //    baseSpirvType.storageClass = GetVariableStorageClass(data, baseIdentifier);
+               //    baseSpirvType.pointerTo = baseType;
+               //    currentBaseSpirvType.* = baseSpirvType;
+               // }
+
+               #through;
             case #char ".";
                chainSpirvType: *Type_Info;
                chainSSAId := DoDotsAndArraySubscripts(data, function, cbo, currentFunction, additionalData.accessChainBaseArrayElementTypeIfImageHeap, additionalData.isLValue, lValueOut, *chainSpirvType, lValueOutSpirvType);
@@ -9039,20 +9172,6 @@ IsStructLiteralConstant :: (literal: *Code_Literal) -> bool {
 }
 
 GetVariableIdentifier :: (ci: *Code_Ident) -> Identifier {
-   if (ci.name == MESH_VERTICES_NAME                     ||
-       ci.name == MESH_TRIANGLES_NAME                    ||
-       ci.name == MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME  ||
-       ci.name == RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME   ||
-       ci.name == IMAGE_HEAP_VARIABLE_NAME               ||
-       ci.name == SAMPLER_HEAP_VARIABLE_NAME             ||
-       ci.name == TLAS_HEAP_VARIABLE_NAME                ||
-       ci.name == WORKGROUP_ID_VARIABLE_NAME             ||
-       ci.name == LAUNCH_ID_VARIABLE_NAME                ||
-       ci.name == LAUNCH_SIZE_VARIABLE_NAME              ||
-       ci.name == LOCAL_INVOCATION_ID_VARIABLE_NAME) {
-      return .{ type = .Variable, variable = .{ useName = true, name = ci.name } };
-   }
-
    return .{ type = .Variable, variable.declaration = ci.resolved_declaration };
 }
 
@@ -9061,49 +9180,48 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
    assert(variable.type == .Variable, "type: %", variable.type);
 
    declaration := variable.variable;
-   name := GetVariableName(variable);
 
-   if (name == MESH_VERTICES_NAME) {
+   if (IdentifierCompare(variable, meshVerticesVariableIdentifier)) {
       return .Output;
    }
 
-   if (name == MESH_TRIANGLES_NAME) {
+   if (IdentifierCompare(variable, meshTrianglesVariableIdentifier)) {
       return .Output;
    }
 
-   if (name == MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, meshPipelinePushDataVariableIdentifier)) {
       return .PushConstant;
    }
 
-   if (name == RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, rtxPipelinePushDataVariableIdentifier)) {
       return .PushConstant;
    }
 
-   if (name == IMAGE_HEAP_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, imageHeapVariableIdentifier)) {
       return .UniformConstant;
    }
 
-   if (name == SAMPLER_HEAP_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, samplerHeapVariableIdentifier)) {
       return .UniformConstant;
    }
 
-   if (name == TLAS_HEAP_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, tlasHeapVariableIdentifier)) {
       return .UniformConstant;
    }
 
-   if (name == WORKGROUP_ID_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, workGroupIdVariableIdentifier)) {
       return .Input;
    }
 
-   if (name == LAUNCH_ID_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, launchIdVariableIdentifier)) {
       return .Input;
    }
 
-   if (name == LAUNCH_SIZE_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, launchSizeVariableIdentifier)) {
       return .Input;
    }
 
-   if (name == LOCAL_INVOCATION_ID_VARIABLE_NAME) {
+   if (IdentifierCompare(variable, localInvocationIdVariableIdentifier)) {
       return .Input;
    }
 
@@ -9154,12 +9272,7 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
 
 GetVariableName :: (variable: Identifier) -> string {
    assert(variable.type == .Variable);
-
-   if (variable.variable.useName) {
-      return variable.variable.name;
-   } else {
-      return variable.variable.declaration.name;
-   }
+   return variable.variable.declaration.name;
 }
 
 // i need this function because some of the variables, their jai types doesnt match the spirv i want to generate.
@@ -9185,16 +9298,15 @@ GetVariableTypeIdentifier :: (data: *CompilationData, variable: Identifier) -> I
    assert(variable.type == .Variable, "variable.type: %", variable.type);
 
    declaration := variable.variable.declaration;
-   name := GetVariableName(variable);
 
-   if (name == MESH_VERTICES_NAME) {
+   if (IdentifierCompare(variable, meshVerticesVariableIdentifier)) {
       elementType := cast(*Type_Info) MeshPerVertex;
 
       typeInfo := CreateTypeInfoArray(elementType, data.maxVertices);
       return .{ type = ._Type, _type = typeInfo };
    }
 
-   if (name == MESH_TRIANGLES_NAME) {
+   if (IdentifierCompare(variable, meshTrianglesVariableIdentifier)) {
       elementType := cast(*Type_Info) s32x3;
 
       typeInfo := CreateTypeInfoArray(elementType, data.maxPrimitives);
@@ -9274,31 +9386,33 @@ GetBaseNodeInAccessChain :: (accesses: [] *Code_Binary_Operator) -> *Code_Node {
    return null;
 }
 
+DoProcedureCallBase :: (baseNode: *Code_Procedure_Call) #expand {
+   assert(baseNode.kind == .PROCEDURE_CALL);
+
+   data := `data;
+   outSpirvType: *Type_Info;
+   `currentBaseSSAId.* = GenerateInstructions(`data, baseNode, null, `b, `currentFunction, spirvType = *outSpirvType);
+   assert(outSpirvType != null);
+   `currentBaseSpirvType.* = outSpirvType;
+}
+
+DoMemberAccess :: (tis: *Type_Info_Struct, right: *Code_Node, indices: *[..] SSAId, literalIndices: *[..] int, isBaseSpirvPointer: bool) #expand {
+   assert(right.kind == .IDENT, "if you are accessing a struct indexer it is not yet implemented! right.kind: %, struct name: %, loc: %", right.kind, tis.name, right.location);
+   ci := cast(*Code_Ident) right;
+
+   memberIndex := GetMemberIndex(tis, ci.name);
+   assert(memberIndex != MEMBER_DOESNT_EXIST, "not a member of struct! struct: %, member: %", tis.name, ci.name);
+
+   if (isBaseSpirvPointer) {
+      memberIndexIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = memberIndex, bitSize = 32 } };
+      memberIndexSSAId := GetSSAId(`data, memberIndexIdentifier);
+      array_add(indices, memberIndexSSAId);
+   } else {
+      array_add(literalIndices, memberIndex);
+   }
+}
+
 DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentFunction: *Code_Procedure_Header, baseArrayElementTypeIfImageHeap: *TypeInfoImage, isLValue: bool, lValueOut: *SSAId = null, spirvType: **Type_Info = null, lValueOutSpirvType: **Type_Info = null) -> SSAId {
-   DoMemberAccess :: (tis: *Type_Info_Struct, right: *Code_Node, indices: *[..] SSAId, literalIndices: *[..] int, isBaseSpirvPointer: bool) #expand {
-      assert(right.kind == .IDENT, "if you are accessing a struct indexer it is not yet implemented! right.kind: %, struct name: %, loc: %", right.kind, tis.name, right.location);
-      ci := cast(*Code_Ident) right;
-
-      memberIndex := GetMemberIndex(tis, ci.name);
-      assert(memberIndex != MEMBER_DOESNT_EXIST, "not a member of struct! struct: %, member: %", tis.name, ci.name);
-
-      if (isBaseSpirvPointer) {
-         memberIndexIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = memberIndex, bitSize = 32 } };
-         memberIndexSSAId := GetSSAId(`data, memberIndexIdentifier);
-         array_add(indices, memberIndexSSAId);
-      } else {
-         array_add(literalIndices, memberIndex);
-      }
-   }
-
-   DoProcedureCallBase :: (baseNode: *Code_Procedure_Call) #expand {
-      assert(baseNode.kind == .PROCEDURE_CALL);
-
-      data := `data;
-      `currentBaseSSAId.* = GenerateInstructions(`data, baseNode, null, `b, `currentFunction);
-      `currentBaseSpirvType.* = GetNodeType(baseNode);
-   }
-
    DoAccessChainOrCompositeExtract :: (data: *CompilationData,
                                        b: *BuilderType,
                                        jaiReturnType: *Type_Info,
@@ -9619,6 +9733,276 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
    return dereferencedSSAId;
 }
 
+DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentFunction: *Code_Procedure_Header, isLValue: bool, lValueOut: *SSAId = null, spirvType: **Type_Info = null, lValueOutSpirvType: **Type_Info = null) -> SSAId {
+   DoAccessChainOrCompositeExtract :: (data: *CompilationData,
+                                       b: *BuilderType,
+                                       jaiReturnType: *Type_Info,
+                                       baseSSAId: SSAId,
+                                       indices: *[..] SSAId,
+                                       literalIndices: *[..] int,
+                                       currentBaseSpirvType: *Type_Info) -> SSAId, spirvType: *Type_Info #expand {
+      if (currentBaseSpirvType.type == TYPE_INFO_POINTER_TAG) {
+         returnTypeIdentifier := GetPointerTypeIdentifier(jaiReturnType, currentBaseSpirvType.(*TypeInfoPointer).storageClass);
+         pointerSSAId := EmitAccessChain(data, b, returnTypeIdentifier, baseSSAId, indices.*);
+         array_reset(indices);
+         return pointerSSAId, xx returnTypeIdentifier._type;
+      } else {
+         returnTypeIdentifier: Identifier = .{ type = ._Type, _type = jaiReturnType };
+         resultSSAId := EmitCompositeExtract(data, b, returnTypeIdentifier, baseSSAId, literalIndices.*);
+         array_reset(literalIndices);
+         return resultSSAId, xx returnTypeIdentifier._type;
+      }
+   }
+
+   Helper :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentBaseSpirvType: **Type_Info, currentBaseSSAId: *SSAId, indices: *[..] SSAId, literalIndices: *[..] int, lastAccessOperation: **Code_Binary_Operator, currentFunction: *Code_Procedure_Header) {
+      leftType := GetNodeType(cbo.left);
+      leftType = UnwindVariantsAllTheWay(leftType);
+
+      if cbo.left.kind == {
+         case .BINARY_OPERATOR; {
+            cboLeft := cast(*Code_Binary_Operator) cbo.left;
+            assert(cboLeft.operator_type == #char "." || // member access and pointer access
+                   cboLeft.operator_type == .ARRAY_SUBSCRIPT,
+               "operator: %", cboLeft.operator_type
+            );
+
+            Helper(data, b, cboLeft, currentBaseSpirvType, currentBaseSSAId, indices, literalIndices, lastAccessOperation, currentFunction);
+         }
+
+         case .IDENT; {
+            baseNode: *Code_Node;
+            if (leftType.type == .TYPE) {
+               baseNode = cbo.right;
+            } else {
+               baseNode = cbo.left;
+            }
+
+            if baseNode.kind == {
+               case .IDENT; {
+                  baseType := GetNodeType(baseNode);
+                  ciBase := cast(*Code_Ident) baseNode;
+                  baseIdentifier := GetVariableIdentifier(ciBase);
+                  currentBaseSSAId.* = GetSSAId(data, baseIdentifier);
+
+                  baseSpirvType := New(TypeInfoPointer);
+                  baseSpirvType.storageClass = GetVariableStorageClass(data, baseIdentifier);
+                  baseSpirvType.pointerTo = baseType;
+                  currentBaseSpirvType.* = baseSpirvType;
+               }
+
+               case .PROCEDURE_CALL; {
+                  DoProcedureCallBase(xx baseNode);
+               }
+
+               case; assert(false);
+            }
+         }
+
+         case .PROCEDURE_CALL; {
+            DoProcedureCallBase(cbo.left);
+         }
+
+         case; assert(false, "type: %", leftType.*);
+      }
+
+      if leftType.type == {
+         case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG; {
+            tidcos := cast(*TypeInfoDecorationlessCopyOfStruct) leftType;
+            DoMemberAccess(tidcos.copyOf, cbo.right, indices, literalIndices, currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
+         }
+
+         case .STRUCT; {
+            tis := cast(*Type_Info_Struct) leftType;
+            DoMemberAccess(tis, cbo.right, indices, literalIndices, currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
+         }
+
+         case .ARRAY; {
+            tia := cast(*Type_Info_Array) leftType;
+
+            if tia.array_type == {
+               case .FIXED; {
+                  if (currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG) {
+                     indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) s32 });
+                     array_add(indices, indexSSAId);
+                  } else {
+                     // only literals allowed
+                     assert(cbo.right.kind == .LITERAL);
+
+                     // here i am cheating a lil bit. i actually dont need the ssa id i need to integer value.
+                     // so i am just using the existing function. maybe i should have just created a function and call it in the .LITERAL case of GenerateInstructions
+                     // as well as here.
+                     //       - apila, 29/05/26
+                     literalIdentifier: Identifier;
+                     _ := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) s32 }, identifierOut = *literalIdentifier);
+                     assert(literalIdentifier.type == .IntLiteral);
+
+                     index := literalIdentifier.intLiteral.value._s64;
+                     array_add(literalIndices, index);
+                  }
+               }
+
+               case .VIEW; {
+                  assert(false, "not yet implemented");
+               }
+
+               case .RESIZABLE; {
+                  assert(false, "not supported");
+               }
+
+               case; assert(false, "should have been unreachable. array type: %", tia.array_type);
+            }
+         }
+
+         case TYPE_INFO_POINTER_TAG; {
+            tip := cast(*TypeInfoPointer) leftType;
+
+            pointerSpirvType: *TypeInfoPointer;
+            pointerSSAId: SSAId;
+            if (indices.count > 0 || literalIndices.count > 0) {
+               _pointerSpirvType: *Type_Info;
+               pointerSSAId, _pointerSpirvType = DoAccessChainOrCompositeExtract(data, b, leftType, currentBaseSSAId.*, indices, literalIndices);
+
+               assert(_pointerSpirvType.type == TYPE_INFO_POINTER_TAG);
+               pointerSpirvType = xx _pointerSpirvType;
+            } else {
+               pointerSSAId = currentBaseSSAId.*;
+
+               assert(currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
+               pointerSpirvType = xx currentBaseSpirvType.*;
+            }
+
+            loadFromSpirvType: *TypeInfoPointer;
+            loadFromSpirvType = pointerSpirvType;
+
+            loadFromSSAId: SSAId;
+            if cbo.operator_type == {
+               case #char "."; {
+                  loadFromSSAId = pointerSSAId;
+               }
+
+               case .ARRAY_SUBSCRIPT; {
+                  // since i set spirvShouldHaveBeenType it is now guranteed that the returned ssa id will be casted to that type no matter what.
+                  indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) u64 });
+                  u64TypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) u64 });
+
+                  pointerAsU64SSAId := GetNextSSAId(data);
+                  WriteSingleInstructionIfReachable(
+                     b,
+                     *data.isBlockReachable,
+                     .ConvertPtrToU,
+                     u64TypeSSAId,
+                     pointerAsU64SSAId,
+                     pointerSSAId
+                  );
+
+                  loadFromAsU64SSAId := GetNextSSAId(data);
+                  WriteSingleInstructionIfReachable(
+                     b,
+                     *data.isBlockReachable,
+                     .IAdd,
+                     u64TypeSSAId,
+                     loadFromAsU64SSAId,
+                     pointerAsU64SSAId,
+                     indexSSAId
+                  );
+
+                  loadFromSSAId = GetNextSSAId(data);
+                  WriteSingleInstructionIfReachable(
+                     b,
+                     *data.isBlockReachable,
+                     .ConvertUToPtr,
+                     GetSSAId(data, .{ type = ._Type, _type = loadFromSpirvType }),
+                     loadFromSSAId,
+                     loadFromAsU64SSAId
+                  );
+               }
+
+               case; assert(false);
+            }
+
+            loadedTypeIdentifier: Identifier = .{ type = ._Type, _type = loadFromSpirvType.pointerTo };
+            currentBaseSSAId.* = Load(data, b, loadedTypeIdentifier, loadFromSSAId, loadFromSpirvType.storageClass == .PhysicalStorageBuffer);
+            currentBaseSpirvType.* = loadFromSpirvType.pointerTo;
+
+            if (cbo.operator_type == #char ".") {
+               assert(tip.pointerTo.type == .STRUCT, "type: %", tip.pointerTo.type);
+               tis := cast(*Type_Info_Struct) tip.pointerTo;
+               DoMemberAccess(tis, cbo.right, indices, literalIndices, currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
+            }
+         }
+
+         case; assert(false);
+      }
+
+      // when all Helper functions exit lastAccessOperation will point to the last Code_Binary_Operator
+      // because of the order of traversel
+      lastAccessOperation.* = cbo;
+   }
+
+   currentBaseSpirvType: *Type_Info;
+   currentBaseSSAId: SSAId;
+   indices: [..] SSAId;
+   literalIndices: [..] int;
+   lastAccessOperation: *Code_Binary_Operator;
+   Helper(data, b, cbo, *currentBaseSpirvType, *currentBaseSSAId, *indices, *literalIndices, *lastAccessOperation, currentFunction);
+   assert(currentBaseSpirvType != null);
+   assert(currentBaseSSAId != 0);
+   assert(lastAccessOperation != null);
+
+   lastAccessOperationJaiType := GetNodeType(lastAccessOperation);
+   jaiReturnType := lastAccessOperationJaiType;
+
+   // left overs
+   lastAccessChainResultSpirvType: *Type_Info;
+   lastAccessChainResultSSAId: SSAId;
+   if (indices.count > 0 || literalIndices.count > 0) {
+      // indexes were left over. last operation cant be pointer indexing
+      leftType := GetNodeType(lastAccessOperation.left);
+      assert(!(lastAccessOperation.operator_type == .ARRAY_SUBSCRIPT && leftType.type == TYPE_INFO_POINTER_TAG));
+
+      lastAccessChainResultSSAId, lastAccessChainResultSpirvType = DoAccessChainOrCompositeExtract(data, b, jaiReturnType, currentBaseSSAId, *indices, *literalIndices, currentBaseSpirvType);
+   } else {
+      // no indices were left over. meaning that the last operation was a pointer indexing
+      // ...p[index]
+      leftType := GetNodeType(lastAccessOperation.left);
+      assert(lastAccessOperation.operator_type == .ARRAY_SUBSCRIPT, "loc: %", GetLocationString(lastAccessOperation));
+      assert(leftType.type == TYPE_INFO_POINTER_TAG);
+
+      lastAccessChainResultSSAId = currentBaseSSAId;
+      lastAccessChainResultSpirvType = currentBaseSpirvType;
+   }
+
+   if (isLValue) {
+      assert(currentBaseSpirvType.type == TYPE_INFO_POINTER_TAG, "not an lvalue");
+
+      if (spirvType != null) spirvType.* = lastAccessChainResultSpirvType;
+      return lastAccessChainResultSSAId;
+   }
+
+   // OpCompositeExtract case.
+   // you get the rvalue without the OpLoad.
+   // it also means it cant be an lvalue
+   //       - apila, 06/06/26
+   if (currentBaseSpirvType.type != TYPE_INFO_POINTER_TAG) {
+      assert(!isLValue);
+
+      if (spirvType != null) spirvType.* = lastAccessChainResultSpirvType;
+      return lastAccessChainResultSSAId;
+   }
+
+   if (lValueOutSpirvType != null) lValueOutSpirvType.* = lastAccessChainResultSpirvType;
+   if (lValueOut != null) lValueOut.* = lastAccessChainResultSSAId;
+
+   assert(lastAccessChainResultSpirvType.type == TYPE_INFO_POINTER_TAG, "type: %, loc: %", lastAccessChainResultSpirvType.*, GetLocationString(lastAccessOperation));
+   tip := cast(*TypeInfoPointer) lastAccessChainResultSpirvType;
+
+   loadedTypeIdentifier: Identifier = .{ type = ._Type, _type = tip.pointerTo };
+   dereferencedSSAId := Load(data, b, loadedTypeIdentifier, lastAccessChainResultSSAId, tip.storageClass == .PhysicalStorageBuffer);
+
+   if (spirvType != null) spirvType.* = loadedTypeIdentifier._type;
+   return dereferencedSSAId;
+}
+
 DoDotsAndArraySubscriptsBaseVariableData :: enum {
    ImageHeapVariable;
    SamplerHeapVariable;
@@ -9639,6 +10023,22 @@ EmitCompositeExtract :: (data: *CompilationData, b: *BuilderType, returnTypeIden
    }
 
    WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .CompositeExtract, .. operands);
+   return resultSSAId;
+}
+
+EmitAccessChain :: (data: *CompilationData, b: *BuilderType, returnTypeIdentifier: Identifier, baseSSAId: SSAId, indices: [] SSAId) -> SSAId {
+   resultSSAId := GetNextSSAId(data);
+
+   operands: [..] Any;
+   array_add(*operands, GetSSAId(data, returnTypeIdentifier));
+   array_add(*operands, resultSSAId);
+   array_add(*operands, baseSSAId);
+
+   for indices {
+      array_add(*operands, ac(it));
+   }
+
+   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .AccessChain, .. operands);
    return resultSSAId;
 }
 
