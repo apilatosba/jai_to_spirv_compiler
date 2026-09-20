@@ -6869,26 +6869,57 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             }
 
             case .ARRAY_SUBSCRIPT;
-               // // checking if the variable is an intrinsic array.
-               // if (cbo.left.kind == .IDENT) {
-               //    ci := cast(*Code_Ident) cbo.left;
-               //    type := GetNodeType(ci);
-               //    if ci.name == {
-               //       case MESH_VERTICES_NAME;
-               //    }
-               //    baseIdentifier := GetVariableIdentifier(ci);
-               //    currentBaseSSAId.* = GetSSAId(data, baseIdentifier);
+               DESCRIPTOR_HEAP_BODY :: (elementType: *Type_Info) #expand {
+                  assert(`additionalData.isLValue == false, "i am kinda treating this as a intrinsic function call. maybe i should just have idk a function instead of an intrinsic array. idk.");
 
-               //    baseSpirvType := New(TypeInfoPointer);
-               //    baseSpirvType.storageClass = GetVariableStorageClass(data, baseIdentifier);
-               //    baseSpirvType.pointerTo = baseType;
-               //    currentBaseSpirvType.* = baseSpirvType;
-               // }
+                  indexSSAId := GenerateInstructions(`data, `cbo.right, `general, `function, `currentFunction, .{ spirvShouldHaveBeenType = type_info(s32) });
+                  tira := New(TypeInfoRuntimeArray);
+                  tira.elementType = elementType;
+                  baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
+
+                  storageClass := GetVariableStorageClass(`data, `variable);
+                  returnTypeIdentifier := GetPointerTypeIdentifier(type_info(void), storageClass);
+
+                  lValueSSAId := GetNextSSAId(`data);
+
+                  WriteSingleInstructionIfReachable(
+                     `function,
+                     *`data.isBlockReachable,
+                     .UntypedAccessChainKHR,
+                     GetSSAId(`data, returnTypeIdentifier),
+                     lValueSSAId,
+                     GetSSAId(`data, baseTypeIdentifier),
+                     GetSSAId(`data, `variable),
+                     indexSSAId
+                  );
+
+                  dereferencedSSAId := Load(`data, `function, .{ type = ._Type, _type = tira.elementType }, lValueSSAId, false);
+                  RETURN(dereferencedSSAId, tira.elementType);
+               }
+
+               // checking if the variable is an intrinsic array.
+               if (cbo.left.kind == .IDENT) {
+                  ci := cast(*Code_Ident) cbo.left;
+                  variable := GetVariableIdentifier(ci);
+                  if false {
+                  } else if (IdentifierCompare(variable, meshVerticesVariableIdentifier)) {
+                     // do nothing. DoDotsAndArraySubscripts works for this.
+                  } else if (IdentifierCompare(variable, meshTrianglesVariableIdentifier)) {
+                     // do nothing. DoDotsAndArraySubscripts works for this.
+                  } else if (IdentifierCompare(variable, imageHeapVariableIdentifier)) {
+                     assert(additionalData.accessChainBaseArrayElementTypeIfImageHeap != null);
+                     DESCRIPTOR_HEAP_BODY(additionalData.accessChainBaseArrayElementTypeIfImageHeap);
+                  } else if (IdentifierCompare(variable, tlasHeapVariableIdentifier)) {
+                     DESCRIPTOR_HEAP_BODY(type_info(__TLAS__));
+                  } else if (IdentifierCompare(variable, samplerHeapVariableIdentifier)) {
+                     DESCRIPTOR_HEAP_BODY(type_info(__Sampler__));
+                  }
+               }
 
                #through;
             case #char ".";
                chainSpirvType: *Type_Info;
-               chainSSAId := DoDotsAndArraySubscripts(data, function, cbo, currentFunction, additionalData.accessChainBaseArrayElementTypeIfImageHeap, additionalData.isLValue, lValueOut, *chainSpirvType, lValueOutSpirvType);
+               chainSSAId := DoDotsAndArraySubscripts(data, function, cbo, currentFunction, additionalData.isLValue, lValueOut, *chainSpirvType, lValueOutSpirvType);
                RETURN(chainSSAId, chainSpirvType);
 
             case #char "/"; #through;
@@ -8050,7 +8081,7 @@ IsIncomingPayloadVariable :: (cd: *Code_Declaration) -> bool {
 
 GetNodeType :: (node: *Code_Node) -> *Type_Info #expand {
    found, type := table_find(*`data.codeNodeTypes, node);
-   assert(found);
+   assert(found, "loc: %", GetLocationString(node));
 
    return type;
 }
@@ -8148,7 +8179,7 @@ DoCast :: (data: *CompilationData, b: *BuilderType, castTo: *Type_Info, castFrom
    }
 
    // then neither pointer
-   assert(castTo.type != TYPE_INFO_POINTER_TAG && castFrom.type != TYPE_INFO_POINTER_TAG, "castTo: %, castFrom: %", castTo.*, castFrom.*);
+   assert(castTo.type != TYPE_INFO_POINTER_TAG && castFrom.type != TYPE_INFO_POINTER_TAG, "castTo: %, castFrom: %, loc: %", castTo.*, castFrom.*, GetLocationString(node));
 
    // doing vector or scalar cast for integers (floats not yet implemented)
    // this is a two stage cast:
@@ -8653,6 +8684,12 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
                      return tip.pointerTo;
                   }
 
+                  case TYPE_INFO_RUNTIME_ARRAY_TAG; {
+                     tira := cast(*TypeInfoRuntimeArray) leftType;
+                     TableAdd(*data.codeNodeTypes, node, tira.elementType);
+                     return tira.elementType;
+                  }
+
                   case; assert(false, "type: %", leftType.type); return null;
                }
 
@@ -8692,13 +8729,6 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          return node.type;
       }
 
-      // TODO
-      // recurse DetermineCodeNodeTypes into the called function
-      //
-      // idk. maybe recurse into the header which then recurses into the block.
-      // recurse only if it is constant. that is if it is not ident. or maybe you can assert that if it is ident then it has to be
-      // intrinsic function
-      //       - apila, 26/04/26
       case .PROCEDURE_CALL;
          cpc := cast(*Code_Procedure_Call) node;
          assert(cpc.resolved_procedure_expression != null, "loc: %", cpc.location);
@@ -8737,8 +8767,29 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
             DetermineCodeNodeTypes(data, cd.expression);
          }
 
-         type := ConvertJaiTypeIfNecessary(cd.type, cd.notes);
+         // some of the intrinsics
+         if (false) {
+         } else if (cd == meshVerticesVariableIdentifier.variable.declaration) {
+            tia := CreateTypeInfoArrayFixedSize(type_info(MeshPerVertex), data.maxVertices);
+            TableAdd(*data.codeNodeTypes, node, tia);
+            return tia;
+         } else if (cd == meshTrianglesVariableIdentifier.variable.declaration) {
+            tia := CreateTypeInfoArrayFixedSize(type_info(s32x3), data.maxPrimitives);
+            TableAdd(*data.codeNodeTypes, node, tia);
+            return tia;
+         } else if (cd == data.meshVertexOutVariableIdentifier.variable.declaration) {
+            elementType := GetArrayElementType(cd);
+            tia := CreateTypeInfoArrayFixedSize(elementType, data.maxVertices);
+            TableAdd(*data.codeNodeTypes, node, tia);
+            return tia;
+         } else if (cd == data.meshPrimitiveOutVariableIdentifier.variable.declaration) {
+            elementType := GetArrayElementType(cd);
+            tia := CreateTypeInfoArrayFixedSize(elementType, data.maxPrimitives);
+            TableAdd(*data.codeNodeTypes, node, tia);
+            return tia;
+         }
 
+         type := ConvertJaiTypeIfNecessary(cd.type, cd.notes);
          storageClass := GetVariableStorageClass(data, .{ type = .Variable, variable.declaration = cd });
          isLocalDeclaration := storageClass == .Function;
 
@@ -9253,6 +9304,12 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
       return .IncomingRayPayloadKHR;
    }
 
+   for data.fragmentOutputIdentifiers {
+      if (IdentifierCompare(variable, it)) {
+         return .Output;
+      }
+   }
+
    isGlobalConstant := table_contains(*globalConstantDeclarations, declaration.declaration);
    if (isGlobalConstant) {
       // they dont really exists.
@@ -9275,26 +9332,25 @@ GetVariableName :: (variable: Identifier) -> string {
    return variable.variable.declaration.name;
 }
 
+CreateTypeInfoArrayFixedSize :: (elementType: *Type_Info, arrayCount: int) -> *Type_Info_Array #expand {
+   typeInfo := New(Type_Info_Array);
+   typeInfo.type = .ARRAY;
+   typeInfo.element_type = elementType;
+   typeInfo.array_type = .FIXED;
+   typeInfo.array_count = arrayCount;
+
+   return typeInfo;
+}
+
+GetArrayElementType :: (declaration: *Code_Declaration) -> *Type_Info #expand {
+   assert(declaration.type.type == .ARRAY, "type: %", declaration.type.type);
+   tip := cast(*Type_Info_Array) declaration.type;
+   return tip.element_type;
+}
+
 // i need this function because some of the variables, their jai types doesnt match the spirv i want to generate.
 // for example meshvertices is declared as an array view but is a fixed size array.
 GetVariableTypeIdentifier :: (data: *CompilationData, variable: Identifier) -> Identifier {
-   // if an array
-   GetElementType :: (declaration: *Code_Declaration) -> *Type_Info #expand {
-      assert(declaration.type.type == .ARRAY, "type: %", declaration.type.type);
-      tip := cast(*Type_Info_Array) declaration.type;
-      return tip.element_type;
-   }
-
-   CreateTypeInfoArray :: (elementType: *Type_Info, arrayCount: int) -> *Type_Info_Array #expand {
-      typeInfo := New(Type_Info_Array);
-      typeInfo.type = .ARRAY;
-      typeInfo.element_type = elementType;
-      typeInfo.array_type = .FIXED;
-      typeInfo.array_count = arrayCount;
-
-      return typeInfo;
-   }
-
    assert(variable.type == .Variable, "variable.type: %", variable.type);
 
    declaration := variable.variable.declaration;
@@ -9302,26 +9358,26 @@ GetVariableTypeIdentifier :: (data: *CompilationData, variable: Identifier) -> I
    if (IdentifierCompare(variable, meshVerticesVariableIdentifier)) {
       elementType := cast(*Type_Info) MeshPerVertex;
 
-      typeInfo := CreateTypeInfoArray(elementType, data.maxVertices);
+      typeInfo := CreateTypeInfoArrayFixedSize(elementType, data.maxVertices);
       return .{ type = ._Type, _type = typeInfo };
    }
 
    if (IdentifierCompare(variable, meshTrianglesVariableIdentifier)) {
       elementType := cast(*Type_Info) s32x3;
 
-      typeInfo := CreateTypeInfoArray(elementType, data.maxPrimitives);
+      typeInfo := CreateTypeInfoArrayFixedSize(elementType, data.maxPrimitives);
       return .{ type = ._Type, _type = typeInfo };
    }
 
    if (IdentifierCompare(variable, data.meshVertexOutVariableIdentifier)) {
-      elementType := GetElementType(declaration);
-      typeInfo := CreateTypeInfoArray(elementType, data.maxVertices);
+      elementType := GetArrayElementType(declaration);
+      typeInfo := CreateTypeInfoArrayFixedSize(elementType, data.maxVertices);
       return .{ type = ._Type, _type = typeInfo };
    }
 
    if (IdentifierCompare(variable, data.meshPrimitiveOutVariableIdentifier)) {
-      elementType := GetElementType(declaration);
-      typeInfo := CreateTypeInfoArray(elementType, data.maxVertices);
+      elementType := GetArrayElementType(declaration);
+      typeInfo := CreateTypeInfoArrayFixedSize(elementType, data.maxVertices);
       return .{ type = ._Type, _type = typeInfo };
    }
 
@@ -9412,327 +9468,6 @@ DoMemberAccess :: (tis: *Type_Info_Struct, right: *Code_Node, indices: *[..] SSA
    }
 }
 
-DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentFunction: *Code_Procedure_Header, baseArrayElementTypeIfImageHeap: *TypeInfoImage, isLValue: bool, lValueOut: *SSAId = null, spirvType: **Type_Info = null, lValueOutSpirvType: **Type_Info = null) -> SSAId {
-   DoAccessChainOrCompositeExtract :: (data: *CompilationData,
-                                       b: *BuilderType,
-                                       jaiReturnType: *Type_Info,
-                                       baseSSAId: SSAId,
-                                       indices: *[..] SSAId,
-                                       baseArrayElementTypeIfImageHeap: *Type_Info,
-                                       literalIndices: *[..] int,
-                                       currentBaseSpirvType: *Type_Info) -> SSAId, spirvType: *Type_Info #expand {
-      if (currentBaseSpirvType.type == TYPE_INFO_POINTER_TAG) {
-         returnTypeIdentifier := GetPointerTypeIdentifier(jaiReturnType, currentBaseSpirvType.(*TypeInfoPointer).storageClass);
-         pointerSSAId := EmitAccessChain(data, b, returnTypeIdentifier, baseSSAId, xx currentBaseSpirvType, indices.*, baseArrayElementTypeIfImageHeap);
-         array_reset(indices);
-         return pointerSSAId, xx returnTypeIdentifier._type;
-      } else {
-         returnTypeIdentifier: Identifier = .{ type = ._Type, _type = jaiReturnType };
-         resultSSAId := EmitCompositeExtract(data, b, returnTypeIdentifier, baseSSAId, literalIndices.*);
-         array_reset(literalIndices);
-         return resultSSAId, xx returnTypeIdentifier._type;
-      }
-   }
-
-   // treat indices, currentBaseSSAId as capture variables.
-   Helper :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentFunction: *Code_Procedure_Header, baseArrayElementTypeIfImageHeap: *TypeInfoImage, indices: *[..] SSAId, literalIndices: *[..] int, currentBaseNode: **Code_Node, currentBaseSpirvType: **Type_Info, currentBaseSSAId: *SSAId, lastAccessOperation: **Code_Binary_Operator) {
-      leftType := GetNodeType(cbo.left);
-      leftType = UnwindVariantsAllTheWay(leftType);
-
-      if cbo.left.kind == {
-         case .BINARY_OPERATOR; {
-            cboLeft := cast(*Code_Binary_Operator) cbo.left;
-            assert(cboLeft.operator_type == #char "." || // member access and pointer access
-                   cboLeft.operator_type == .ARRAY_SUBSCRIPT,
-               "operator: %", cboLeft.operator_type
-            );
-
-            Helper(data, b, cboLeft, currentFunction, baseArrayElementTypeIfImageHeap, indices, literalIndices, currentBaseNode, currentBaseSpirvType, currentBaseSSAId, lastAccessOperation);
-         }
-
-         // reached to the base
-         case .IDENT; {
-            if (leftType.type == .TYPE) {
-               // named module
-               currentBaseNode.* = cbo.right;
-            } else {
-               currentBaseNode.* = cbo.left;
-            }
-
-            if currentBaseNode.*.kind == {
-               case .IDENT; {
-                  baseType := GetNodeType(currentBaseNode.*);
-                  ciBase := cast(*Code_Ident) currentBaseNode.*;
-                  baseIdentifier := GetVariableIdentifier(ciBase);
-                  currentBaseSSAId.* = GetSSAId(data, baseIdentifier);
-
-                  baseSpirvType := New(TypeInfoPointer);
-                  baseSpirvType.storageClass = GetVariableStorageClass(data, baseIdentifier);
-                  baseSpirvType.pointerTo = baseType;
-                  currentBaseSpirvType.* = baseSpirvType;
-               }
-
-               case .PROCEDURE_CALL; {
-                  DoProcedureCallBase(xx currentBaseNode.*);
-               }
-
-               case; assert(false);
-            }
-         }
-
-         // reached to the base
-         case .PROCEDURE_CALL; {
-            currentBaseNode.* = cbo.left;
-            DoProcedureCallBase(xx currentBaseNode.*);
-         }
-
-         case; assert(false, "type: %", leftType.*);
-      }
-
-      if leftType.type == {
-         case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG; {
-            tidcos := cast(*TypeInfoDecorationlessCopyOfStruct) leftType;
-            DoMemberAccess(tidcos.copyOf, cbo.right, indices, literalIndices, currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
-         }
-
-         case .STRUCT; {
-            tis := cast(*Type_Info_Struct) leftType;
-            DoMemberAccess(tis, cbo.right, indices, literalIndices, currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
-         }
-
-         case .ARRAY; {
-            if (currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG) {
-               indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) s32 });
-               array_add(indices, indexSSAId);
-            } else {
-               // only literals allowed
-               assert(cbo.right.kind == .LITERAL);
-
-               // here i am cheating a lil bit. i actually dont need the ssa id i need to integer value.
-               // so i am just using the existing function. maybe i should have just created a function and call it in the .LITERAL case of GenerateInstructions
-               // as well as here.
-               //       - apila, 29/05/26
-               literalIdentifier: Identifier;
-               _ := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) s32 }, identifierOut = *literalIdentifier);
-               assert(literalIdentifier.type == .IntLiteral);
-
-               index := literalIdentifier.intLiteral.value._s64;
-               array_add(literalIndices, index);
-            }
-         }
-
-         case TYPE_INFO_POINTER_TAG; {
-            tip := cast(*TypeInfoPointer) leftType;
-
-            // c style:
-            // a.b.c.p->x
-            // (*a.b.c.p).x
-            //
-            // p[x]
-            // *(p + x)
-
-            pointerSpirvType: *TypeInfoPointer;
-            pointerSSAId: SSAId;
-            if (indices.count > 0 || literalIndices.count > 0) {
-               assert(baseArrayElementTypeIfImageHeap == null, "at this point it cant be image heap because we have a pointer in the chain but image heap must be the base of the chain, so pointers can not occur.");
-
-               _pointerSpirvType: *Type_Info;
-               pointerSSAId, _pointerSpirvType = DoAccessChainOrCompositeExtract(data, b, leftType, currentBaseSSAId.*, indices, baseArrayElementTypeIfImageHeap, literalIndices, currentBaseSpirvType.*);
-
-               assert(_pointerSpirvType.type == TYPE_INFO_POINTER_TAG);
-               pointerSpirvType = xx _pointerSpirvType;
-            } else {
-               pointerSSAId = currentBaseSSAId.*;
-
-               assert(currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
-               pointerSpirvType = xx currentBaseSpirvType.*;
-            }
-
-            loadFromSpirvType: *TypeInfoPointer;
-            loadFromSpirvType = pointerSpirvType;
-
-            loadFromSSAId: SSAId;
-            if cbo.operator_type == {
-               case #char "."; {
-                  loadFromSSAId = pointerSSAId;
-               }
-
-               case .ARRAY_SUBSCRIPT; {
-                  // since i set spirvShouldHaveBeenType it is now guranteed that the returned ssa id will be casted to that type no matter what.
-                  indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) u64 });
-                  u64TypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) u64 });
-
-                  pointerAsU64SSAId := GetNextSSAId(data);
-                  WriteSingleInstructionIfReachable(
-                     b,
-                     *data.isBlockReachable,
-                     .ConvertPtrToU,
-                     u64TypeSSAId,
-                     pointerAsU64SSAId,
-                     pointerSSAId
-                  );
-
-                  loadFromAsU64SSAId := GetNextSSAId(data);
-                  WriteSingleInstructionIfReachable(
-                     b,
-                     *data.isBlockReachable,
-                     .IAdd,
-                     u64TypeSSAId,
-                     loadFromAsU64SSAId,
-                     pointerAsU64SSAId,
-                     indexSSAId
-                  );
-
-                  loadFromSSAId = GetNextSSAId(data);
-                  WriteSingleInstructionIfReachable(
-                     b,
-                     *data.isBlockReachable,
-                     .ConvertUToPtr,
-                     GetSSAId(data, .{ type = ._Type, _type = loadFromSpirvType }),
-                     loadFromSSAId,
-                     loadFromAsU64SSAId
-                  );
-               }
-
-               case; assert(false);
-            }
-
-            loadedTypeIdentifier: Identifier = .{ type = ._Type, _type = loadFromSpirvType.pointerTo };
-            currentBaseSSAId.* = Load(data, b, loadedTypeIdentifier, loadFromSSAId, loadFromSpirvType.storageClass == .PhysicalStorageBuffer);
-            currentBaseNode.* = cbo;
-            currentBaseSpirvType.* = loadFromSpirvType.pointerTo;
-
-            if (cbo.operator_type == #char ".") {
-               assert(tip.pointerTo.type == .STRUCT, "type: %", tip.pointerTo.type);
-               tis := cast(*Type_Info_Struct) tip.pointerTo;
-               DoMemberAccess(tis, cbo.right, indices, literalIndices, currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
-            }
-         }
-
-         case; assert(false);
-      }
-
-
-      // when all Helper functions exit lastAccessOperation will point to the last Code_Binary_Operator
-      // because of the order of traversel
-      lastAccessOperation.* = cbo;
-   }
-
-   indices: [..] SSAId;
-   literalIndices: [..] int;
-   currentBaseNode: *Code_Node;
-   currentBaseSpirvType: *Type_Info;
-   currentBaseSSAId: SSAId;
-   lastAccessOperation: *Code_Binary_Operator;
-   Helper(data, b, cbo, currentFunction, baseArrayElementTypeIfImageHeap, *indices, *literalIndices, *currentBaseNode, *currentBaseSpirvType, *currentBaseSSAId, *lastAccessOperation);
-   assert(currentBaseNode != null);
-   assert(currentBaseSpirvType != null);
-   assert(currentBaseSSAId != 0);
-   assert(lastAccessOperation != null);
-
-   lastAccessOperationJaiType := GetNodeType(lastAccessOperation);
-
-   // so if baseNode.kind is PROCEDURE_CALL then it will trigger the else below. not proper way to do but whatever   - apila, 06/06/26
-
-   // if the current base is not a Code_Binary_Operator then it is the true base of the access chain.
-   // true base could be a function call or an ident.
-   trueBaseName: string;
-   if (currentBaseNode.kind == .IDENT) {
-      ciBase := cast(*Code_Ident) currentBaseNode;
-      baseIdentifier := GetVariableIdentifier(ciBase);
-      trueBaseName = GetVariableName(baseIdentifier);
-   }
-
-   jaiReturnType: *Type_Info;
-   baseVariableData: DoDotsAndArraySubscriptsBaseVariableData;
-   if trueBaseName == {
-      case IMAGE_HEAP_VARIABLE_NAME; {
-         // i am cheating here to get around untyped pointers.
-         // there is no proper handling of untyped variables (i dont store which variables are untyped which are not)
-         //    - apila, 06/06/26
-         jaiReturnType = cast(*Type_Info) void;
-         baseVariableData = .ImageHeapVariable;
-      }
-
-      case SAMPLER_HEAP_VARIABLE_NAME; {
-         jaiReturnType = cast(*Type_Info) void;
-         baseVariableData = .SamplerHeapVariable;
-      }
-
-      case TLAS_HEAP_VARIABLE_NAME; {
-         jaiReturnType = cast(*Type_Info) void;
-         baseVariableData = .TLASHeapVariable;
-      }
-
-      case; {
-         jaiReturnType = lastAccessOperationJaiType;
-         baseVariableData = .Another;
-      }
-   }
-
-   // left overs
-   lastAccessChainResultSpirvType: *Type_Info;
-   lastAccessChainResultSSAId: SSAId;
-   if (indices.count > 0 || literalIndices.count > 0) {
-      // indexes were left over. last operation cant be pointer indexing
-      leftType := GetNodeType(lastAccessOperation.left);
-      assert(!(lastAccessOperation.operator_type == .ARRAY_SUBSCRIPT && leftType.type == TYPE_INFO_POINTER_TAG));
-
-      lastAccessChainResultSSAId, lastAccessChainResultSpirvType = DoAccessChainOrCompositeExtract(data, b, jaiReturnType, currentBaseSSAId, *indices, baseArrayElementTypeIfImageHeap, *literalIndices, currentBaseSpirvType);
-   } else {
-      // no indices were left over. meaning that the last operation was a pointer indexing
-      // ...p[index]
-      leftType := GetNodeType(lastAccessOperation.left);
-      assert(lastAccessOperation.operator_type == .ARRAY_SUBSCRIPT, "loc: %", GetLocationString(lastAccessOperation));
-      assert(leftType.type == TYPE_INFO_POINTER_TAG);
-
-      lastAccessChainResultSSAId = currentBaseSSAId;
-      lastAccessChainResultSpirvType = currentBaseSpirvType;
-   }
-
-   if (isLValue) {
-      assert(currentBaseSpirvType.type == TYPE_INFO_POINTER_TAG, "not an lvalue");
-
-      if (spirvType != null) spirvType.* = lastAccessChainResultSpirvType;
-      return lastAccessChainResultSSAId;
-   }
-
-   // OpCompositeExtract case.
-   // you get the rvalue without the OpLoad.
-   // it also means it cant be an lvalue
-   //       - apila, 06/06/26
-   if (currentBaseSpirvType.type != TYPE_INFO_POINTER_TAG) {
-      assert(!isLValue);
-
-      if (spirvType != null) spirvType.* = lastAccessChainResultSpirvType;
-      return lastAccessChainResultSSAId;
-   }
-
-   if (lValueOutSpirvType != null) lValueOutSpirvType.* = lastAccessChainResultSpirvType;
-   if (lValueOut != null) lValueOut.* = lastAccessChainResultSSAId;
-
-   assert(lastAccessChainResultSpirvType.type == TYPE_INFO_POINTER_TAG, "type: %, loc: %", lastAccessChainResultSpirvType.*, GetLocationString(lastAccessOperation));
-   tip := cast(*TypeInfoPointer) lastAccessChainResultSpirvType;
-
-   loadedTypeIdentifier: Identifier;
-   if #complete baseVariableData == {
-      case .ImageHeapVariable;
-         assert(baseArrayElementTypeIfImageHeap != null, "loc: %", cbo.location);
-         loadedTypeIdentifier = .{ type = ._Type, _type = baseArrayElementTypeIfImageHeap };
-      case .SamplerHeapVariable;
-         loadedTypeIdentifier = .{ type = ._Type, _type = cast(*Type_Info) __Sampler__ };
-      case .TLASHeapVariable;
-         loadedTypeIdentifier = .{ type = ._Type, _type = cast(*Type_Info) __TLAS__ };
-      case .Another;
-         loadedTypeIdentifier = .{ type = ._Type, _type = tip.pointerTo };
-   }
-
-   dereferencedSSAId := Load(data, b, loadedTypeIdentifier, lastAccessChainResultSSAId, tip.storageClass == .PhysicalStorageBuffer);
-
-   if (spirvType != null) spirvType.* = loadedTypeIdentifier._type;
-   return dereferencedSSAId;
-}
-
 DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentFunction: *Code_Procedure_Header, isLValue: bool, lValueOut: *SSAId = null, spirvType: **Type_Info = null, lValueOutSpirvType: **Type_Info = null) -> SSAId {
    DoAccessChainOrCompositeExtract :: (data: *CompilationData,
                                        b: *BuilderType,
@@ -9754,6 +9489,7 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
       }
    }
 
+   // treat indices, currentBaseSSAId as capture variables.
    Helper :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentBaseSpirvType: **Type_Info, currentBaseSSAId: *SSAId, indices: *[..] SSAId, literalIndices: *[..] int, lastAccessOperation: **Code_Binary_Operator, currentFunction: *Code_Procedure_Header) {
       leftType := GetNodeType(cbo.left);
       leftType = UnwindVariantsAllTheWay(leftType);
@@ -9769,9 +9505,11 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
             Helper(data, b, cboLeft, currentBaseSpirvType, currentBaseSSAId, indices, literalIndices, lastAccessOperation, currentFunction);
          }
 
+         // reached to the base
          case .IDENT; {
             baseNode: *Code_Node;
             if (leftType.type == .TYPE) {
+               // named module
                baseNode = cbo.right;
             } else {
                baseNode = cbo.left;
@@ -9798,8 +9536,9 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
             }
          }
 
+         // reached to the base
          case .PROCEDURE_CALL; {
-            DoProcedureCallBase(cbo.left);
+            DoProcedureCallBase(xx cbo.left);
          }
 
          case; assert(false, "type: %", leftType.*);
@@ -9856,11 +9595,18 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
          case TYPE_INFO_POINTER_TAG; {
             tip := cast(*TypeInfoPointer) leftType;
 
+            // c style:
+            // a.b.c.p->x
+            // (*a.b.c.p).x
+            //
+            // p[x]
+            // *(p + x)
+
             pointerSpirvType: *TypeInfoPointer;
             pointerSSAId: SSAId;
             if (indices.count > 0 || literalIndices.count > 0) {
                _pointerSpirvType: *Type_Info;
-               pointerSSAId, _pointerSpirvType = DoAccessChainOrCompositeExtract(data, b, leftType, currentBaseSSAId.*, indices, literalIndices);
+               pointerSSAId, _pointerSpirvType = DoAccessChainOrCompositeExtract(data, b, leftType, currentBaseSSAId.*, indices, literalIndices, currentBaseSpirvType.*);
 
                assert(_pointerSpirvType.type == TYPE_INFO_POINTER_TAG);
                pointerSpirvType = xx _pointerSpirvType;
@@ -10003,13 +9749,6 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
    return dereferencedSSAId;
 }
 
-DoDotsAndArraySubscriptsBaseVariableData :: enum {
-   ImageHeapVariable;
-   SamplerHeapVariable;
-   TLASHeapVariable;
-   Another;
-}
-
 EmitCompositeExtract :: (data: *CompilationData, b: *BuilderType, returnTypeIdentifier: Identifier, baseSSAId: SSAId, indices: [] int) -> SSAId {
    resultSSAId := GetNextSSAId(data);
    operands: [..] Any;
@@ -10040,85 +9779,6 @@ EmitAccessChain :: (data: *CompilationData, b: *BuilderType, returnTypeIdentifie
 
    WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .AccessChain, .. operands);
    return resultSSAId;
-}
-
-// storageClass: storage class of the pointer returned by OpAccessChain
-// returnType: the type of the access chain in jai, not the one returned by OpAccessChain. (there is a single pointer difference)
-// returns: the ssa id returned by OpAccessChain
-EmitAccessChain :: (data: *CompilationData, b: *BuilderType, returnTypeIdentifier: Identifier, baseSSAId: SSAId, spirvBaseType: *TypeInfoPointer, indices: [] SSAId, baseArrayElementTypeIfImageHeap: *Type_Info) -> SSAId {
-   assert(spirvBaseType.type == TYPE_INFO_POINTER_TAG);
-
-   lValueSSAId := GetNextSSAId(data);
-
-   op: SpvOp;
-   operands: [..] Any;
-
-   //
-   // i dont store if a variable is untyped or not. and there are many restrictions to untyped variables.
-   // so i think im gonna keep it to minimal and say that only the types that cant be OpVariable gonna be
-   // OpUntypedVariable. dont forget OpTypeUntypedPointerKHR is something else and dont require OpUntypedVariable
-   //    - apila, 26/04/26
-   //
-   // only sampler heap variable and image heap variable are untyped. and i can determine it from the given types.
-   // kinda hacky way to determine it but voila.
-   //    - apila, 02/05/26
-   //
-   if (CompareType(spirvBaseType.pointerTo, cast(*Type_Info) type_of(images))) {
-      assert(spirvBaseType.pointerTo.type != TYPE_INFO_POINTER_TAG); // required by specs
-      assert(baseArrayElementTypeIfImageHeap != null);
-
-      tira := New(TypeInfoRuntimeArray);
-      tira.elementType = baseArrayElementTypeIfImageHeap;
-      baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
-
-      op = .UntypedAccessChainKHR;
-      array_add(*operands, GetSSAId(data, returnTypeIdentifier));
-      array_add(*operands, lValueSSAId);
-      array_add(*operands, GetSSAId(data, baseTypeIdentifier));
-      array_add(*operands, baseSSAId);
-   } else if (CompareType(spirvBaseType.pointerTo, cast(*Type_Info) type_of(tlases))) {
-      assert(spirvBaseType.pointerTo.type != TYPE_INFO_POINTER_TAG); // required by specs
-
-      assert(spirvBaseType.pointerTo.type == .ARRAY);
-      tia := cast(*Type_Info_Array) spirvBaseType.pointerTo;
-
-      tira := New(TypeInfoRuntimeArray);
-      tira.elementType = tia.element_type;
-      baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
-
-      op = .UntypedAccessChainKHR;
-      array_add(*operands, GetSSAId(data, returnTypeIdentifier));
-      array_add(*operands, lValueSSAId);
-      array_add(*operands, GetSSAId(data, baseTypeIdentifier));
-      array_add(*operands, baseSSAId);
-   } else if (CompareType(spirvBaseType.pointerTo, cast(*Type_Info) type_of(samplers))) {
-      assert(spirvBaseType.pointerTo.type != TYPE_INFO_POINTER_TAG); // required by specs
-
-      assert(spirvBaseType.pointerTo.type == .ARRAY);
-      tia := cast(*Type_Info_Array) spirvBaseType.pointerTo;
-
-      tira := New(TypeInfoRuntimeArray);
-      tira.elementType = tia.element_type;
-      baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
-
-      op = .UntypedAccessChainKHR;
-      array_add(*operands, GetSSAId(data, returnTypeIdentifier));
-      array_add(*operands, lValueSSAId);
-      array_add(*operands, GetSSAId(data, baseTypeIdentifier));
-      array_add(*operands, baseSSAId);
-   } else {
-      op = .AccessChain;
-      array_add(*operands, GetSSAId(data, returnTypeIdentifier));
-      array_add(*operands, lValueSSAId);
-      array_add(*operands, baseSSAId);
-   }
-
-   for indices {
-      array_add(*operands, ac(it));
-   }
-
-   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, op, .. operands);
-   return lValueSSAId;
 }
 
 ArrayReverse :: (array: [] $T) {
