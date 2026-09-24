@@ -346,6 +346,13 @@ SetBuildOptions :: (options: BuildOptions, w: Workspace) {
 
 #scope_module
 
+// [] type == struct { count: int, data: *type };
+// count is the first member, data is the second.
+// the WriteTypeOrVariableOrConstant and DoDotsAndArraySubscripts must agree on this
+//       - apila, 23/09/26
+ARRAY_VIEW_COUNT_FIELD_INDEX  :: 0;
+ARRAY_VIEW_DATA_FIELD_INDEX   :: 1;
+
 meshVerticesVariableIdentifier:           Identifier;
 meshTrianglesVariableIdentifier:          Identifier;
 imageHeapVariableIdentifier:              Identifier;
@@ -2073,9 +2080,6 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    }
 
 
-   // idk if i need this?
-   //    apila, 12/04/26
-   //
    // struct annotate infos
    #if SPIRV_BUILDER_TYPE == .String {
       print_to_builder(*b, "\n; struct annotate infos\n");
@@ -2085,7 +2089,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    for ssaId, identifier: data.identifierToSSAId {
       if (identifier.type != ._Type) continue;
       ti := cast(*Type_Info) identifier._type;
-      if (ti.type != .STRUCT) continue;
+      if (!(ti.type == .STRUCT || (ti.type == .ARRAY && ti.(*Type_Info_Array).array_type == .VIEW))) continue;
 
       if (CompareType(identifier._type, cast(*Type_Info) MeshPerVertex))  continue; // builtin struct handled seperately
       if (CompareType(identifier._type, cast(*Type_Info) bool))           continue;
@@ -2127,24 +2131,64 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    }
 
    for identifier: structsToAnnotate {
-      annotateInfo := GetAnnotateInfoFromStruct(identifier._type);
-      structIdentifier: Identifier = .{ type = ._Type, _type = identifier._type };
-      WriteSingleInstruction(
-         *b,
-         .Decorate,
-         GetSSAId(*data, structIdentifier),
-         SpvDecoration.Block
-      );
+      // can be either Type_Info_Struct or Type_Info_Array with array type .VIEW;
 
-      for annotateInfo.memberInfos {
-         WriteSingleInstruction(
-            *b,
-            .MemberDecorate,
-            GetSSAId(*data, structIdentifier),
-            it.memberIndex,
-            SpvDecoration.Offset,
-            it.offset
-         );
+      type := identifier._type;
+      if type.type == {
+         case .STRUCT; {
+            annotateInfo := GetAnnotateInfoFromStruct(type);
+
+            // idk about the Block decoration.
+            // i think it is not needed for any struct other than push constant block.
+            // there is a problem that you cannot nest structs if both of them are decorated with Block.
+            // i forgor why i introduced TypeInfoDecorationlessCopyOfStruct, is it because of Offset or Block? if it is because of Block
+            // then i think it is not needed too.
+            //       - apila, 24/09/26
+            WriteSingleInstruction(
+               *b,
+               .Decorate,
+               GetSSAId(*data, identifier),
+               SpvDecoration.Block
+            );
+
+            for annotateInfo.memberInfos {
+               WriteSingleInstruction(
+                  *b,
+                  .MemberDecorate,
+                  GetSSAId(*data, identifier),
+                  it.memberIndex,
+                  SpvDecoration.Offset,
+                  it.offset
+               );
+            }
+         }
+
+         case .ARRAY; {
+            tia := type.(*Type_Info_Array);
+            assert(tia.array_type == .VIEW);
+
+            // struct { count: int; data: *type };
+
+            WriteSingleInstruction(
+               *b,
+               .MemberDecorate,
+               GetSSAId(*data, identifier),
+               ARRAY_VIEW_COUNT_FIELD_INDEX,
+               SpvDecoration.Offset,
+               type_info(Array_View_64).members[ARRAY_VIEW_COUNT_FIELD_INDEX].offset_in_bytes
+            );
+
+            WriteSingleInstruction(
+               *b,
+               .MemberDecorate,
+               GetSSAId(*data, identifier),
+               ARRAY_VIEW_DATA_FIELD_INDEX,
+               SpvDecoration.Offset,
+               type_info(Array_View_64).members[ARRAY_VIEW_DATA_FIELD_INDEX].offset_in_bytes
+            );
+         }
+
+         case; assert(false, "unreachable");
       }
    }
 
@@ -5552,23 +5596,58 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
 
          if (ti.type == .ARRAY) {
             tia := cast(*Type_Info_Array) ti;
-            assert(tia.array_type == .FIXED, "array type: %. .VIEW is basically a fat pointer, i will support it when i support pointers. .RESIZABLE is i think kaputt, dont use it.", tia.array_type);
+            if tia.array_type == {
+               case .FIXED; {
+                  elementType := tia.element_type;
+                  assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. known limitation: cant use pointers inside array. wrap them in a struct for now", tia.element_type.type);
+                  elementTypeIdentifier: Identifier = .{ type = ._Type, _type = elementType };
+                  WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
 
-            elementType := tia.element_type;
-            assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. known limitation: cant use pointers inside array. wrap them in a struct for now", tia.element_type.type);
-            elementTypeIdentifier: Identifier = .{ type = ._Type, _type = elementType };
-            WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
+                  arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx tia.array_count, bitSize = 32 } };
+                  WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
 
-            arraySizeIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx tia.array_count, bitSize = 32 } };
-            WriteTypeOrVariableOrConstant(data, b, arraySizeIdentifier);
+                  WriteSingleInstruction(
+                     b,
+                     .TypeArray,
+                     GetSSAId(data, identifier),
+                     GetSSAId(data, elementTypeIdentifier),
+                     GetSSAId(data, arraySizeIdentifier)
+                  );
+               }
 
-            WriteSingleInstruction(
-               b,
-               .TypeArray,
-               GetSSAId(data, identifier),
-               GetSSAId(data, elementTypeIdentifier),
-               GetSSAId(data, arraySizeIdentifier)
-            );
+               case .VIEW; {
+                  // struct { count: int, data: *type };
+
+                  elementType := tia.element_type;
+                  assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. known limitation: cant use pointers inside array. i think i need to just idk update DetermineCodeNodeTypes().", tia.element_type.type);
+                  elementTypeIdentifier: Identifier = .{ type = ._Type, _type = elementType };
+                  WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
+
+                  countMemberTypeIdentifier: Identifier = .{ type = ._Type, _type = type_info(int) };
+
+                  // hardcoding PhysicalStorageBuffer just like that because im a good programmer
+                  dataMemberTypeIdentifier := GetPointerTypeIdentifier(elementType, .PhysicalStorageBuffer);
+
+                  WriteTypeOrVariableOrConstant(data, b, countMemberTypeIdentifier);
+                  WriteTypeOrVariableOrConstant(data, b, dataMemberTypeIdentifier);
+
+                  WriteSingleInstruction(
+                     b,
+                     .TypeStruct,
+                     GetSSAId(data, identifier),
+                     GetSSAId(data, countMemberTypeIdentifier),
+                     GetSSAId(data, dataMemberTypeIdentifier)
+                  );
+               }
+
+               case .RESIZABLE; {
+                  assert(false, "pls dont use resizable. thanks.");
+               }
+
+               case; {
+                  assert(false, "unreachable Clueless");
+               }
+            }
 
             return;
          }
@@ -6159,7 +6238,11 @@ ConvertJaiTypeIfNecessary :: (type: *Type_Info, declarationNotes: [] *Code_Note)
 }
 
 GetLocationString :: (node: *Code_Node) -> string #expand {
-   return sprint("%:%.%-%.%", node.location.enclosing_load.fully_pathed_filename, node.l0, node.c0, node.l1, node.c1);
+   if (node.location.enclosing_load != null) {
+      return sprint("%:%.%-%.%", node.location.enclosing_load.fully_pathed_filename, node.l0, node.c0, node.l1, node.c1);
+   } else {
+      return sprint("%:%.%-%.%", "no_file", node.l0, node.c0, node.l1, node.c1);
+   }
 }
 
 // general builder. builder for the whole functions block (the one that comes after "Types, variables and constants")
@@ -6668,7 +6751,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          variableStorageClass := GetVariableStorageClass(data, variableIdentifier);
 
          found, variableType := table_find(*data.codeNodeTypes, node);
-         assert(found);
+         assert(found, "declaration: %, ident: %", GetLocationString(declaration), GetLocationString(ci));
 
          if (table_contains(*userFunctionArguments, declaration)) {
             if (!IsSmallArgument(variableType)) {
@@ -8621,19 +8704,50 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
             case #char ".";
                leftType := DetermineCodeNodeTypes(data, cbo.left);
 
-               tis: *Type_Info_Struct;
                if leftType.type == {
-                  case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG;
-                     tidcos := cast(*TypeInfoDecorationlessCopyOfStruct) leftType;
-                     tis = tidcos.copyOf;
-                  case .STRUCT;
-                     tis = cast(*Type_Info_Struct) leftType;
+                  case TYPE_INFO_POINTER_TAG; #through;
+                  case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG; #through;
+                  case .ARRAY; #through;
+                  case .STRUCT; {
+                     tis: *Type_Info_Struct;
+                     if leftType.type == {
+                        case TYPE_INFO_POINTER_TAG; {
+                           tip := cast(*TypeInfoPointer) leftType;
+                           assert(tip.pointerTo.type == .STRUCT, "type: %", tip.pointerTo.type);
+                           tis = xx tip.pointerTo;
+                        }
 
-                  case TYPE_INFO_POINTER_TAG;
-                     tip := cast(*TypeInfoPointer) leftType;
-                     assert(tip.pointerTo.type == .STRUCT, "type: %", tip.pointerTo.type);
+                        case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG; {
+                           tidcos := cast(*TypeInfoDecorationlessCopyOfStruct) leftType;
+                           tis = tidcos.copyOf;
+                        }
 
-                     tis = xx tip.pointerTo;
+                        case .STRUCT; {
+                           tis = xx leftType;
+                        }
+
+                        // array.data or array.count
+                        case .ARRAY; {
+                           tia := leftType.(*Type_Info_Array);
+                           tis = GetArrayViewTypeInfo(tia.element_type);
+                        }
+
+                        case; assert(false);
+                     }
+
+                     assert(cbo.right.kind == .IDENT, "cbo.right.kind: %", cbo.right.kind);
+                     right := cast(*Code_Ident) cbo.right;
+
+                     memberIndex := GetMemberIndex(tis, right.name);
+                     assert(memberIndex != MEMBER_DOESNT_EXIST);
+
+                     member := tis.members[memberIndex];
+                     notes := member.notes;
+                     newMemberType := ConvertJaiTypeIfNecessary(member.type, notes);
+
+                     TableAdd(*data.codeNodeTypes, node, newMemberType);
+                     return newMemberType;
+                  }
 
                   // left hand side is a named module
                   case .TYPE;
@@ -8651,19 +8765,6 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
                   case; assert(false, "type: %", leftType.type);
                }
-
-               assert(cbo.right.kind == .IDENT, "cbo.right.kind: %", cbo.right.kind);
-               right := cast(*Code_Ident) cbo.right;
-
-               memberIndex := GetMemberIndex(tis, right.name);
-               assert(memberIndex != MEMBER_DOESNT_EXIST);
-
-               member := tis.members[memberIndex];
-               notes := member.notes;
-               newMemberType := ConvertJaiTypeIfNecessary(member.type, notes);
-
-               TableAdd(*data.codeNodeTypes, node, newMemberType);
-               return newMemberType;
 
             case .ARRAY_SUBSCRIPT;
                leftType := DetermineCodeNodeTypes(data, cbo.left);
@@ -8938,7 +9039,7 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
             case .POINTER_DEREFERENCE; #through;
             case .POSTFIX_DEREFERENCE; {
-               assert(subexpressionType.type == TYPE_INFO_POINTER_TAG, "can only derefence a pointer!");
+               assert(subexpressionType.type == TYPE_INFO_POINTER_TAG, "can only derefence a pointer! type: %", subexpressionType.type);
 
                tip := cast(*TypeInfoPointer) subexpressionType;
                resultType = tip.pointerTo;
@@ -8970,6 +9071,18 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
    assert(false, "didnt return! kind: %", node.kind);
    return null;
+}
+
+GetArrayViewTypeInfo :: (elementType: *Type_Info) -> *Type_Info_Struct {
+   // the only wrong thing here is the type of the data pointer which i fix
+   base := type_info(struct { count: int; data: *void; });
+   dataType := New(Type_Info_Pointer);
+   dataType.type = .POINTER;
+   dataType.runtime_size = 8;
+   dataType.pointer_to = elementType;
+   base.members[1].type = dataType;
+
+   return base;
 }
 
 IsTraceRayFunction :: (cph: *Code_Procedure_Header) -> bool {
@@ -9581,7 +9694,77 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
                }
 
                case .VIEW; {
-                  assert(false, "not yet implemented");
+                  if cbo.operator_type == {
+                     case .ARRAY_SUBSCRIPT; {
+                        // array view is a syntactic sugar for Array_View_64.
+                        //    array[x]
+                        //    (array.data + x).*
+                        // i dont use Array_View_64. what i mean is when i see an array view in WriteTypeOrVariableOrConstant() i create a struct for it using the element type
+                        // the struct layout is the same tho. first member is count, the second is data pointer (but typed). i colud have done it so that data pointer is of type *u8 always
+                        // but then i need to DoCast() idk. idk maybe. idk man.
+                        //          - apila, 23/09/26
+                        assert(currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG, "i put this assertion because i forgot the what the other case is for. unlucky");
+
+                        dataIndexIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = ARRAY_VIEW_DATA_FIELD_INDEX, bitSize = 32 } };
+                        dataIndexSSAId := GetSSAId(data, dataIndexIdentifier);
+                        array_add(indices, dataIndexSSAId);
+
+                        dataType := New(TypeInfoPointer);
+                        dataType.storageClass = .PhysicalStorageBuffer; // Clueeeee
+                        dataType.pointerTo = tia.element_type;
+                        pointerSSAId, _pointerSpirvType := DoAccessChainOrCompositeExtract(data, b, dataType, currentBaseSSAId.*, indices, literalIndices, currentBaseSpirvType.*);
+                        assert(_pointerSpirvType.type == TYPE_INFO_POINTER_TAG);
+                        pointerSpirvType := _pointerSpirvType.(*TypeInfoPointer);
+
+                        indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = type_info(u64) });
+                        u64TypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) u64 });
+
+                        pointerAsU64SSAId := GetNextSSAId(data);
+                        WriteSingleInstructionIfReachable(
+                           b,
+                           *data.isBlockReachable,
+                           .ConvertPtrToU,
+                           u64TypeSSAId,
+                           pointerAsU64SSAId,
+                           pointerSSAId
+                        );
+
+                        loadFromAsU64SSAId := GetNextSSAId(data);
+                        WriteSingleInstructionIfReachable(
+                           b,
+                           *data.isBlockReachable,
+                           .IAdd,
+                           u64TypeSSAId,
+                           loadFromAsU64SSAId,
+                           pointerAsU64SSAId,
+                           indexSSAId
+                        );
+
+                        loadFromSSAId := GetNextSSAId(data);
+                        WriteSingleInstructionIfReachable(
+                           b,
+                           *data.isBlockReachable,
+                           .ConvertUToPtr,
+                           GetSSAId(data, .{ type = ._Type, _type = pointerSpirvType }),
+                           loadFromSSAId,
+                           loadFromAsU64SSAId
+                        );
+
+                        loadedTypeIdentifier: Identifier = .{ type = ._Type, _type = pointerSpirvType.pointerTo };
+                        currentBaseSSAId.* = Load(data, b, loadedTypeIdentifier, loadFromSSAId, pointerSpirvType.storageClass == .PhysicalStorageBuffer);
+                        currentBaseSpirvType.* = pointerSpirvType.pointerTo;
+                     }
+
+                     case #char "."; {
+                        // this is just member access
+                        // array.data or array.count
+
+                        tis := GetArrayViewTypeInfo(tia.element_type);
+                        DoMemberAccess(tis, cbo.right, indices, literalIndices, currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG);
+                     }
+
+                     case; assert(false);
+                  }
                }
 
                case .RESIZABLE; {
@@ -9708,11 +9891,13 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
 
       lastAccessChainResultSSAId, lastAccessChainResultSpirvType = DoAccessChainOrCompositeExtract(data, b, jaiReturnType, currentBaseSSAId, *indices, *literalIndices, currentBaseSpirvType);
    } else {
-      // no indices were left over. meaning that the last operation was a pointer indexing
+      // no indices were left over. meaning that the last operation was a pointer indexing or an array view
       // ...p[index]
       leftType := GetNodeType(lastAccessOperation.left);
       assert(lastAccessOperation.operator_type == .ARRAY_SUBSCRIPT, "loc: %", GetLocationString(lastAccessOperation));
-      assert(leftType.type == TYPE_INFO_POINTER_TAG);
+      assert((leftType.type == TYPE_INFO_POINTER_TAG) ||
+             (leftType.type == .ARRAY && leftType.(*Type_Info_Array).array_type == .VIEW)
+      );
 
       lastAccessChainResultSSAId = currentBaseSSAId;
       lastAccessChainResultSpirvType = currentBaseSpirvType;

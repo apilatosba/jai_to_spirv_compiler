@@ -14,8 +14,10 @@ ArrayShader :: (data: *ArrayShaderData) {
    payload: RgenPayload; @payload
 
    light := data.lights[2];
-   TraceRay(tlases[light], 0, 0, 0, 0, 0, f32x3.{}, 0, f32x3.{}, 0, *payload);
-} // @rgen
+   count := data.lights.count;
+   light2 := data.lights.data.*;
+   TraceRay(tlases[light], xx count, xx light2, 0, 0, 0, f32x3.{0,0,0}, 0, f32x3.{0,0,0}, 0, *payload);
+} @rgen
 
 RgenData :: struct {
    tlasOffset: s32;
