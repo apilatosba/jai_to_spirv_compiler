@@ -2139,6 +2139,24 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             annotateInfo := GetAnnotateInfoFromStruct(type);
             tis := type.(*Type_Info_Struct);
 
+            // Stage input/output structs are interface types, not buffer
+            // layout types.  In particular, Offset (and the other member
+            // layout decorations) are invalid on an Input interface
+            // variable.  The same user struct can still be used as a
+            // physical-storage/push-constant struct elsewhere, so decide
+            // this from the entry-point arguments rather than from the
+            // struct type alone.
+            isInterfaceStruct := false;
+            if data.shaderType == .Fragment {
+               isInterfaceStruct =
+                  CompareType(type, data.fragmentVertexInVariableIdentifier.variable.declaration.type) ||
+                  CompareType(type, data.fragmentPrimitiveInVariableIdentifier.variable.declaration.type);
+            } else if data.shaderType == .Mesh {
+               vertexType := GetArrayElementType(data.meshVertexOutVariableIdentifier.variable.declaration);
+               primitiveType := GetArrayElementType(data.meshPrimitiveOutVariableIdentifier.variable.declaration);
+               isInterfaceStruct = CompareType(type, vertexType) || CompareType(type, primitiveType);
+            }
+
             // idk about the Block decoration.
             // i think it is not needed for any struct other than push constant block.
             // there is a problem that you cannot nest structs if both of them are decorated with Block.
@@ -2154,6 +2172,8 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
                   SpvDecoration.Block
                );
             }
+
+            if (isInterfaceStruct) continue;
 
             for tis.members {
                WriteSingleInstruction(
