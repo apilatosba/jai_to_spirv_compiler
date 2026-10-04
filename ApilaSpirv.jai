@@ -789,6 +789,7 @@ Identifier :: struct {
       CompositeLiteral;
       BoolLiteral;
       ConstantSizeOf;
+      ResourceHeap;
    };
 
    using value: union {
@@ -1056,6 +1057,7 @@ IdentifierHash :: (using identifier: Identifier) -> u32 {
          return hash;
       case .BoolLiteral; return get_hash(boolLiteral);
       case .ConstantSizeOf; return HashType(constantSizeOf);
+      case .ResourceHeap; return 0x5248_4541;
    }
 
    assert(false, "type: %", type);
@@ -1115,6 +1117,7 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
          // could have done it so that for all the image types i return true.
          // probably better. idk.
          return CompareType(a.constantSizeOf, b.constantSizeOf);
+      case .ResourceHeap; return true;
    }
 
    assert(false, "type: %", type);
@@ -1242,6 +1245,7 @@ CompilationData :: struct {
                                                             // if you want to parallelize the compiler then you should store this per thread in a tls (thats easy with ApilaDispatch).
                                                             //    - apila, 09/05/26
    glslStd450:                               SSAId;
+   resourceHeapIdentifier:                   Identifier = .{ type = .ResourceHeap };
    rayPayloadVariableIdentifiers:            [..] Identifier;
    incomingRayPayloadVariableIdentifier:     Identifier;
 
@@ -1579,7 +1583,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             GetSSAId(*data, meshTrianglesVariableIdentifier),
             GetSSAId(*data, data.meshVertexOutVariableIdentifier),
             GetSSAId(*data, data.meshPrimitiveOutVariableIdentifier),
-            GetSSAId(*data, imageHeapVariableIdentifier),
+            GetSSAId(*data, data.resourceHeapIdentifier),
             GetSSAId(*data, samplerHeapVariableIdentifier),
             GetSSAId(*data, data.shaderDataPointerVariableIdentifier),
             GetSSAId(*data, workGroupIdVariableIdentifier),
@@ -1592,7 +1596,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          array_add(*operands, SpvExecutionModel.Fragment);
          array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
          array_add(*operands, "ApilaFS");
-         array_add(*operands, GetSSAId(*data, imageHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, data.resourceHeapIdentifier));
          array_add(*operands, GetSSAId(*data, samplerHeapVariableIdentifier));
          array_add(*operands, GetSSAId(*data, meshPipelinePushDataVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.fragmentVertexInVariableIdentifier));
@@ -1615,9 +1619,8 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          array_add(*operands, SpvExecutionModel.RayGenerationKHR);
          array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
          array_add(*operands, "ApilaRgen");
-         array_add(*operands, GetSSAId(*data, imageHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, data.resourceHeapIdentifier));
          array_add(*operands, GetSSAId(*data, samplerHeapVariableIdentifier));
-         array_add(*operands, GetSSAId(*data, tlasHeapVariableIdentifier));
          array_add(*operands, GetSSAId(*data, rtxPipelinePushDataVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
          array_add(*operands, GetSSAId(*data, launchIdVariableIdentifier));
@@ -1635,9 +1638,8 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          array_add(*operands, SpvExecutionModel.ClosestHitKHR);
          array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
          array_add(*operands, "ApilaRchit");
-         array_add(*operands, GetSSAId(*data, imageHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, data.resourceHeapIdentifier));
          array_add(*operands, GetSSAId(*data, samplerHeapVariableIdentifier));
-         array_add(*operands, GetSSAId(*data, tlasHeapVariableIdentifier));
          array_add(*operands, GetSSAId(*data, rtxPipelinePushDataVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
          array_add(*operands, GetSSAId(*data, launchIdVariableIdentifier));
@@ -1656,9 +1658,8 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          array_add(*operands, SpvExecutionModel.MissKHR);
          array_add(*operands, GetSSAId(*data, .{ type = .Function, function = header }));
          array_add(*operands, "ApilaRmiss");
-         array_add(*operands, GetSSAId(*data, imageHeapVariableIdentifier));
+         array_add(*operands, GetSSAId(*data, data.resourceHeapIdentifier));
          array_add(*operands, GetSSAId(*data, samplerHeapVariableIdentifier));
-         array_add(*operands, GetSSAId(*data, tlasHeapVariableIdentifier));
          array_add(*operands, GetSSAId(*data, rtxPipelinePushDataVariableIdentifier));
          array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
          array_add(*operands, GetSSAId(*data, launchIdVariableIdentifier));
@@ -1961,27 +1962,12 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       case; assert(false, "not yet implemented!");
    }
 
-   // i use the variable type itself (basically the variable itself) to determine the base type of the untyped access chain.
-   // and since now i have more than one type of descriptor stored in the resource heap, maybe i should have a resource heap variable rather than image heap.
-   // and i should create a acceleration structure heap similar to image heap but they are only used to determine the base type of the untyped access chain and also to do type checking
-   // at high level jai code.
-   //       - apila, 06/09/26
-   //
-   // well i just created two "BuiltIn ResourceHeapEXT" and spirv-val doesnt complain. idk. if that becomes an issue then you should create a single resource heap variable and only use
-   // "images" and "tlases" to determine the base type. and since in that case resource heap wouldnt be a "variable" you can maybe idk just create an identifier enum entry just for that.
-   // (it is an OpVariable but whatever)
-   //       - apila, 07/09/26
+   // This is the sole ResourceHeapEXT interface variable. images and tlases
+   // remain separate source-level pseudo-arrays that select the loaded type.
    WriteSingleInstruction(
       *b,
       .Decorate,
-      GetSSAId(*data, imageHeapVariableIdentifier),
-      SpvDecoration.BuiltIn,
-      SpvBuiltIn.ResourceHeapEXT
-   );
-   WriteSingleInstruction(
-      *b,
-      .Decorate,
-      GetSSAId(*data, tlasHeapVariableIdentifier),
+      GetSSAId(*data, data.resourceHeapIdentifier),
       SpvDecoration.BuiltIn,
       SpvBuiltIn.ResourceHeapEXT
    );
@@ -2029,31 +2015,30 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    for identifier: runtimeArrays {
       type := identifier._type;
       tira := cast(*TypeInfoRuntimeArray) type;
-      if (!(tira.elementType.type == TYPE_INFO_IMAGE_TAG ||
-            CompareType(tira.elementType, cast(*Type_Info) __TLAS__) ||
-            CompareType(tira.elementType, cast(*Type_Info) __Sampler__))) {
-         assert(false, "not yet implemented! element type: %", tira.elementType.*);
-      }
+      #if DESCRIPTOR_STRIDE_MODE == .Byte {
+         assert(CompareType(tira.elementType, cast(*Type_Info) u8), "element type: %", tira.elementType.*);
 
-      strideIdentifier: Identifier;
-      #if DESCRIPTOR_STRIDE_MODE == .DescriptorSize {
-         strideIdentifier = .{ type = .ConstantSizeOf, constantSizeOf = tira.elementType };
-      } else #if DESCRIPTOR_STRIDE_MODE == .Byte {
-         strideIdentifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = 1, bitSize = 32 } };
+         WriteSingleInstruction(
+            *b,
+            .Decorate,
+            GetSSAId(*data, identifier),
+            SpvDecoration.ArrayStride,
+            1
+         );
+      } else #if DESCRIPTOR_STRIDE_MODE == .DescriptorSize {
+         strideIdentifier: Identifier = .{ type = .ConstantSizeOf, constantSizeOf = tira.elementType };
+         AddTypeDependency(*data.extraTypeDependencies, identifier, strideIdentifier);
+
+         WriteSingleInstruction(
+            *b,
+            .DecorateId,
+            GetSSAId(*data, identifier),
+            SpvDecoration.ArrayStrideIdEXT,
+            GetSSAId(*data, strideIdentifier)
+         );
       } else {
-         #assert(false, "not yet implemented!");
+         #assert(false, "not implemented!");
       }
-
-      // specs mandates that: All <id> Extra Operands must appear before Target.
-      AddTypeDependency(*data.extraTypeDependencies, identifier, strideIdentifier);
-
-      WriteSingleInstruction(
-         *b,
-         .DecorateId,
-         GetSSAId(*data, identifier),
-         SpvDecoration.ArrayStrideIdEXT,
-         GetSSAId(*data, strideIdentifier)
-      );
    }
 
 
@@ -4956,6 +4941,22 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
 
    if #complete identifier.type == {
       case .Invalid; assert(false);
+      case .ResourceHeap; {
+         voidStarUC := New(TypeInfoPointer);
+         voidStarUC.pointerTo = cast(*Type_Info) void;
+         voidStarUC.storageClass = .UniformConstant;
+
+         typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
+         WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+         WriteSingleInstruction(
+            b,
+            .UntypedVariableKHR,
+            GetSSAId(data, typeIdentifier),
+            GetSSAId(data, identifier),
+            SpvStorageClass.UniformConstant
+         );
+      }
       case .IntLiteral;
          intLiteralType: Type;
          #if (false) {
@@ -6998,15 +6999,21 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             }
 
             case .ARRAY_SUBSCRIPT;
-               DESCRIPTOR_HEAP_BODY :: (elementType: *Type_Info) #expand {
+               DESCRIPTOR_HEAP_BODY :: (elementType: *Type_Info, heapIdentifier: Identifier) #expand {
                   assert(`additionalData.isLValue == false, "i am kinda treating this as a intrinsic function call. maybe i should just have idk a function instead of an intrinsic array. idk.");
 
                   indexSSAId := GenerateInstructions(`data, `cbo.right, `general, `function, `currentFunction, .{ spirvShouldHaveBeenType = type_info(s32) });
                   tira := New(TypeInfoRuntimeArray);
-                  tira.elementType = elementType;
+                  #if DESCRIPTOR_STRIDE_MODE == .Byte {
+                     tira.elementType = type_info(u8);
+                  } else #if DESCRIPTOR_STRIDE_MODE == .DescriptorSize {
+                     tira.elementType = elementType;
+                  } else {
+                     #assert(false, "not implemented!");
+                  }
                   baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
 
-                  storageClass := GetVariableStorageClass(`data, `variable);
+                  storageClass := SpvStorageClass.UniformConstant;
                   returnTypeIdentifier := GetPointerTypeIdentifier(type_info(void), storageClass);
 
                   lValueSSAId := GetNextSSAId(`data);
@@ -7018,12 +7025,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                      GetSSAId(`data, returnTypeIdentifier),
                      lValueSSAId,
                      GetSSAId(`data, baseTypeIdentifier),
-                     GetSSAId(`data, `variable),
+                     GetSSAId(`data, heapIdentifier),
                      indexSSAId
                   );
 
-                  dereferencedSSAId := Load(`data, `function, .{ type = ._Type, _type = tira.elementType }, lValueSSAId, false);
-                  RETURN(dereferencedSSAId, tira.elementType);
+                  dereferencedSSAId := Load(`data, `function, .{ type = ._Type, _type = elementType }, lValueSSAId, false);
+                  RETURN(dereferencedSSAId, elementType);
                }
 
                // checking if the variable is an intrinsic array.
@@ -7037,11 +7044,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                      // do nothing. DoDotsAndArraySubscripts works for this.
                   } else if (IdentifierCompare(variable, imageHeapVariableIdentifier)) {
                      assert(additionalData.accessChainBaseArrayElementTypeIfImageHeap != null);
-                     DESCRIPTOR_HEAP_BODY(additionalData.accessChainBaseArrayElementTypeIfImageHeap);
+                     DESCRIPTOR_HEAP_BODY(additionalData.accessChainBaseArrayElementTypeIfImageHeap, data.resourceHeapIdentifier);
                   } else if (IdentifierCompare(variable, tlasHeapVariableIdentifier)) {
-                     DESCRIPTOR_HEAP_BODY(type_info(__TLAS__));
+                     DESCRIPTOR_HEAP_BODY(type_info(__TLAS__), data.resourceHeapIdentifier);
                   } else if (IdentifierCompare(variable, samplerHeapVariableIdentifier)) {
-                     DESCRIPTOR_HEAP_BODY(type_info(__Sampler__));
+                     DESCRIPTOR_HEAP_BODY(type_info(__Sampler__), samplerHeapVariableIdentifier);
                   }
                }
 
