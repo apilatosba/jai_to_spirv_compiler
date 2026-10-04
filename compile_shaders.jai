@@ -1,3 +1,5 @@
+#!/usr/bin/env jai
+
 #import "Compiler";
 #import "File";
 #import "File_Utilities";

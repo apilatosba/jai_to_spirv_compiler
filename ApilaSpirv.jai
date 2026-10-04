@@ -2137,6 +2137,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       if type.type == {
          case .STRUCT; {
             annotateInfo := GetAnnotateInfoFromStruct(type);
+            tis := type.(*Type_Info_Struct);
 
             // idk about the Block decoration.
             // i think it is not needed for any struct other than push constant block.
@@ -2144,22 +2145,47 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             // i forgor why i introduced TypeInfoDecorationlessCopyOfStruct, is it because of Offset or Block? if it is because of Block
             // then i think it is not needed too.
             //       - apila, 24/09/26
-            WriteSingleInstruction(
-               *b,
-               .Decorate,
-               GetSSAId(*data, identifier),
-               SpvDecoration.Block
-            );
 
-            for annotateInfo.memberInfos {
+            if (CompareType(type, type_info(RtxPipelinePushData)) || CompareType(type, type_info(MeshPipelinePushData))) {
+               WriteSingleInstruction(
+                  *b,
+                  .Decorate,
+                  GetSSAId(*data, identifier),
+                  SpvDecoration.Block
+               );
+            }
+
+            for tis.members {
                WriteSingleInstruction(
                   *b,
                   .MemberDecorate,
                   GetSSAId(*data, identifier),
-                  it.memberIndex,
+                  it_index,
                   SpvDecoration.Offset,
-                  it.offset
+                  it.offset_in_bytes
                );
+
+               if (IsMatrixType(it.type)) {
+                  WriteSingleInstruction(
+                     *b,
+                     .MemberDecorate,
+                     GetSSAId(*data, identifier),
+                     it_index,
+                     SpvDecoration.ColMajor
+                  );
+
+                  vectorType := GetMatrixVector(it.type);
+                  vectorSize := GetVectorSize(vectorType);
+
+                  WriteSingleInstruction(
+                     *b,
+                     .MemberDecorate,
+                     GetSSAId(*data, identifier),
+                     it_index,
+                     SpvDecoration.MatrixStride,
+                     vectorSize
+                  );
+               }
             }
          }
 
@@ -8178,6 +8204,25 @@ Signedness :: enum {
 // following functions would be trivial if vectors were not to be structs. thats so dumb but i dont have anything better. kayu
 //       - apila, 06/06/26
 //
+
+IsMatrixType :: (type: *Type_Info) -> bool {
+   return CompareType(type, type_info(mat2)) || CompareType(type, type_info(mat3)) || CompareType(type, type_info(mat4));
+}
+
+GetMatrixVector :: (type: *Type_Info) -> *Type_Info {
+   // matrices are defined as array of arrays.
+   assert(type.type == .VARIANT);
+   ti := UnwindVariantsAllTheWay(type);
+   assert(ti.type == .ARRAY && ti.(*Type_Info_Array).array_type == .FIXED);
+   tia := ti.(*Type_Info_Array);
+   return tia.element_type;
+}
+
+GetVectorSize :: (type: *Type_Info) -> int {
+   assert(type.type == .STRUCT);
+   tis := cast(*Type_Info_Struct) type;
+   return tis.runtime_size;
+}
 
 GetVectorComponentCount :: (type: *Type_Info) -> int {
    assert(type.type == .STRUCT);
