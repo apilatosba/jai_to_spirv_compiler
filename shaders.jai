@@ -158,6 +158,20 @@ FragmentShader :: (mOutVertex: MeshOutVertex, mOutPrimitive: MeshOutPrimitive, d
    return texture(images[data.imageIndex], samplers[data.samplerIndex], mOutVertex.uv);
 } @fragment
 
+MacroSetPosition :: (value: float) #expand {
+   meshvertices[0].position = .{ value, value, value, 1 };
+}
+
+MacroDouble :: (value: float) -> float #expand {
+   return value * 2;
+}
+
+MacroShader :: (mOutVertex: [] MeshOutVertex, mOutPrimitive: [] MeshOutPrimitive, data: *MeshData) {
+   value := MacroDouble(data.offset);
+   MacroSetPosition(value);
+   mOutVertex[0].uv = .{ value, value };
+} @mesh @1_1_1 @1_1 @triangles
+
 
 FunctionCallTest :: (mOutVertex: [] MeshOutVertex, mOutPrimitive: [] MeshOutPrimitive, data: *MeshData) {
    FresnelSchlick(0, f32x3.{0, 0, 0});

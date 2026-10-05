@@ -1255,6 +1255,7 @@ CompilationData :: struct {
                                                             //    - apila, 09/05/26
    glslStd450:                               SSAId;
    resourceHeapIdentifier:                   Identifier = .{ type = .InternalVariable, internalVariable = .ResourceHeap };
+   macroExpansionCalls:                      [..] *Code_Procedure_Call;
    rayPayloadVariableIdentifiers:            [..] Identifier;
    incomingRayPayloadVariableIdentifier:     Identifier;
 
@@ -6512,7 +6513,6 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          assert(false, "code node kind: %. not valid.", node.kind);
 
       case .PROCEDURE_HEADER;          #through;
-      case .EXTRACT;                   #through;
       case .MAKE_VARARGS;              #through;
       case .DIRECTIVE_THIS;            #through;
       case .DIRECTIVE_LOAD;            #through;
@@ -6523,6 +6523,18 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
       case .DIRECTIVE_WILDCARD;        #through;
       case .RESOLVED_OVERLOAD;
          assert(false, "code node kind: %. idk what to do with this", node.kind);
+
+      case .EXTRACT; {
+         ce := cast(*Code_Extract) node;
+         argument := GetMacroExpansionArgument(data, ce.index);
+         // An Extract is the compiler's placeholder for a macro argument.
+         // Generate the original call argument with its own type first; the
+         // expansion site applies its conversion after substitution.
+         argumentSpirvType: *Type_Info;
+         argumentSSAId := GenerateInstructions(data, argument, general, function, currentFunction, spirvType = *argumentSpirvType);
+         assert(argumentSpirvType != null, "macro argument has no SPIR-V type");
+         RETURN(argumentSSAId, argumentSpirvType);
+      }
 
       case .DIRECTIVE_RUN;
          assert(false, "do the #run outside the shader procedure to let jai compiler #run it. this compiler doesnt have #run");
@@ -7143,6 +7155,32 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          );
 
          header := GetHeaderFromCodeProcedureCall(cpc);
+
+         if (IsMacroProcedure(header)) {
+            expansion := cpc.macro_expansion_block;
+            assert(expansion != null, "macro call has no expansion: %", header.name);
+            array_add(*data.macroExpansionCalls, cpc);
+            defer data.macroExpansionCalls.count -= 1;
+
+            macroReturn := GetMacroExpansionReturn(expansion);
+            for expansion.statements {
+               if (it.kind != .RETURN) {
+                  GenerateInstructions(data, it, general, function, currentFunction);
+                  continue;
+               }
+
+               assert(it == cast(*Code_Node) macroReturn, "macro returns must be top-level");
+               mr := cast(*Code_Return) it;
+               assert(mr.arguments_unsorted.count == 1, "macro return count: %", mr.arguments_unsorted.count);
+
+               returnExpression := mr.arguments_unsorted[0].expression;
+               returnType := GetNodeType(returnExpression);
+               returnSSAId := GenerateInstructions(data, returnExpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = returnType });
+               RETURN(returnSSAId, returnType);
+            }
+
+            RETURN(0, null);
+         }
 
          identifierExpression: *Code_Ident;
          if (procedureExpression.kind == .IDENT) {
@@ -8861,6 +8899,26 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          );
 
          header := GetHeaderFromCodeProcedureCall(cpc);
+
+         if (IsMacroProcedure(header)) {
+            expansion := cpc.macro_expansion_block;
+            assert(expansion != null, "macro call has no expansion: %", header.name);
+            array_add(*data.macroExpansionCalls, cpc);
+            defer data.macroExpansionCalls.count -= 1;
+            DetermineCodeNodeTypes(data, expansion);
+
+            macroReturn := GetMacroExpansionReturn(expansion);
+            if (macroReturn == null) {
+               TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+               return cast(*Type_Info) void;
+            }
+
+            assert(macroReturn.arguments_unsorted.count == 1, "macro return count: %", macroReturn.arguments_unsorted.count);
+            returnType := DetermineCodeNodeTypes(data, macroReturn.arguments_unsorted[0].expression);
+            TableAdd(*data.codeNodeTypes, node, returnType);
+            return returnType;
+         }
+
          assert(header.returns.count <= 1, "multiple returns not yet implemented! count: %", header.returns.count);
 
          // recurse into the procedure
@@ -9087,6 +9145,14 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          return resultType;
       }
 
+      case .EXTRACT; {
+         ce := cast(*Code_Extract) node;
+         argument := GetMacroExpansionArgument(data, ce.index);
+         type := DetermineCodeNodeTypes(data, argument);
+         TableAdd(*data.codeNodeTypes, node, type);
+         return type;
+      }
+
       case; assert(false, "not yet implemented! kind: %", node.kind);
    }
 
@@ -9108,6 +9174,32 @@ GetArrayViewTypeInfo :: (elementType: *Type_Info) -> *Type_Info_Struct {
 
 IsTraceRayFunction :: (cph: *Code_Procedure_Header) -> bool {
    return cph.name == TRACE_RAY_FUNCTION_NAME;
+}
+
+IsMacroProcedure :: (header: *Code_Procedure_Header) -> bool {
+   return (header.procedure_flags & .MACRO) != 0;
+}
+
+GetMacroExpansionReturn :: (expansion: *Code_Block) -> *Code_Return {
+   result: *Code_Return = null;
+
+   for expansion.statements {
+      if (it.kind != .RETURN) continue;
+
+      assert(result == null, "a macro expansion may only have one top-level return");
+      result = cast(*Code_Return) it;
+   }
+
+   return result;
+}
+
+GetMacroExpansionArgument :: (data: *CompilationData, index: s64) -> *Code_Node {
+   assert(data.macroExpansionCalls.count > 0, "Code_Extract appeared outside a macro expansion");
+   assert(index >= 0);
+
+   call := data.macroExpansionCalls[data.macroExpansionCalls.count - 1];
+   assert(index < call.arguments_unsorted.count, "macro argument index: %, count: %", index, call.arguments_unsorted.count);
+   return call.arguments_unsorted[index].expression;
 }
 
 UnwindVariantsUpToDistinct :: #bake_arguments UnwindVariants(ignoreDistinct = false);
