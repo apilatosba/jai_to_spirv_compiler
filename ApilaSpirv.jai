@@ -776,7 +776,12 @@ TYPE_INFO_IMAGE_TAG                          :: 671;
 TYPE_INFO_RUNTIME_ARRAY_TAG                  :: 672;
 TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG  :: 673;
 
-// identifier is anything that can be given an ssa id.
+InternalVariableKind :: enum {
+   ResourceHeap;
+}
+
+// Identifier is anything that can be given an SSA id, including compiler-only
+// variables that have no corresponding Jai declaration.
 Identifier :: struct {
    type: enum {
       Invalid;
@@ -789,7 +794,7 @@ Identifier :: struct {
       CompositeLiteral;
       BoolLiteral;
       ConstantSizeOf;
-      ResourceHeap;
+      InternalVariable;
    };
 
    using value: union {
@@ -816,6 +821,7 @@ Identifier :: struct {
                                     };
       boolLiteral:                  bool;
       constantSizeOf:               *Type_Info;
+      internalVariable:             InternalVariableKind;
    };
 }
 
@@ -1057,7 +1063,10 @@ IdentifierHash :: (using identifier: Identifier) -> u32 {
          return hash;
       case .BoolLiteral; return get_hash(boolLiteral);
       case .ConstantSizeOf; return HashType(constantSizeOf);
-      case .ResourceHeap; return 0x5248_4541;
+      case .InternalVariable;
+         if (internalVariable == .ResourceHeap) return 0x5248_4541;
+         assert(false, "internalVariable: %", internalVariable);
+         return 0;
    }
 
    assert(false, "type: %", type);
@@ -1117,7 +1126,7 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
          // could have done it so that for all the image types i return true.
          // probably better. idk.
          return CompareType(a.constantSizeOf, b.constantSizeOf);
-      case .ResourceHeap; return true;
+      case .InternalVariable; return a.internalVariable == b.internalVariable;
    }
 
    assert(false, "type: %", type);
@@ -1245,7 +1254,7 @@ CompilationData :: struct {
                                                             // if you want to parallelize the compiler then you should store this per thread in a tls (thats easy with ApilaDispatch).
                                                             //    - apila, 09/05/26
    glslStd450:                               SSAId;
-   resourceHeapIdentifier:                   Identifier = .{ type = .ResourceHeap };
+   resourceHeapIdentifier:                   Identifier = .{ type = .InternalVariable, internalVariable = .ResourceHeap };
    rayPayloadVariableIdentifiers:            [..] Identifier;
    incomingRayPayloadVariableIdentifier:     Identifier;
 
@@ -2013,32 +2022,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    }
 
    for identifier: runtimeArrays {
-      type := identifier._type;
-      tira := cast(*TypeInfoRuntimeArray) type;
-      #if DESCRIPTOR_STRIDE_MODE == .Byte {
-         assert(CompareType(tira.elementType, cast(*Type_Info) u8), "element type: %", tira.elementType.*);
-
-         WriteSingleInstruction(
-            *b,
-            .Decorate,
-            GetSSAId(*data, identifier),
-            SpvDecoration.ArrayStride,
-            1
-         );
-      } else #if DESCRIPTOR_STRIDE_MODE == .DescriptorSize {
-         strideIdentifier: Identifier = .{ type = .ConstantSizeOf, constantSizeOf = tira.elementType };
-         AddTypeDependency(*data.extraTypeDependencies, identifier, strideIdentifier);
-
-         WriteSingleInstruction(
-            *b,
-            .DecorateId,
-            GetSSAId(*data, identifier),
-            SpvDecoration.ArrayStrideIdEXT,
-            GetSSAId(*data, strideIdentifier)
-         );
-      } else {
-         #assert(false, "not implemented!");
-      }
+      WriteRuntimeArrayStrideDecoration(*data, *b, identifier);
    }
 
 
@@ -2366,6 +2350,22 @@ AddTypeDependency :: (table: *Table, dependant: Identifier, dependency: Identifi
    pointer := find_or_add(table, dependant);
    newlyAdded := array_add_if_unique(pointer, dependency, IdentifierCompare);
    assert(newlyAdded);
+}
+
+WriteRuntimeArrayStrideDecoration :: (data: *CompilationData, b: *BuilderType, identifier: Identifier) {
+   assert(identifier.type == ._Type);
+   tira := cast(*TypeInfoRuntimeArray) identifier._type;
+
+   #if DESCRIPTOR_STRIDE_MODE == .Byte {
+      assert(CompareType(tira.elementType, cast(*Type_Info) u8), "element type: %", tira.elementType.*);
+      WriteSingleInstruction(b, .Decorate, GetSSAId(data, identifier), SpvDecoration.ArrayStride, 1);
+   } else #if DESCRIPTOR_STRIDE_MODE == .DescriptorSize {
+      strideIdentifier: Identifier = .{ type = .ConstantSizeOf, constantSizeOf = tira.elementType };
+      AddTypeDependency(*data.extraTypeDependencies, identifier, strideIdentifier);
+      WriteSingleInstruction(b, .DecorateId, GetSSAId(data, identifier), SpvDecoration.ArrayStrideIdEXT, GetSSAId(data, strideIdentifier));
+   } else {
+      #assert(false, "not implemented!");
+   }
 }
 
 AddFixedArray :: (typeName: string, size: int, elementTypeName: string) {
@@ -4910,6 +4910,23 @@ OpWordCount :: (op: SpvOp, operandsCount: int) -> u32 #expand {
 // i first thought that i should call this functions only on identifiers that goes into the "Types, variables and constants" block, but it is easier to let pass every identifier to this function
 // and this function just skips if an identifier doesnt go to the "Types, variables and constants" block instead of asserting false.
 //          - apila, 13/04/26
+WriteUntypedUniformConstantVariable :: (data: *CompilationData, b: *BuilderType, identifier: Identifier) {
+   voidStarUC := New(TypeInfoPointer);
+   voidStarUC.pointerTo = cast(*Type_Info) void;
+   voidStarUC.storageClass = .UniformConstant;
+
+   typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
+   WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+   WriteSingleInstruction(
+      b,
+      .UntypedVariableKHR,
+      GetSSAId(data, typeIdentifier),
+      GetSSAId(data, identifier),
+      SpvStorageClass.UniformConstant
+   );
+}
+
 WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, identifier: Identifier) {
    currentStatus := table_find_pointer(*data.writtenIdentifiers, identifier);
    if (currentStatus != null) {
@@ -4941,21 +4958,9 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
 
    if #complete identifier.type == {
       case .Invalid; assert(false);
-      case .ResourceHeap; {
-         voidStarUC := New(TypeInfoPointer);
-         voidStarUC.pointerTo = cast(*Type_Info) void;
-         voidStarUC.storageClass = .UniformConstant;
-
-         typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
-         WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
-
-         WriteSingleInstruction(
-            b,
-            .UntypedVariableKHR,
-            GetSSAId(data, typeIdentifier),
-            GetSSAId(data, identifier),
-            SpvStorageClass.UniformConstant
-         );
+      case .InternalVariable; {
+         assert(identifier.internalVariable == .ResourceHeap);
+         WriteUntypedUniformConstantVariable(data, b, identifier);
       }
       case .IntLiteral;
          intLiteralType: Type;
@@ -5828,62 +5833,11 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                SpvStorageClass.PushConstant
             );
          } else if(IdentifierCompare(identifier, samplerHeapVariableIdentifier)) {
-            voidStarUC := New(TypeInfoPointer);
-            voidStarUC.pointerTo = cast(*Type_Info) void;
-            voidStarUC.storageClass = .UniformConstant;
-
-            typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
-            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
-
-            #if SPIRV_BUILDER_TYPE == .String {
-               print_to_builder(b, "; sampler heap variable\n");
-            }
-
-            WriteSingleInstruction(
-               b,
-               .UntypedVariableKHR,
-               GetSSAId(data, typeIdentifier),
-               GetSSAId(data, identifier),
-               SpvStorageClass.UniformConstant
-            );
+            WriteUntypedUniformConstantVariable(data, b, identifier);
          } else if(IdentifierCompare(identifier, imageHeapVariableIdentifier)) {
-            voidStarUC := New(TypeInfoPointer);
-            voidStarUC.pointerTo = cast(*Type_Info) void;
-            voidStarUC.storageClass = .UniformConstant;
-
-            typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
-            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
-
-            #if SPIRV_BUILDER_TYPE == .String {
-               print_to_builder(b, "; image heap variable\n");
-            }
-
-            WriteSingleInstruction(
-               b,
-               .UntypedVariableKHR,
-               GetSSAId(data, typeIdentifier),
-               GetSSAId(data, identifier),
-               SpvStorageClass.UniformConstant
-            );
+            WriteUntypedUniformConstantVariable(data, b, identifier);
          } else if(IdentifierCompare(identifier, tlasHeapVariableIdentifier)) {
-            voidStarUC := New(TypeInfoPointer);
-            voidStarUC.pointerTo = cast(*Type_Info) void;
-            voidStarUC.storageClass = .UniformConstant;
-
-            typeIdentifier: Identifier = .{ type = ._Type, _type = voidStarUC };
-            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
-
-            #if SPIRV_BUILDER_TYPE == .String {
-               print_to_builder(b, "; tlas heap variable\n");
-            }
-
-            WriteSingleInstruction(
-               b,
-               .UntypedVariableKHR,
-               GetSSAId(data, typeIdentifier),
-               GetSSAId(data, identifier),
-               SpvStorageClass.UniformConstant
-            );
+            WriteUntypedUniformConstantVariable(data, b, identifier);
          } else if(IdentifierCompare(identifier, workGroupIdVariableIdentifier)) {
             pointerType := New(TypeInfoPointer);
             pointerType.pointerTo = cast(*Type_Info) u32x3;
@@ -6999,19 +6953,14 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             }
 
             case .ARRAY_SUBSCRIPT;
-               DESCRIPTOR_HEAP_BODY :: (elementType: *Type_Info, heapIdentifier: Identifier) #expand {
+               DESCRIPTOR_HEAP_BODY :: (elementType: *Type_Info, sourceVariable: Identifier) #expand {
                   assert(`additionalData.isLValue == false, "i am kinda treating this as a intrinsic function call. maybe i should just have idk a function instead of an intrinsic array. idk.");
 
                   indexSSAId := GenerateInstructions(`data, `cbo.right, `general, `function, `currentFunction, .{ spirvShouldHaveBeenType = type_info(s32) });
                   tira := New(TypeInfoRuntimeArray);
-                  #if DESCRIPTOR_STRIDE_MODE == .Byte {
-                     tira.elementType = type_info(u8);
-                  } else #if DESCRIPTOR_STRIDE_MODE == .DescriptorSize {
-                     tira.elementType = elementType;
-                  } else {
-                     #assert(false, "not implemented!");
-                  }
+                  tira.elementType = GetDescriptorHeapArrayElementType(elementType);
                   baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
+                  heapIdentifier := GetDescriptorHeapIdentifier(`data, sourceVariable);
 
                   storageClass := SpvStorageClass.UniformConstant;
                   returnTypeIdentifier := GetPointerTypeIdentifier(type_info(void), storageClass);
@@ -7044,11 +6993,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                      // do nothing. DoDotsAndArraySubscripts works for this.
                   } else if (IdentifierCompare(variable, imageHeapVariableIdentifier)) {
                      assert(additionalData.accessChainBaseArrayElementTypeIfImageHeap != null);
-                     DESCRIPTOR_HEAP_BODY(additionalData.accessChainBaseArrayElementTypeIfImageHeap, data.resourceHeapIdentifier);
+                     DESCRIPTOR_HEAP_BODY(additionalData.accessChainBaseArrayElementTypeIfImageHeap, variable);
                   } else if (IdentifierCompare(variable, tlasHeapVariableIdentifier)) {
-                     DESCRIPTOR_HEAP_BODY(type_info(__TLAS__), data.resourceHeapIdentifier);
+                     DESCRIPTOR_HEAP_BODY(type_info(__TLAS__), variable);
                   } else if (IdentifierCompare(variable, samplerHeapVariableIdentifier)) {
-                     DESCRIPTOR_HEAP_BODY(type_info(__Sampler__), samplerHeapVariableIdentifier);
+                     DESCRIPTOR_HEAP_BODY(type_info(__Sampler__), variable);
                   }
                }
 
@@ -9409,6 +9358,28 @@ IsStructLiteralConstant :: (literal: *Code_Literal) -> bool {
 
 GetVariableIdentifier :: (ci: *Code_Ident) -> Identifier {
    return .{ type = .Variable, variable.declaration = ci.resolved_declaration };
+}
+
+GetDescriptorHeapIdentifier :: (data: *CompilationData, sourceVariable: Identifier) -> Identifier {
+   assert(sourceVariable.type == .Variable);
+
+   if (IdentifierCompare(sourceVariable, imageHeapVariableIdentifier) ||
+       IdentifierCompare(sourceVariable, tlasHeapVariableIdentifier)) {
+      return data.resourceHeapIdentifier;
+   }
+
+   assert(IdentifierCompare(sourceVariable, samplerHeapVariableIdentifier));
+   return samplerHeapVariableIdentifier;
+}
+
+GetDescriptorHeapArrayElementType :: (descriptorType: *Type_Info) -> *Type_Info {
+   #if DESCRIPTOR_STRIDE_MODE == .Byte {
+      return type_info(u8);
+   } else #if DESCRIPTOR_STRIDE_MODE == .DescriptorSize {
+      return descriptorType;
+   } else {
+      #assert(false, "not implemented!");
+   }
 }
 
 // this function returns the storage class of the variable. not where the storage class of where it points to if it is a pointer
