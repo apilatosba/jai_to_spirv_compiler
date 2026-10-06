@@ -2187,3 +2187,621 @@ GetCameraPositionFromViewMatrix :: (view: mat4) -> f32x3 {
 //         %287 = OpExtInst %v3float %1 Normalize %286
 //                OpReturnValue %287
 //                OpFunctionEnd
+
+//
+// Unit tests.
+// Each entry point below exercises one feature of the backend. "./compile_shaders.jai - test" compiles them
+// and runs spirv-val on every output in the build folder.
+//
+
+TestData :: struct {
+   i:       s32;
+   u:       u32;
+   f:       f32;
+   v2:      f32x2;
+   v3:      f32x3;
+   v4:      f32x4;
+   m4:      mat4;
+   ints:    *s32;
+   floats:  *f32;
+   vectors: *f32x4;
+   inner:   *TestInner;
+   bytes:   *u8;
+}
+
+TestInner :: struct {
+   value:   f32;
+   indices: s32x3;
+}
+
+TestOut :: struct { uv: f32x2; }
+TestPrim :: struct { }
+
+TestIntegerArithmeticS32 :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: s32 = 7;
+   b: s32 = 3;
+   c := a + b;
+   c = c - b;
+   c = c * a;
+   c = c + data.i;
+   data.i = c;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestIntegerArithmeticU32 :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: u32 = 7;
+   b: u32 = 3;
+   c := a + b;
+   c = c - b;
+   c = c * a;
+   data.u = c + data.u;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestIntegerArithmetic64 :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: s64 = 7;
+   b: s64 = 3;
+   c := a * b - a + b;
+   d: u64 = 9;
+   e := d * d + d - d;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestFloatArithmetic :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: f32 = 1.5;
+   b: f32 = 0.25;
+   c := a + b;
+   c = c - b;
+   c = c * a;
+   c = c / b;
+   data.f = c + data.f;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestVectorArithmetic :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a := f32x3.{1, 2, 3};
+   b := f32x3.{4, 5, 6};
+   c := a + b;
+   c = c - a;
+   c = c * b;
+   c = c / b;
+   data.v3 = c;
+
+   x := f32x2.{1, 2};
+   y := data.v2;
+   z := (x + y) * (x - y) / y;
+   o[0].uv = z;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestUnaryMinus :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   v := -data.v3;
+   data.v3 = -v;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestCompoundAssign :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   i: s32 = 1;
+   i += 2;
+   i *= 3;
+
+   f: f32 = 1;
+   f += 2;
+   f *= 3;
+
+   v := f32x3.{1, 1, 1};
+   v += data.v3;
+   v *= data.v3;
+
+   data.f += f;
+   data.i *= i;
+   data.ints[1] += i;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestIf :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if (data.i < 10) {
+      data.i = 10;
+   }
+} @mesh @1_1_1 @1_1 @triangles
+
+TestIfElse :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if (data.i < 10) {
+      data.f = 1;
+   } else {
+      data.f = 2;
+   }
+} @mesh @1_1_1 @1_1 @triangles
+
+TestIfElseChain :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if (data.i < 0) {
+      data.f = 0;
+   } else if (data.i < 10) {
+      data.f = 1;
+   } else if (data.i < 20) {
+      data.f = 2;
+   } else {
+      data.f = 3;
+   }
+} @mesh @1_1_1 @1_1 @triangles
+
+TestNestedIf :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if (data.i < 10) {
+      if (data.u < 5) {
+         data.f = 1;
+      } else {
+         if (data.i < 3) data.f = 2;
+      }
+   }
+} @mesh @1_1_1 @1_1 @triangles
+
+TestUnsignedCompare :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: u32 = 3;
+   if (a < data.u)  data.u = a;
+   b: u64 = 3;
+   c: u64 = 4;
+   if (b < c)       data.u = 1;
+   d: s64 = -3;
+   e: s64 = 4;
+   if (d < e)       data.u = 2;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestWhile :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   i: s32 = 0;
+   sum: f32 = 0;
+   while (i < data.i) {
+      sum += data.floats[i];
+      i += 1;
+   }
+   data.f = sum;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestWhileBreakContinue :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   i: s32 = 0;
+   while true {
+      i += 1;
+      if (i < 3) continue;
+      if (data.i < i) break;
+      data.ints[i] = i;
+   }
+} @mesh @1_1_1 @1_1 @triangles
+
+TestNestedWhile :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   i: s32 = 0;
+   while (i < 4) {
+      j: s32 = 0;
+      while (j < 4) {
+         if (j < i) {
+            j += 1;
+            continue;
+         }
+         data.ints[i * 4 + j] = i + j;
+         j += 1;
+      }
+      i += 1;
+   }
+} @mesh @1_1_1 @1_1 @triangles
+
+TestIntegerCasts :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: s32 = -5;
+   b := cast(u32) a;
+   c := cast(s32) b;
+   d := cast(s64) a;
+   e := cast(u64) a;
+   f := cast(s32) d;
+   g := cast(u32) e;
+   h := data.bytes[0];
+   i := cast(u32) h;
+   j := cast(s32) h;
+   k := cast(u64) h;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestIntToFloatCasts :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a := cast(f32) data.i;
+   b := cast(f32) data.u;
+   v := cast,force(f32x2) s32x2.{1, 2};
+   w := cast,force(f32x3) u32x3.{1, 2, 3};
+   data.f = a + b;
+   data.v2 = v;
+   data.v3 = w;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestVectorIntegerCasts :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a := s32x3.{-1, 2, 3};
+   b := cast,force(u32x3) a;
+   d := cast,force(s32x4) u32x4.{1, 2, 3, 4};
+} @mesh @1_1_1 @1_1 @triangles
+
+TestBuiltinIds :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(1, 1);
+   index := workgroupid.x * 64 + localinvocationid.x;
+   data.ints[index] = cast(s32) index;
+} @mesh @64_1_1 @1_1 @triangles
+
+TestSetMeshOutputs :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(3, 1);
+   meshvertices[0].position = .{ 0, 0, 0, 1 };
+   meshvertices[1].position = .{ 1, 0, 0, 1 };
+   meshvertices[2].position = .{ 0, 1, 0, 1 };
+   meshvertices[0].pointSize = 1;
+   meshtriangles[0] = .{ 0, 1, 2 };
+   o[0].uv = .{ 0, 0 };
+   o[1].uv = .{ 1, 0 };
+   o[2].uv = .{ 0, 1 };
+} @mesh @1_1_1 @3_1 @triangles
+
+TestLocalStruct :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   s: TestInner;
+   s.value = data.f;
+   s.indices = .{ 1, 2, 3 };
+   s.indices.y = 5;
+   data.f = s.value;
+   data.i = s.indices.y;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestStructLiteral :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   t := TestInner.{ data.f, s32x3.{ data.i, data.i, data.i } };
+   data.f = t.value;
+   data.i = t.indices.z;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestBufferStructCopy :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.inner[1] = data.inner[0];
+   data.inner.* = data.inner[2];
+} @mesh @1_1_1 @1_1 @triangles
+
+TestBufferStructAccess :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   inner := data.inner[2];
+   data.f = inner.value + data.inner[1].value;
+   data.inner[0].indices.z = inner.indices.x;
+   data.inner.value = 4;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestBufferPointerIndexing :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.ints[0] = data.ints[1] + data.ints[data.i];
+   data.floats[data.u] = data.floats[0] * 2;
+   data.vectors[3] = data.vectors[2];
+   data.vectors[1].y = data.vectors[0].x;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestBufferPointers :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   q := *data.f;
+   q.* = 2;
+   y := q.*;
+   v := *data.inner.indices;
+   v.x = data.i;
+   data.ints = data.ints;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestFixedArray :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: [4] f32;
+   a[0] = 1;
+   a[1] = a[0] + 1;
+   i: s32 = 2;
+   a[i] = data.f;
+   data.f = a[1] + a[i];
+} @mesh @1_1_1 @1_1 @triangles
+
+TestFixedArrayLoop :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: [8] s32;
+   i: s32 = 0;
+   while (i < 8) {
+      a[i] = i * i;
+      i += 1;
+   }
+   data.i = a[3];
+} @mesh @1_1_1 @1_1 @triangles
+
+TestFixedArrayOfVectors :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a: [3] f32x3;
+   a[0] = data.v3;
+   a[1].y = 2;
+   data.v3 = a[1] + a[0];
+} @mesh @1_1_1 @1_1 @triangles
+
+TestBoolLocals :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   b := true;
+   c: bool = false;
+   d := data.i < 3;
+   if b  data.i = 1;
+   if c  data.i = 2;
+   if d  data.i = 3;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestHelperAdd :: (a: f32, b: f32) -> f32 {
+   return a + b;
+}
+
+TestHelperVector :: (a: f32x3, s: f32) -> f32x3 {
+   return a * f32x3.{s, s, s};
+}
+
+TestHelperNested :: (a: f32, b: f32) -> f32 {
+   return TestHelperAdd(a, b) * TestHelperAdd(b, a);
+}
+
+TestHelperEarlyReturn :: (a: s32) -> s32 {
+   if (a < 0) return 0;
+   return a;
+}
+
+TestHelperPointer :: (data: *TestData) -> s32 {
+   data.f = 1;
+   return data.i;
+}
+
+TestHelperLoop :: (n: s32) -> s32 {
+   i: s32 = 0;
+   sum: s32 = 0;
+   while (i < n) {
+      sum += i;
+      i += 1;
+   }
+   return sum;
+}
+
+TestFunctionCalls :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = TestHelperPointer(data);
+   data.f = TestHelperAdd(data.f, 1);
+   data.v3 = TestHelperVector(data.v3, 2);
+   data.f = TestHelperNested(1, 2);
+   data.i = TestHelperEarlyReturn(data.i);
+   data.i = TestHelperLoop(data.i);
+} @mesh @1_1_1 @1_1 @triangles
+
+TestSharedHelperA :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.f = TestHelperAdd(1, 2);
+} @mesh @1_1_1 @1_1 @triangles
+
+TestSharedHelperB :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   x := TestHelperAdd(v.uv.x, v.uv.y);
+   return f32x4.{ x, x, x, 1 };
+} @fragment
+
+TestMathIntrinsics :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a := data.v3;
+   b := f32x3.{0, 1, 0};
+   data.f = dot(a, b) + length(a);
+   data.v3 = normalize(a) + cross(a, b) + reflect(a, b);
+   data.v3 = lerp(a, b, f32x3.{0.5, 0.5, 0.5});
+   data.v3 = max(a, b);
+   data.f = max(data.f, 1) + clamp(data.f, 0, 1);
+   data.f = atan2(data.f, 2) + asin(data.f);
+} @mesh @1_1_1 @1_1 @triangles
+
+TestPowOverloads :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.f = pow(data.f, 2);
+   data.v2 = pow(data.v2, f32x2.{2, 2});
+   data.v3 = pow(data.v3, f32x3.{2, 2, 2});
+   data.v4 = pow(data.v4, f32x4.{2, 2, 2, 2});
+} @mesh @1_1_1 @1_1 @triangles
+
+TestMatrixOps :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   m := data.m4;
+   v := m * data.v4;
+   n := mul(m, inverse(m));
+   data.v4 = n * v;
+   column := m[2];
+   data.f = column.y + m[1].x;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestMatrix3 :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   m: mat3;
+   m[0] = f32x3.{1, 0, 0};
+   m[1] = f32x3.{0, 1, 0};
+   m[2] = data.v3;
+   data.v3 = m * data.v3;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestMeshTransform :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(1, 1);
+   meshvertices[localinvocationid.x].position = data.m4 * data.vectors[localinvocationid.x];
+} @mesh @32_1_1 @32_1 @triangles
+
+TestFragmentConstant :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   return f32x4.{ 1, 0, 1, 1 };
+} @fragment
+
+TestFragmentDerivatives :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   d := ddx(v.uv) + ddy(v.uv);
+   w := ddx(data.v3) - ddy(data.v3);
+   return f32x4.{ d.x, d.y, w.z, 1 };
+} @fragment
+
+TestFragmentTextures :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   a := texture(images[data.i], samplers[data.u], v.uv);
+   b := texturelod(images[data.i + 1], samplers[data.u], v.uv, data.f);
+   return f32x4.{ a.x + b.y, a.y, a.z, b.w };
+} @fragment
+
+TestFragmentBranching :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   color := f32x4.{ 0, 0, 0, 1 };
+   if (data.i < 0) {
+      color = data.v4;
+   } else {
+      color = texture(images[data.i], samplers[data.u], v.uv);
+   }
+   return color;
+} @fragment
+
+TestRgenData :: struct {
+   tlas:   s32;
+   image:  s32;
+   values: *f32;
+}
+
+TestRayPayload :: struct {
+   color: f32x4;
+   hit:   bool;
+}
+
+TestRgenTraceRay :: (data: *TestRgenData) {
+   payload: TestRayPayload; @payload
+   coordinates := s32x2.{ xx launchid.x, xx launchid.y };
+   size := launchsize.x * launchsize.y;
+   payload.color = f32x4.{ 0, 0, 0, 0 };
+   TraceRay(tlases[data.tlas], 1, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   ImageWrite(images[data.image], coordinates, payload.color);
+} @rgen
+
+TestRgenTwoPayloads :: (data: *TestRgenData) {
+   first: TestRayPayload; @payload
+   second: TestRgenPayloadB; @payload
+   TraceRay(tlases[data.tlas], 1, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *first);
+   TraceRay(tlases[data.tlas], 1, 0xFF, 0, 0, 1, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 1, 0 }, 1000, *second);
+   data.values[0] = second.distance;
+} @rgen
+
+TestRgenPayloadB :: struct {
+   distance: f32;
+}
+
+TestRchit :: (data: *TestRgenData) {
+   payload: TestRayPayload; @payloadin
+   payload.hit = true;
+   payload.color = f32x4.{ data.values[0], 0, 0, 1 };
+} @rchit
+
+TestRmiss :: (data: *TestRgenData) {
+   payload: TestRayPayload; @payloadin
+   payload.hit = false;
+   if (data.tlas < 0)  payload.color = f32x4.{ 0, 0, 0, 1 };
+} @rmiss
+
+TestCompileTimeConstant :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.f = PI * 2;
+} @mesh @1_1_1 @1_1 @triangles
+
+//
+// Known failures.
+// Each entry point below is valid Jai that the backend currently rejects (assertion in the metaprogram)
+// or compiles to invalid spir-v. Set ENABLE_KNOWN_FAILURES to true to try them; once one works, move it above.
+//
+ENABLE_KNOWN_FAILURES :: false;
+
+#if ENABLE_KNOWN_FAILURES {
+
+// "recursion detected. a type depends on itself." needs OpTypeForwardPointer.
+TestRecursiveNode :: struct {
+   value: f32;
+   next:  *TestRecursiveNode;
+}
+TestRecursiveData :: struct {
+   head: *TestRecursiveNode;
+}
+FailRecursivePointerType :: (o: [] TestOut, p: [] TestPrim, data: *TestRecursiveData) {
+   data.head.value = data.head.next.value;
+} @mesh @1_1_1 @1_1 @triangles
+
+// "type.runtime_size: 1, not implemented yet!"
+FailU8Literal :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   h: u8 = 200;
+   data.u = cast(u32) h;
+} @mesh @1_1_1 @1_1 @triangles
+
+// assertion in RETURN (spirvShouldHaveBeenType set but no spirv type returned).
+FailNamedStructLiteral :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   s := TestInner.{ value = data.f };
+} @mesh @1_1_1 @1_1 @triangles
+
+// spirv-val: "ID has not been defined". the constant struct is converted with OpCopyLogical inside the
+// function body, and that result is then used as the OpVariable initializer.
+FailConstantNestedStructLiteral :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   s := TestInner.{ 3, s32x3.{ 1, 2, 3 } };
+} @mesh @1_1_1 @1_1 @triangles
+
+// "ident loc: ..." in DetermineCodeNodeTypes. runtime values inside an untyped literal have no resolved_declaration.
+FailUntypedLiteralWithRuntimeValues :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   x := v.uv.x;
+   return .{ x, x, x, 1 };
+} @fragment
+
+// same as above, but nested inside a typed literal.
+FailNestedUntypedLiteralWithRuntimeValues :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   t := TestInner.{ data.f, .{ data.i, data.i, data.i } };
+} @mesh @1_1_1 @1_1 @triangles
+
+// DoCast: "not yet implemented! castFrom: (enum out of range: 673)". storing a Function storage class struct
+// (decorationless copy) into a PhysicalStorageBuffer struct needs an OpCopyLogical.
+FailStoreLocalStructToBuffer :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   s := data.inner[0];
+   data.inner[1] = s;
+} @mesh @1_1_1 @1_1 @triangles
+
+// "not yet implemented! if it is a variant then idk. type: {VOID, 0}"
+FailVoidHelper :: (data: *TestData) {
+   data.i = 1;
+}
+FailCallVoidHelper :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   FailVoidHelper(data);
+} @mesh @1_1_1 @1_1 @triangles
+
+// spirv-val: "Instruction may not have a logical pointer operand". a pointer to a Function variable is stored in a variable.
+FailPointerToLocal :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   x: f32 = 1;
+   px := *x;
+   px.* = 2;
+   data.f = px.*;
+} @mesh @1_1_1 @1_1 @triangles
+
+// DoCast: "not yet implemented! castFrom: float"
+FailFloatToIntCast :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = cast(s32) data.f;
+} @mesh @1_1_1 @1_1 @triangles
+
+// a number literal as the lod argument has no spirvShouldHaveBeenType.
+FailTextureLodLiteral :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   return texturelod(images[data.i], samplers[data.u], v.uv, 2);
+} @fragment
+
+// "intrinsic function not yet implemetned! name: texturei"
+FailTextureInt :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   c := texturei(images[data.i], samplers[data.u], v.uv);
+   return f32x4.{ 0, 0, 0, cast(f32) c.w };
+} @fragment
+
+// only "<" is implemented for comparisons, and only for integers.
+FailGreaterThan :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if (data.i > 3) data.i = 0;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailEquals :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if (data.i == 3) data.i = 0;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailFloatLessThan :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if (data.f < 3) data.f = 0;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailLogicalAnd :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if (data.i < 3 && data.u < 2) data.i = 0;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailLogicalNot :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   if !(data.i < 3) data.i = 0;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailIntegerDivide :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = data.i / 2;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailModulo :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = data.i % 2;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailMinusAssign :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i -= 2;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailBitwise :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.u = (data.u & 3) | (data.u << 2);
+} @mesh @1_1_1 @1_1 @triangles
+
+FailForLoop :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   for 0..3 data.ints[it] = xx it;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailIfx :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   one: s32 = 1;
+   two: s32 = 2;
+   data.i = ifx data.i < 3 then one else two;
+} @mesh @1_1_1 @1_1 @triangles
+
+FailStaticIf :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   #if true data.i = 1;
+} @mesh @1_1_1 @1_1 @triangles
+
+}
