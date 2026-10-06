@@ -624,6 +624,8 @@ IsProcedureShaderEntryPoint :: (header: *Code_Procedure_Header) -> bool {
 // jblow said on discord that he will move the alignment field to Type_Info_Struct. so the problem above is no more.
 //          - apila, 29/04/26
 //
+// it is there now, alignof uses Type_Info_Struct.alignment.
+//
 
 SSAId :: #type,distinct u32;
 
@@ -9520,112 +9522,59 @@ GetHeaderFromCodeProcedureCall :: (cpc: *Code_Procedure_Call) -> *Code_Procedure
 //       - apila, 09/06/26
 
 // jblow said on discord that he will move the alignment field from Code_Struct to Type_Info_Struct. so i can properly implement this function
-alignof :: ($T: Type) -> s64 #expand {
-    return #run -> s64 {
-        info := type_info(struct{ p: u8; t: T; });
-        return info.members[1].offset_in_bytes;
-    };
-}
-
-// jblow said on discord that he will move the alignment field from Code_Struct to Type_Info_Struct. so i can properly implement this function
-VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake :: (type: *Type_Info) -> int {
+// alignment of a type in the target program.
+//
+// for structs the compiler computes the alignment (taking #align into account) but in this version Type_Info_Struct.alignment is -1 for the types a
+// metaprogram sees. Code_Struct.alignment is filled in though, so it is read from the definition of the struct (see structDefinitions).
+alignof :: (type: *Type_Info) -> s64 {
    if type.type == {
-      case .INTEGER;
-         return type.runtime_size;
-
-      case .FLOAT;
-         return type.runtime_size;
-
-      case .BOOL;
-         return 4;
-
-      case .STRING;
-         assert(false);
-
+      case .INTEGER;    #through;
+      case .FLOAT;      #through;
+      case .BOOL;       #through;
       case .POINTER;
          return type.runtime_size;
 
+      case .ENUM;
+         return (cast(*Type_Info_Enum) type).internal_type.runtime_size;
+
       case .STRUCT;
          tis := cast(*Type_Info_Struct) type;
+         if (tis.alignment >= 1) return tis.alignment;
 
-         maxAlignment := 0;
-         for tis.members {
-            memberAlignment := VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(it.type);
-            maxAlignment = max(maxAlignment, memberAlignment);
-         }
-         assert(maxAlignment != 0, "name: %", tis.name);
+         // the builtin vectors are also used through the Type_Info of the metaprogram (for example GetNumericType) which is not in structDefinitions.
+         // they are structs of scalars without #align so their alignment is the size of a component.
+         info, isNumeric := GetNumericInfo(type);
+         if (isNumeric) return GetScalarTypeOrVectorElementType(type).runtime_size;
 
-         return maxAlignment;
+         found, cs := table_find(*structDefinitions, tis);
+         assert(found, "the definition of struct % is not known, so its alignment is not known", tis.name);
+         assert(cs.alignment >= 1, "the compiler didnt provide the alignment of struct %", tis.name);
+         return cs.alignment;
+
       case .ARRAY;
          tia := cast(*Type_Info_Array) type;
-         return VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(tia.element_type);
+         if tia.array_type == {
+            case .FIXED;   return alignof(tia.element_type);
+            case .VIEW;    return 8; // struct { count: s64; data: *T; }
+            case;          assert(false, "array type: %", tia.array_type); return 0;
+         }
 
-      case .ENUM;
-         tie := cast(*Type_Info_Enum) type;
-         return tie.internal_type.runtime_size;
+      case .VARIANT;
+         return alignof(UnwindVariantsAllTheWay(type));
 
+      // the types this compiler creates
       case TYPE_INFO_POINTER_TAG;
          return type.runtime_size;
 
-      case .VARIANT;
-         unwindedType := UnwindVariantsAllTheWay(type);
-         return VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(unwindedType);
+      case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG;
+         return alignof((cast(*TypeInfoDecorationlessCopyOfStruct) type).copyOf);
 
-      case; assert(false, "type: %", type.type);
+      case TYPE_INFO_RUNTIME_ARRAY_TAG;
+         return alignof((cast(*TypeInfoRuntimeArray) type).elementType);
    }
 
    assert(false, "type: %", type.type);
-   return -789;
-}
-
-// it writes "(some type)"
-VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstant :: (type: Type) -> int {
-   #import "Random";
-   #import "File";
-   #import "Process";
-
-   rng := random_get();
-   outputFileName := sprint("temp%", rng);
-   tempFileName := sprint("temp%.jai", rng);
-
-   codeFormat := #string JAI
-      #import "Basic";
-
-      alignof :: ($T: Type) -> s64 #expand {
-         return #run -> s64 {
-            info := type_info(struct{ p: u8; t: T; });
-            return info.members[1].offset_in_bytes;
-         };
-      }
-
-      main :: () {
-         result := alignof(%);
-         print("\%", result);
-      }
-   JAI
-
-   code := sprint(codeFormat, type);
-   ok := write_entire_file(tempFileName, code);
-   assert(ok);
-
-   defer file_delete(tempFileName);
-
-   compileResult := run_command("jai-linux", tempFileName);
-   assert(compileResult.type == .EXITED);
-   assert(compileResult.exit_code == 0);
-
-   processResult, outputString, errorString, timeoutReached := run_command(outputFileName, capture_and_return_output = true);
-   assert(!timeoutReached);
-   assert(errorString == "");
-   assert(processResult.type == .EXITED);
-   assert(processResult.exit_code == 0);
-
-   file_delete(outputFileName);
-
-   result, success := string_to_int(outputString);
-   assert(success);
-
-   return result;
+   return 0;
 }
 
 // use this if the storage class might be PhysicalStorageBuffer.
@@ -9637,7 +9586,7 @@ Store :: (data: *CompilationData, b: *BuilderType, storeTo: SSAId, storeWhat: SS
    array_add(*operands, storeWhat);
 
    if (storingToPhysicalStorageBuffer) {
-      array_add(*operands, SpvMemoryAccessMask.AlignedMask, VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(type));
+      array_add(*operands, SpvMemoryAccessMask.AlignedMask, alignof(type));
    }
 
    WriteSingleInstructionIfReachable(
@@ -9659,7 +9608,7 @@ Load :: (data: *CompilationData, b: *BuilderType, typeIdentifier: Identifier, lo
    array_add(*operands, loadFrom);
 
    if (loadingFromPhysicalStorageBuffer) {
-      array_add(*operands, SpvMemoryAccessMask.AlignedMask, VeryBadImplementedAlignOfBecauseIDontKnowHowToUseTheProperOneInAMetaprogramWhereTypeIsNotConstantSecondTake(typeIdentifier._type));
+      array_add(*operands, SpvMemoryAccessMask.AlignedMask, alignof(typeIdentifier._type));
    }
 
    WriteSingleInstructionIfReachable(

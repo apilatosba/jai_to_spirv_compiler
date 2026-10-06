@@ -3170,6 +3170,35 @@ TestInterfaceArraysFragment :: (v: TestArrayOut, p: TestPrim, data: *TestData) -
    return f32x4.{ v.weights[0], v.weights[1], v.uv.x, 1 };
 } @fragment
 
+TEST_ALIGNMENT :: 16;
+
+TestAlignedMembers :: struct {
+   a: f32;
+   b: f32x3 #align 16;
+   c: f32 #align TEST_ALIGNMENT;
+}
+
+TestAlignedOuter :: struct {
+   flag:  u32;
+   inner: TestAlignedMembers;
+}
+
+TestAlignmentData :: struct {
+   aligned: *TestAlignedMembers;
+   outer:   *TestAlignedOuter;
+}
+
+// loads and stores of a whole struct use the alignment of the struct, which comes from #align of its members.
+TestAlignment :: (o: [] TestOut, p: [] TestPrim, data: *TestAlignmentData) {
+   x := data.aligned[1];
+   x.c = 2;
+   data.aligned[0] = x;
+   y := data.outer.*;
+   y.inner.b = f32x3.{ 1, 2, 3 };
+   data.outer[1] = y;
+   data.outer.inner.a = data.aligned.b.x;
+} @mesh @1_1_1 @1_1 @triangles
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.
