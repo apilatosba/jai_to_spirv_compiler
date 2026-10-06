@@ -6,6 +6,7 @@
 #import "Basic";
 #import,file "ApilaSpirv.jai";
 #import "Process";
+#import "String";
 
 // config
 BUILD_FOLDER      :: "build";
@@ -22,6 +23,14 @@ BUILD_FOLDER      :: "build";
 
    w := compiler_create_workspace("Target Program (main)");
    make_directory_if_it_does_not_exist(BUILD_FOLDER);
+
+   // remove the outputs of the previous build. otherwise a shader that was renamed or removed leaves its old .spv behind and the test validates it.
+   for file_list(BUILD_FOLDER) {
+      if (ends_with(it, ".spv")) {
+         ok := file_delete(it);
+         assert(ok, "couldnt delete %", it);
+      }
+   }
 
    _options := get_build_options(w);
    copy_commonly_propagated_fields(rootOptions, *_options);
