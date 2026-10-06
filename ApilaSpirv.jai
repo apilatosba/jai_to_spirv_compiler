@@ -393,6 +393,11 @@ globalConstantDeclarations:   Table(*Code_Declaration, struct {});
 userFunctionArguments:        Table(*Code_Declaration, struct {}); // this contains arguments to user defined functions. this doesn't include the arguments to the entry point.     - apila, 09/06/26
 structDefinitions:            Table(*Type_Info_Struct, *Code_Struct); // needed for the default values of struct members.
 
+// fixed arrays in Function storage class must not have the ArrayStride decoration, but arrays in buffers (PhysicalStorageBuffer) must have it.
+// so like TypeInfoDecorationlessCopyOfStruct, local arrays use a copy of the array type, which is registered here. (key: the copy, value: the array it is a copy of)
+// the copy is still a Type_Info_Array so the code that handles arrays doesnt need to know about it, only CompareType and HashType do.
+decorationlessArrays:         Table(*Type_Info_Array, *Type_Info_Array);
+
 MESH_SHADER_NOTE_NAME      :: "mesh";
 FRAGMENT_SHADER_NOTE_NAME  :: "fragment";
 RGEN_SHADER_NOTE_NAME      :: "rgen";
@@ -885,6 +890,7 @@ HashType :: (type: *Type_Info) -> u32 {
          hash: u32 = 17;
          hash = hash * 31 + HashType(tia.element_type);
          hash = hash * 31 + get_hash(tia.array_count);
+         hash = hash * 31 + cast(u32) IsDecorationlessArray(tia);
 
          return hash;
       }
@@ -998,6 +1004,7 @@ CompareType :: (a_: *Type_Info, b_: *Type_Info) -> bool {
 
          if arrayType == {
             case .FIXED;
+               if (IsDecorationlessArray(tiaA) != IsDecorationlessArray(tiaB)) return false;
                return tiaA.array_count == tiaB.array_count && CompareType(tiaA.element_type, tiaB.element_type);
             case .VIEW;
                return CompareType(tiaA.element_type, tiaB.element_type);
@@ -2043,6 +2050,19 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       print_to_builder(*b, "\n; struct annotate infos\n");
    }
 
+   // fixed arrays used in buffers. local ones are decorationless copies (see decorationlessArrays)
+   for ssaId, identifier: data.identifierToSSAId {
+      if (identifier.type != ._Type) continue;
+      if (identifier._type.type != .ARRAY) continue;
+
+      tia := cast(*Type_Info_Array) identifier._type;
+      if (tia.array_type != .FIXED || IsDecorationlessArray(tia) || IsMatrixType(tia)) continue;
+
+      // jai lays out arrays with a stride of size_of(element)
+      // using ssaId instead of GetSSAId because this loop iterates over identifierToSSAId, which GetSSAId may modify.
+      WriteSingleInstruction(*b, .Decorate, ssaId, SpvDecoration.ArrayStride, tia.element_type.runtime_size);
+   }
+
    structsToAnnotate: [..] Identifier;
    for ssaId, identifier: data.identifierToSSAId {
       if (identifier.type != ._Type) continue;
@@ -2232,6 +2252,15 @@ CalculateLocationsConsumed :: (T: *Type_Info) -> int {
             Helper(it.type, accumulator);
          }
 
+         return;
+      }
+
+      // each element of an array consumes its own locations
+      if (ti.type == .ARRAY && (cast(*Type_Info_Array) ti).array_type == .FIXED) {
+         tia := cast(*Type_Info_Array) ti;
+         elementLocations := 0;
+         Helper(tia.element_type, *elementLocations);
+         accumulator.* += elementLocations * tia.array_count;
          return;
       }
 
@@ -5493,7 +5522,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
             if tia.array_type == {
                case .FIXED; {
                   elementType := tia.element_type;
-                  assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. known limitation: cant use pointers inside array. wrap them in a struct for now", tia.element_type.type);
+                  assert(tia.element_type.type != .POINTER, "tia.element_type.type: %. known limitation: cant use pointers inside array. wrap them in a struct for now", tia.element_type.type);
                   elementTypeIdentifier: Identifier = .{ type = ._Type, _type = elementType };
                   WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
 
@@ -6310,8 +6339,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
       }
 
       if (`additionalData.spirvShouldHaveBeenType != null && !CompareType(`additionalData.spirvShouldHaveBeenType, ssaIdSpirvType)) {
-         // a struct and its decorationless copy are logically the same type, OpCopyLogical converts between them in both directions.
-         if (`additionalData.spirvShouldHaveBeenType.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG || ssaIdSpirvType.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG) {
+         // a struct (or array) and its decorationless copy are logically the same type, OpCopyLogical converts between them in both directions.
+         if (IsDecorationlessType(`additionalData.spirvShouldHaveBeenType) || IsDecorationlessType(ssaIdSpirvType)) {
             resultSpirvType = `additionalData.spirvShouldHaveBeenType;
             resultSSAId = GetNextSSAId(`data);
             WriteSingleInstructionIfReachable(
@@ -9707,10 +9736,12 @@ GetForLoopNodes :: (data: *CompilationData, cf: *Code_For) -> ForLoopNodes {
 }
 
 // the value a declaration without an initializer gets: the default values of the members of a struct (recursively), zero for everything else.
-// type can be a decorationless copy of a struct, the result is then converted with OpCopyLogical.
+// type can be a decorationless copy of a struct or an array, the result is then converted with OpCopyLogical.
 GenerateDefaultValue :: (data: *CompilationData, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, type: *Type_Info) -> SSAId {
-   jaiType := type;
-   if (type.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG) jaiType = (cast(*TypeInfoDecorationlessCopyOfStruct) type).copyOf;
+   // zero can be created directly in the decorationless type
+   if (!HasDefaultValues(GetDecoratedType(type))) return GetSSAId(data, .{ type = .NullConstant, nullConstant = type });
+
+   jaiType := GetDecoratedType(type);
 
    identifier := GetDefaultValueIdentifier(data, general, function, currentFunction, jaiType);
    ssaId := GetSSAId(data, identifier);
@@ -9783,6 +9814,26 @@ HasDefaultValues :: (type: *Type_Info) -> bool {
    return false;
 }
 
+IsDecorationlessArray :: (type: *Type_Info) -> bool {
+   return type.type == .ARRAY && table_contains(*decorationlessArrays, cast(*Type_Info_Array) type);
+}
+
+IsDecorationlessType :: (type: *Type_Info) -> bool {
+   return type.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG || IsDecorationlessArray(type);
+}
+
+// returns the type a decorationless type is a copy of
+GetDecoratedType :: (type: *Type_Info) -> *Type_Info {
+   if (type.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG) return (cast(*TypeInfoDecorationlessCopyOfStruct) type).copyOf;
+
+   if (type.type == .ARRAY) {
+      found, original := table_find(*decorationlessArrays, cast(*Type_Info_Array) type);
+      if (found) return original;
+   }
+
+   return type;
+}
+
 // structs in Function storage class must not have offset decorations, so they use a decorationless copy of the struct.
 // (vectors are structs too but they become OpTypeVector so they dont need it)
 // this is recursive: the members of a decorationless copy are decorationless too (see WriteTypeOrVariableOrConstant), and so are the elements of arrays.
@@ -9791,12 +9842,12 @@ GetFunctionStorageClassType :: (type: *Type_Info) -> *Type_Info {
       tia := cast(*Type_Info_Array) type;
       if (tia.array_type != .FIXED) return type;
 
-      elementType := GetFunctionStorageClassType(tia.element_type);
-      if (elementType == tia.element_type) return type;
+      if (IsDecorationlessArray(tia)) return type;
 
       newType := New(Type_Info_Array);
       newType.* = tia.*;
-      newType.element_type = elementType;
+      newType.element_type = GetFunctionStorageClassType(tia.element_type);
+      TableAdd(*decorationlessArrays, newType, tia);
       return newType;
    }
 
@@ -10091,6 +10142,7 @@ GetVariableName :: (variable: Identifier) -> string {
    return variable.variable.declaration.name;
 }
 
+// these are the arrays of the mesh shader outputs. they are not in a buffer so they must not have ArrayStride. (see decorationlessArrays)
 CreateTypeInfoArrayFixedSize :: (elementType: *Type_Info, arrayCount: int) -> *Type_Info_Array #expand {
    typeInfo := New(Type_Info_Array);
    typeInfo.type = .ARRAY;
@@ -10098,6 +10150,7 @@ CreateTypeInfoArrayFixedSize :: (elementType: *Type_Info, arrayCount: int) -> *T
    typeInfo.array_type = .FIXED;
    typeInfo.array_count = arrayCount;
 
+   TableAdd(*decorationlessArrays, typeInfo, typeInfo);
    return typeInfo;
 }
 

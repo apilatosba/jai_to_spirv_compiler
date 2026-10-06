@@ -3113,6 +3113,63 @@ TestNestedStructCopies :: (o: [] TestOut, p: [] TestPrim, data: *TestNestedStruc
    data.values[4].inner = d.many[1];
 } @mesh @1_1_1 @1_1 @triangles
 
+TestArrayBuffer :: struct {
+   lights:  [4] TestDefaults;
+   values:  [8] f32;
+   colors:  [3] f32x3;
+   grid:    [2][3] s32;
+   nested:  TestNestedDefaults;
+}
+
+TestArrayBufferData :: struct {
+   buffer: *TestArrayBuffer;
+}
+
+// fixed arrays inside structs that are in a buffer need ArrayStride, local ones must not have it.
+TestFixedArraysInBuffer :: (o: [] TestOut, p: [] TestPrim, data: *TestArrayBufferData) {
+   b := data.buffer;
+   b.values[2] = b.values[1] + b.lights[3].a;
+   b.colors[1] = b.colors[0];
+   b.grid[1][2] = b.grid[0][1];
+   b.nested.many[1].d = 3;
+
+   // copies between buffer and local arrays
+   localValues := b.values;
+   localValues[0] = 1;
+   b.values = localValues;
+
+   localLights: [4] TestDefaults;
+   localLights[1] = b.lights[2];
+   b.lights = localLights;
+
+   localGrid := b.grid;
+   b.grid[0] = localGrid[1];
+
+   sum: f32 = 0;
+   for b.values  sum += it;
+   for b.lights  sum += it.a;
+   b.values[7] = sum;
+
+   copy := b.*;
+   copy.values[3] = 2;
+   data.buffer[1] = copy;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestArrayOut :: struct {
+   weights: [2] f32;
+   uv:      f32x2;
+}
+
+TestInterfaceArraysMesh :: (o: [] TestArrayOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(1, 1);
+   o[0].weights[1] = data.f;
+   o[0].uv = data.v2;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestInterfaceArraysFragment :: (v: TestArrayOut, p: TestPrim, data: *TestData) -> f32x4 {
+   return f32x4.{ v.weights[0], v.weights[1], v.uv.x, 1 };
+} @fragment
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.
