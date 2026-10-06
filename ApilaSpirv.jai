@@ -120,24 +120,38 @@ MeshPerVertex :: struct {
 operator *  :: (m: mat4, v: f32x4)  -> f32x4 { return .{}; };
 operator *  :: (m: mat3, v: f32x3)  -> f32x3 { return .{}; };
 operator *  :: (a: mat4, b: mat4)   -> mat4  { return .{}; }; // this is not valid jai operation unfortunately :(  - apila, 14/05/26
-operator *  :: (v: f32x3, s: f32)   -> f32x3 { return .{}; }
-operator *  :: (a: f32x3, b: f32x3) -> f32x3 { return .{}; }
-operator *  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
-operator *  :: (a: f32x2, b: f32)   -> f32x2 { return .{}; }
-operator *  :: (s: f32, v: f32x3)   -> f32x3 { return .{}; }
-operator -  :: (v: f32x3, s: f32)   -> f32x3 { return .{}; }
-operator -  :: (v: f32x2, s: f32)   -> f32x2 { return .{}; }
-operator -  :: (a: f32x3, b: f32x3) -> f32x3 { return .{}; }
-operator -  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
-operator -  :: (a: f32x3)           -> f32x3 { return .{}; }
-operator -  :: (s: f32, v: f32x3)   -> f32x3 { return .{}; }
-operator /  :: (a: f32x3, b: f32x3) -> f32x3 { return .{}; }
-operator /  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
-operator /  :: (v: f32x3, s: f32)   -> f32x3 { return .{}; }
-operator +  :: (v: f32x3, s: f32)   -> f32x3 { return .{}; }
-operator +  :: (v: f32x2, s: f32)   -> f32x2 { return .{}; }
-operator +  :: (a: f32x3, b: f32x3) -> f32x3 { return .{}; }
-operator +  :: (a: f32x2, b: f32x2) -> f32x2 { return .{}; }
+
+// arithmetic on vectors. these only exist so that jai typechecks the shader, the backend generates the instructions from the operator node itself.
+// a scalar operand is broadcast to a vector (vector + scalar is vector + .{ scalar, scalar, ... }), see DoBinaryArithmetic.
+#insert #run -> string {
+   builder: String_Builder;
+
+   Vector :: struct { name: string; scalar: string; isInt: bool; isSigned: bool; }
+   VECTORS :: Vector.[
+      .{ "u8x2",  "u8",  true,  false }, .{ "u8x3",  "u8",  true,  false }, .{ "u8x4",  "u8",  true,  false },
+      .{ "s32x2", "s32", true,  true  }, .{ "s32x3", "s32", true,  true  }, .{ "s32x4", "s32", true,  true  },
+      .{ "u32x2", "u32", true,  false }, .{ "u32x3", "u32", true,  false }, .{ "u32x4", "u32", true,  false },
+      .{ "s64x2", "s64", true,  true  }, .{ "s64x3", "s64", true,  true  }, .{ "s64x4", "s64", true,  true  },
+      .{ "u64x2", "u64", true,  false }, .{ "u64x3", "u64", true,  false }, .{ "u64x4", "u64", true,  false },
+      .{ "f32x2", "f32", false, true  }, .{ "f32x3", "f32", false, true  }, .{ "f32x4", "f32", false, true  },
+   ];
+
+   for v: VECTORS {
+      INT_OPERATORS   :: string.["+", "-", "*", "/", "%", "&", "|", "^"];
+      FLOAT_OPERATORS :: string.["+", "-", "*", "/", "%"];
+      operators: [] string = FLOAT_OPERATORS;
+      if (v.isInt) operators = INT_OPERATORS;
+      for op: operators {
+         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { return .{}; }\n", op, v.name, v.name,   v.name);
+         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { return .{}; }\n", op, v.name, v.scalar, v.name);
+         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { return .{}; }\n", op, v.scalar, v.name, v.name);
+      }
+
+      if (v.isSigned) print_to_builder(*builder, "operator - :: (a: %) -> % { return .{}; }\n", v.name, v.name);
+   }
+
+   return builder_to_string(*builder);
+};
 
 #insert #run sprint("%: [] MeshPerVertex;", MESH_VERTICES_NAME); // gl_MeshVerticesEXT
 #insert #run sprint("%: [] s32x3;", MESH_TRIANGLES_NAME); // gl_PrimitiveTriangleIndicesEXT
@@ -3705,6 +3719,7 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          case .LogicalEqual; #through;
          case .LogicalNotEqual; #through;
          case .LogicalAnd; #through;
+         case .VectorTimesScalar; #through;
          case .LogicalOr; {
             assert(operands.count == 4);
             assert(operands[0].type == cast(*Type_Info) SSAId);
@@ -4970,6 +4985,7 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          case .LogicalEqual; #through;
          case .LogicalNotEqual; #through;
          case .LogicalAnd; #through;
+         case .VectorTimesScalar; #through;
          case .LogicalOr; {
             assert(operands.count == 4);
             assert(operands[0].type == cast(*Type_Info) SSAId);
@@ -6978,6 +6994,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                //
 
                // not sure about literalShouldHaveBeenTypes here
+               leftType, rightType = GetArithmeticOperandTypes(leftType, rightType, cbo.operator_type);
                leftId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
                rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightType });
 
@@ -7011,7 +7028,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                found2, rightType := table_find(*data.codeNodeTypes, cbo.right);
                assert(found2);
 
-               rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
+               operatorType := GetOperatorFromCompoundAssignment(cbo.operator_type);
+
+               // the right side has the type of the left side, except "vector op= scalar" where it is the component type of the vector (it is broadcast)
+               _, broadcastRightType := GetArithmeticOperandTypes(leftType, rightType, operatorType);
+               rightShouldHaveBeenType := ifx broadcastRightType != rightType then broadcastRightType else leftType;
+               rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightShouldHaveBeenType });
 
                leftLValueSSAId: SSAId = U32_MAX;
                leftLValueSpirvType: *Type_Info;
@@ -7022,10 +7044,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
 
                tipLeftLValue := cast(*TypeInfoPointer) leftLValueSpirvType;
 
-               operatorType := GetOperatorFromCompoundAssignment(cbo.operator_type);
-
                binaryArithmeticSpirvType: *Type_Info;
-               binaryArithmeticSSAId := DoBinaryArithmetic(data, function, leftType, leftRValueSSAId, rightType, rightId, operatorType, node, spirvType = *binaryArithmeticSpirvType);
+               binaryArithmeticSSAId := DoBinaryArithmetic(data, function, leftType, leftRValueSSAId, rightShouldHaveBeenType, rightId, operatorType, node, spirvType = *binaryArithmeticSpirvType);
                assert(binaryArithmeticSpirvType != null);
 
                Store(
@@ -8712,6 +8732,48 @@ DoCast :: (data: *CompilationData, b: *BuilderType, castTo: *Type_Info, castFrom
 //    <id>          <id>      <id>        <id>
 //  Result Type    Result   Operand 1   Operand 2
 DoBinaryArithmetic :: (data: *CompilationData, b: *BuilderType, leftType: *Type_Info, leftId: SSAId, rightType: *Type_Info, rightId: SSAId, operatorType: Operator_Type, node: *Code_Node, spirvType: **Type_Info = null) -> SSAId {
+   // broadcasting. spirv has no instructions that take a vector and a scalar (except OpVectorTimesScalar), so the scalar is made into a vector:
+   //    v + s   ->   v + .{ s, s, s }
+   // the scalar must already be of the component type of the vector, see GetArithmeticOperandTypes.
+   if (operatorType != .SHIFT_LEFT && operatorType != .SHIFT_RIGHT) {
+      leftInfo, leftIsNumeric := GetNumericInfo(leftType);
+      rightInfo, rightIsNumeric := GetNumericInfo(rightType);
+
+      if (leftIsNumeric && rightIsNumeric && leftInfo.components != rightInfo.components && (leftInfo.components == 1 || rightInfo.components == 1)) {
+         scalarIsLeft := leftInfo.components == 1;
+         vectorType := ifx scalarIsLeft then rightType else leftType;
+         vectorInfo := ifx scalarIsLeft then rightInfo else leftInfo;
+         scalarInfo := ifx scalarIsLeft then leftInfo else rightInfo;
+         vectorId := ifx scalarIsLeft then rightId else leftId;
+         scalarId := ifx scalarIsLeft then leftId else rightId;
+
+         assert(scalarInfo.kind == vectorInfo.kind && scalarInfo.bitSize == vectorInfo.bitSize, "can only broadcast a scalar of the component type of the vector. left: %, right: %, loc: %", leftType.*, rightType.*, GetLocationString(node));
+
+         if (spirvType != null) spirvType.* = vectorType;
+
+         // multiplication is commutative so the order doesnt matter
+         if (vectorInfo.kind == .Float && operatorType == #char "*") {
+            resultSSAId := GetNextSSAId(data);
+            WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .VectorTimesScalar, GetSSAId(data, .{ type = ._Type, _type = vectorType }), resultSSAId, vectorId, scalarId);
+            return resultSSAId;
+         }
+
+         broadcastSSAId := GetNextSSAId(data);
+         operands: [..] Any;
+         operands.allocator = temp;
+         array_add(*operands, GetSSAId(data, .{ type = ._Type, _type = vectorType }));
+         array_add(*operands, broadcastSSAId);
+         for 1..vectorInfo.components  array_add(*operands, scalarId);
+         WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .CompositeConstruct, .. operands);
+
+         if (scalarIsLeft) {
+            return DoBinaryArithmetic(data, b, vectorType, broadcastSSAId, vectorType, vectorId, operatorType, node, spirvType);
+         } else {
+            return DoBinaryArithmetic(data, b, vectorType, vectorId, vectorType, broadcastSSAId, operatorType, node, spirvType);
+         }
+      }
+   }
+
    resultSSAId := GetNextSSAId(data);
 
    // jai doesnt convert the shift amount to the type of the shifted value (in "x << 2" the 2 is s64), and spirv doesnt require it either.
@@ -10227,6 +10289,22 @@ DoMemberAccess :: (tis: *Type_Info_Struct, right: *Code_Node, indices: *[..] SSA
    } else {
       array_add(literalIndices, memberIndex);
    }
+}
+
+// the types the operands of an arithmetic operator are generated as.
+// in "vector op scalar" (or "scalar op vector") the scalar is generated as the component type of the vector, so that a literal like the 2 in "v * 2"
+// becomes a constant of the right type, and then it can be broadcast. see DoBinaryArithmetic.
+GetArithmeticOperandTypes :: (leftType: *Type_Info, rightType: *Type_Info, operatorType: Operator_Type) -> left: *Type_Info, right: *Type_Info {
+   if (operatorType == .SHIFT_LEFT || operatorType == .SHIFT_RIGHT) return leftType, rightType;
+
+   leftInfo, leftIsNumeric := GetNumericInfo(leftType);
+   rightInfo, rightIsNumeric := GetNumericInfo(rightType);
+   if (!leftIsNumeric || !rightIsNumeric) return leftType, rightType;
+
+   if (leftInfo.components > 1 && rightInfo.components == 1)  return leftType, GetNumericType(leftInfo.kind, leftInfo.bitSize, 1);
+   if (leftInfo.components == 1 && rightInfo.components > 1)  return GetNumericType(rightInfo.kind, rightInfo.bitSize, 1), rightType;
+
+   return leftType, rightType;
 }
 
 // p[x] is *(p + x * size_of(element)).

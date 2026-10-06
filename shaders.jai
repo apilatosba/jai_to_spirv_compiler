@@ -3199,6 +3199,52 @@ TestAlignment :: (o: [] TestOut, p: [] TestPrim, data: *TestAlignmentData) {
    data.outer.inner.a = data.aligned.b.x;
 } @mesh @1_1_1 @1_1 @triangles
 
+// vector op scalar: the scalar is broadcast to a vector
+TestBroadcastFloat :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   v := data.v3;
+   s := data.f;
+   a := v + s;
+   b := s - v;
+   c := v * 2;
+   d := 0.5 * v;
+   e := v / s;
+   f := 1 / v;
+   g := data.v4 % 3;
+   h := data.v2 - 1;
+   v += s;
+   v *= 2;
+   v -= 0.5;
+   v /= s;
+   data.v3 = a + b + c + d + e + f + v;
+   data.v4 = g * data.f;
+   data.v2 = h;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestBroadcastInt :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   i := s32x3.{ 1, 2, 3 };
+   u := u32x4.{ 1, 2, 3, 4 };
+   a := i + data.i;
+   b := 10 - i;
+   c := i * 2;
+   d := u / 2;
+   e := u % data.u;
+   f := (u & 3) | (u ^ data.u);
+   i += 1;
+   u *= data.u;
+   bytes := u8x2.{ 1, 2 } + data.bytes[0];
+   data.ints[0] = a.x + b.y + c.z + i.x;
+   data.u = d.x + e.y + f.z + u.w + bytes.y;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestVectorOperators :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a := data.v4 + data.v4 * data.v4 - data.v4 / data.v4;
+   b := -data.v4;
+   i := s32x2.{ 1, 2 };
+   j := -i + i * i - i / i % i;
+   data.v4 = a + b;
+   data.ints[0] = j.x;
+} @mesh @1_1_1 @1_1 @triangles
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.
