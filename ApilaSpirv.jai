@@ -107,6 +107,7 @@ f32x4 :: struct { x: f32; y: f32; z: f32; w: f32; };
 f32x2x2 :: #type,distinct [2] f32x2;
 f32x3x3 :: #type,distinct [3] f32x3;
 f32x4x4 :: #type,distinct [4] f32x4;
+f32x3x4 :: #type,distinct [4] f32x3; // 4 columns, 3 rows (column major). the type of objecttoworld and worldtoobject
 
 mat2 :: f32x2x2;
 mat3 :: f32x3x3;
@@ -119,6 +120,7 @@ MeshPerVertex :: struct {
 
 operator *  :: (m: mat4, v: f32x4)  -> f32x4 { return .{}; };
 operator *  :: (m: mat3, v: f32x3)  -> f32x3 { return .{}; };
+operator *  :: (m: f32x3x4, v: f32x4) -> f32x3 { return .{}; };
 operator *  :: (a: mat4, b: mat4)   -> mat4  { return .{}; }; // this is not valid jai operation unfortunately :(  - apila, 14/05/26
 
 // arithmetic on vectors. these only exist so that jai typechecks the shader, the backend generates the instructions from the operator node itself.
@@ -174,6 +176,40 @@ operator *  :: (a: mat4, b: mat4)   -> mat4  { return .{}; }; // this is not val
 #insert #run sprint("%: u32x3;", LAUNCH_ID_VARIABLE_NAME);
 #insert #run sprint("%: u32x3;", LAUNCH_SIZE_VARIABLE_NAME);
 #insert #run sprint("%: u32x3;", LOCAL_INVOCATION_ID_VARIABLE_NAME);
+
+// built in variables of the ray tracing shaders (other than launchid and launchsize which are above).
+// they are only declared in the entry point if the shader uses them, and using one in a stage that doesnt have it is an error.
+RayTracingBuiltin :: struct {
+   name:          string;
+   typeName:      string;
+   builtIn:       SpvBuiltIn;
+   inClosestHit:  bool;
+   inMiss:        bool;
+}
+
+// the types are what spirv requires. for the indices spirv only requires a 32 bit integer, they are s32 like in glsl.
+RAY_TRACING_BUILTINS :: RayTracingBuiltin.[
+   .{ "worldrayorigin",       "f32x3",    .WorldRayOriginKHR,        true,  true  },
+   .{ "worldraydirection",    "f32x3",    .WorldRayDirectionKHR,     true,  true  },
+   .{ "objectrayorigin",      "f32x3",    .ObjectRayOriginKHR,       true,  false },
+   .{ "objectraydirection",   "f32x3",    .ObjectRayDirectionKHR,    true,  false },
+   .{ "raytmin",              "f32",      .RayTminKHR,               true,  true  },
+   .{ "raytmax",              "f32",      .RayTmaxKHR,               true,  true  },
+   .{ "incomingrayflags",     "u32",      .IncomingRayFlagsKHR,      true,  true  },
+   .{ "hitkind",              "u32",      .HitKindKHR,               true,  false },
+   .{ "instancecustomindex",  "s32",      .InstanceCustomIndexKHR,   true,  false },
+   .{ "instanceid",           "s32",      .InstanceId,               true,  false },
+   .{ "geometryindex",        "s32",      .RayGeometryIndexKHR,      true,  false },
+   .{ "primitiveid",          "s32",      .PrimitiveId,              true,  false },
+   .{ "objecttoworld",        "f32x3x4",  .ObjectToWorldKHR,         true,  false },
+   .{ "worldtoobject",        "f32x3x4",  .WorldToObjectKHR,         true,  false },
+];
+
+#insert #run -> string {
+   builder: String_Builder;
+   for RAY_TRACING_BUILTINS  print_to_builder(*builder, "%: %;\n", it.name, it.typeName);
+   return builder_to_string(*builder);
+};
 
 #insert #run sprint("% :: (x: f32,   y: f32)   -> f32   { return   0; } @%", POW_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 #insert #run sprint("% :: (x: f32x2, y: f32x2) -> f32x2 { return .{}; } @%", POW_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
@@ -307,6 +343,13 @@ ProcessMessage :: (message: *Message) {
                   launchSizeVariableIdentifier = .{ type = .Variable, variable = .{ declaration = it.expression } };
                }
             }
+
+            for builtin, builtinIndex: RAY_TRACING_BUILTINS {
+               if (it.expression.name != builtin.name) continue;
+
+               assert(rayTracingBuiltinIdentifiers[builtinIndex].type == .Invalid);
+               rayTracingBuiltinIdentifiers[builtinIndex] = .{ type = .Variable, variable = .{ declaration = it.expression } };
+            }
          }
       }
 
@@ -327,6 +370,7 @@ ProcessMessage :: (message: *Message) {
             assert(localInvocationIdVariableIdentifier.type       != .Invalid);
             assert(launchIdVariableIdentifier.type                != .Invalid);
             assert(launchSizeVariableIdentifier.type              != .Invalid);
+            for rayTracingBuiltinIdentifiers  assert(it.type != .Invalid, "%", RAY_TRACING_BUILTINS[it_index].name);
          }
 
          for _, header: entryPoints {
@@ -382,6 +426,7 @@ workGroupIdVariableIdentifier:            Identifier;
 localInvocationIdVariableIdentifier:      Identifier;
 launchIdVariableIdentifier:               Identifier;
 launchSizeVariableIdentifier:             Identifier;
+rayTracingBuiltinIdentifiers:             [RAY_TRACING_BUILTINS.count] Identifier;
 
 MODULE_NAME :: #run GetModuleName();
 
@@ -1671,6 +1716,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             array_add(*operands, ac(GetSSAId(*data, it)));
          }
 
+         for GetUsedRayTracingBuiltins(*data) {
+            array_add(*operands, ac(GetSSAId(*data, rayTracingBuiltinIdentifiers[it])));
+         }
+
          WriteSingleInstruction(*b, .EntryPoint, ..operands);
       }
 
@@ -1689,6 +1738,10 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
 
          for data.rayPayloadVariableIdentifiers {
             array_add(*operands, ac(GetSSAId(*data, it)));
+         }
+
+         for GetUsedRayTracingBuiltins(*data) {
+            array_add(*operands, ac(GetSSAId(*data, rayTracingBuiltinIdentifiers[it])));
          }
 
          WriteSingleInstruction(*b, .EntryPoint, ..operands);
@@ -1983,6 +2036,16 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       case; assert(false, "not yet implemented!");
    }
 
+   for GetUsedRayTracingBuiltins(*data) {
+      WriteSingleInstruction(
+         *b,
+         .Decorate,
+         GetSSAId(*data, rayTracingBuiltinIdentifiers[it]),
+         SpvDecoration.BuiltIn,
+         RAY_TRACING_BUILTINS[it].builtIn
+      );
+   }
+
    // This is the sole ResourceHeapEXT interface variable. images and tlases
    // remain separate source-level pseudo-arrays that select the loaded type.
    WriteSingleInstruction(
@@ -2260,6 +2323,7 @@ CalculateLocationsConsumed :: (T: *Type_Info) -> int {
       else if (CompareType(type, cast(*Type_Info) f32x2x2)) { accumulator.* += 2; return; }
       else if (CompareType(type, cast(*Type_Info) f32x3x3)) { accumulator.* += 3; return; }
       else if (CompareType(type, cast(*Type_Info) f32x4x4)) { accumulator.* += 4; return; }
+      else if (CompareType(type, cast(*Type_Info) f32x3x4)) { accumulator.* += 4; return; }
 
       ti := cast(*Type_Info) type;
       if (ti.type == .STRUCT) {
@@ -5305,6 +5369,20 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
             return;
          }
 
+         if (CompareType(type, cast(*Type_Info) f32x3x4)) {
+            float3Identifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) f32x3 };
+            WriteTypeOrVariableOrConstant(data, b, float3Identifier);
+
+            WriteSingleInstruction(
+               b,
+               .TypeMatrix,
+               GetSSAId(data, identifier),
+               GetSSAId(data, float3Identifier),
+               4
+            );
+            return;
+         }
+
          // do i need this seperately?
          // doesnt the general .STRUCT case below already do the same?
          //       - apila, 07/09/26
@@ -5737,6 +5815,25 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
 
             #if SPIRV_BUILDER_TYPE == .String {
                print_to_builder(b, "; workgroup id variable\n");
+            }
+
+            WriteSingleInstruction(
+               b,
+               .Variable,
+               GetSSAId(data, typeIdentifier),
+               GetSSAId(data, identifier),
+               SpvStorageClass.Input
+            );
+         } else if(GetRayTracingBuiltinIndex(identifier) != -1) {
+            pointerType := New(TypeInfoPointer);
+            pointerType.pointerTo = identifier.variable.declaration.type;
+            pointerType.storageClass = .Input;
+
+            typeIdentifier: Identifier = .{ type = ._Type, _type = pointerType };
+            WriteTypeOrVariableOrConstant(data, b, typeIdentifier);
+
+            #if SPIRV_BUILDER_TYPE == .String {
+               print_to_builder(b, "; % variable\n", RAY_TRACING_BUILTINS[GetRayTracingBuiltinIndex(identifier)].name);
             }
 
             WriteSingleInstruction(
@@ -8446,8 +8543,32 @@ Signedness :: enum {
 //       - apila, 06/06/26
 //
 
+// index into RAY_TRACING_BUILTINS, -1 if the variable is not one of them
+GetRayTracingBuiltinIndex :: (variable: Identifier) -> int {
+   for rayTracingBuiltinIdentifiers  if (IdentifierCompare(it, variable)) return it_index;
+   return -1;
+}
+
+IsRayTracingBuiltinAvailable :: (builtin: RayTracingBuiltin, shaderType: ShaderType) -> bool {
+   if shaderType == {
+      case .Rchit;   return builtin.inClosestHit;
+      case .Rmiss;   return builtin.inMiss;
+      case;          return false;
+   }
+}
+
+// the ray tracing builtins this shader uses. (GetSSAId was called on them while generating the instructions)
+GetUsedRayTracingBuiltins :: (data: *CompilationData) -> [..] int {
+   result: [..] int;
+   result.allocator = temp;
+   for rayTracingBuiltinIdentifiers {
+      if (table_contains(*data.identifierToSSAId, it)) array_add(*result, it_index);
+   }
+   return result;
+}
+
 IsMatrixType :: (type: *Type_Info) -> bool {
-   return CompareType(type, type_info(mat2)) || CompareType(type, type_info(mat3)) || CompareType(type, type_info(mat4));
+   return CompareType(type, type_info(mat2)) || CompareType(type, type_info(mat3)) || CompareType(type, type_info(mat4)) || CompareType(type, type_info(f32x3x4));
 }
 
 GetMatrixVector :: (type: *Type_Info) -> *Type_Info {
@@ -8832,25 +8953,27 @@ DoBinaryArithmetic :: (data: *CompilationData, b: *BuilderType, leftType: *Type_
       // or if it is multiplication there are specific instructions for the multiplication. i should use them.
 
       if (operatorType == #char "*") {
-         isLeftMatrix := CompareType(leftType, cast(*Type_Info) mat2) ||
-                         CompareType(leftType, cast(*Type_Info) mat3) ||
-                         CompareType(leftType, cast(*Type_Info) mat4);
-         isRightVector := CompareType(rightType, cast(*Type_Info) f32x2) ||
-                          CompareType(rightType, cast(*Type_Info) f32x3) ||
-                          CompareType(rightType, cast(*Type_Info) f32x4);
+         // the vector has a component for each column, the result has a component for each row (it has the type of a column).
+         isLeftMatrix := IsMatrixType(leftType);
+         rightInfo, isRightVector := GetNumericInfo(rightType);
+         isRightVector = isRightVector && rightInfo.kind == .Float && rightInfo.components > 1;
 
          if (isLeftMatrix && isRightVector) {
+            columns := cast(*Type_Info_Array) UnwindVariantsAllTheWay(leftType);
+            assert(columns.array_count == rightInfo.components, "the vector must have a component for each column of the matrix. left: %, right: %, loc: %", leftType.*, rightType.*, GetLocationString(node));
+            resultType := GetMatrixVector(leftType);
+
             WriteSingleInstructionIfReachable(
                b,
                *data.isBlockReachable,
                .MatrixTimesVector,
-               GetSSAId(data, .{ type = ._Type, _type = rightType }),
+               GetSSAId(data, .{ type = ._Type, _type = resultType }),
                resultSSAId,
                leftId,
                rightId
             );
 
-            if (spirvType != null) spirvType.* = rightType;
+            if (spirvType != null) spirvType.* = resultType;
          } else {
             assert(false, "not yet implemented! if it is a broadcast i think i will implement it probably sometime surely Clueless. left: %, right: %, loc: %", leftType.*, rightType.*, GetLocationString(node));
          }
@@ -8944,6 +9067,12 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          // the jai compiler doesnt resolve identifiers inside untyped struct literals (resolved_declaration is null, only the name is there).
          // resolving it by name would mean reimplementing jai's scope rules so instead the user has to write the type.
          assert(declaration != null, "the jai compiler didnt resolve identifier %. this happens when it is used inside an untyped struct literal (.{ ... }), which is not supported. write the type of the literal instead, for example f32x4.{ ... }. loc: %", ci.name, GetLocationString(ci));
+
+         builtinIndex := GetRayTracingBuiltinIndex(.{ type = .Variable, variable.declaration = declaration });
+         if (builtinIndex != -1) {
+            builtin := RAY_TRACING_BUILTINS[builtinIndex];
+            assert(IsRayTracingBuiltinAvailable(builtin, data.shaderType), "% is not available in % shaders. loc: %", builtin.name, data.shaderType, GetLocationString(ci));
+         }
 
          declarationType := DetermineCodeNodeTypes(data, declaration);
 
@@ -10050,6 +10179,10 @@ GetDescriptorHeapArrayElementType :: (descriptorType: *Type_Info) -> *Type_Info 
 // this function returns the storage class of the variable. not where the storage class of where it points to if it is a pointer
 GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> SpvStorageClass {
    assert(variable.type == .Variable, "type: %", variable.type);
+
+   if (GetRayTracingBuiltinIndex(variable) != -1) {
+      return .Input;
+   }
 
    declaration := variable.variable;
 

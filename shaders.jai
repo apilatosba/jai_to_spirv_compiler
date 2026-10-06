@@ -3245,6 +3245,38 @@ TestVectorOperators :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    data.ints[0] = j.x;
 } @mesh @1_1_1 @1_1 @triangles
 
+TestRayBuiltinsData :: struct {
+   floats: *f32;
+   ints:   *s32;
+   uints:  *u32;
+}
+
+// all the builtins available in a closest hit shader
+TestRchitBuiltins :: (data: *TestRayBuiltinsData) {
+   payload: TestRayPayload; @payloadin
+
+   hitPosition := worldrayorigin + worldraydirection * raytmax;
+   objectPosition := objectrayorigin + objectraydirection * raytmin;
+   world := objecttoworld * f32x4.{ objectPosition.x, objectPosition.y, objectPosition.z, 1 };
+   object := worldtoobject * f32x4.{ hitPosition.x, hitPosition.y, hitPosition.z, 1 };
+   column := objecttoworld[3];
+
+   data.floats[0] = world.x + object.y + column.z;
+   data.ints[0] = instancecustomindex + instanceid + geometryindex + primitiveid;
+   data.uints[0] = hitkind + incomingrayflags;
+   payload.hit = true;
+} @rchit
+
+// all the builtins available in a miss shader
+TestRmissBuiltins :: (data: *TestRayBuiltinsData) {
+   payload: TestRayPayload; @payloadin
+
+   direction := worldraydirection;
+   data.floats[0] = worldrayorigin.x + direction.y + raytmin + raytmax;
+   data.uints[0] = incomingrayflags;
+   payload.hit = false;
+} @rmiss
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.
@@ -3280,6 +3312,12 @@ TestMacroReturnInLoop :: (x: s32) -> s32 #expand {
 UnsupportedMacroReturnInLoop :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    data.i = TestMacroReturnInLoop(data.i);
 } @mesh @1_1_1 @1_1 @triangles
+
+// a builtin can only be used in the stages that have it. there is no hit in a miss shader.
+UnsupportedBuiltinInWrongStage :: (data: *TestRayBuiltinsData) {
+   payload: TestRayPayload; @payloadin
+   data.uints[0] = hitkind;
+} @rmiss
 
 // spirv doesnt allow pointers to Function storage class (local variables) to be stored or passed around.
 UnsupportedPointerToLocal :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
