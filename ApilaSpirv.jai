@@ -1437,39 +1437,8 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       case .Fragment;
          data.fragmentOutputIdentifiers = NewArray(header.returns.count, Identifier);
          for header.returns {
-            #if false {}
-            else if (CompareType(it.type, cast(*Type_Info) bool)) {}
-            else if (CompareType(it.type, cast(*Type_Info) bool2)) {}
-            else if (CompareType(it.type, cast(*Type_Info) bool3)) {}
-            else if (CompareType(it.type, cast(*Type_Info) bool4)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u8)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u8x2)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u8x3)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u8x4)) {}
-            else if (CompareType(it.type, cast(*Type_Info) s32)) {}
-            else if (CompareType(it.type, cast(*Type_Info) s32x2)) {}
-            else if (CompareType(it.type, cast(*Type_Info) s32x3)) {}
-            else if (CompareType(it.type, cast(*Type_Info) s32x4)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u32)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u32x2)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u32x3)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u32x4)) {}
-            else if (CompareType(it.type, cast(*Type_Info) s64)) {}
-            else if (CompareType(it.type, cast(*Type_Info) s64x2)) {}
-            else if (CompareType(it.type, cast(*Type_Info) s64x3)) {}
-            else if (CompareType(it.type, cast(*Type_Info) s64x4)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u64)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u64x2)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u64x3)) {}
-            else if (CompareType(it.type, cast(*Type_Info) u64x4)) {}
-            else if (CompareType(it.type, cast(*Type_Info) f32)) {}
-            else if (CompareType(it.type, cast(*Type_Info) f32x2)) {}
-            else if (CompareType(it.type, cast(*Type_Info) f32x3)) {}
-            else if (CompareType(it.type, cast(*Type_Info) f32x4)) {}
-            else if (CompareType(it.type, cast(*Type_Info) f32x2x2)) {}
-            else if (CompareType(it.type, cast(*Type_Info) f32x3x3)) {}
-            else if (CompareType(it.type, cast(*Type_Info) f32x4x4)) {}
-            else { assert(false, "returning stuff other than intrinsics not implemented yet! you tried to return: %", it.type.*); }
+            _, isNumeric := GetNumericInfo(it.type);
+            assert(isNumeric || IsMatrixType(it.type), "returning stuff other than intrinsics not implemented yet! you tried to return: %", it.type.*);
 
             data.fragmentOutputIdentifiers[it_index] = .{ type = .Variable, variable.declaration = it };
          }
@@ -2062,37 +2031,9 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       if (!(ti.type == .STRUCT || (ti.type == .ARRAY && ti.(*Type_Info_Array).array_type == .VIEW))) continue;
 
       if (CompareType(identifier._type, cast(*Type_Info) MeshPerVertex))  continue; // builtin struct handled seperately
-      if (CompareType(identifier._type, cast(*Type_Info) bool))           continue;
-      if (CompareType(identifier._type, cast(*Type_Info) bool2))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) bool3))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) bool4))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u8))             continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u8x2))           continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u8x3))           continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u8x4))           continue;
-      if (CompareType(identifier._type, cast(*Type_Info) s32))            continue;
-      if (CompareType(identifier._type, cast(*Type_Info) s32x2))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) s32x3))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) s32x4))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u32))            continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u32x2))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u32x3))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u32x4))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) s64))            continue;
-      if (CompareType(identifier._type, cast(*Type_Info) s64x2))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) s64x3))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) s64x4))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u64))            continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u64x2))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u64x3))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) u64x4))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) f32))            continue;
-      if (CompareType(identifier._type, cast(*Type_Info) f32x2))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) f32x3))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) f32x4))          continue;
-      if (CompareType(identifier._type, cast(*Type_Info) f32x2x2))        continue;
-      if (CompareType(identifier._type, cast(*Type_Info) f32x3x3))        continue;
-      if (CompareType(identifier._type, cast(*Type_Info) f32x4x4))        continue;
+      if (IsMatrixType(identifier._type))                                 continue;
+      _, isNumeric := GetNumericInfo(identifier._type);
+      if (isNumeric)                                                      continue;
       if (CompareType(identifier._type, cast(*Type_Info) __Image__))      continue;
       if (CompareType(identifier._type, cast(*Type_Info) __Sampler__))    continue;
       if (CompareType(identifier._type, cast(*Type_Info) __TLAS__))       continue;
@@ -2253,31 +2194,14 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
 // in depth first order
 CalculateLocationsConsumed :: (T: *Type_Info) -> int {
    Helper :: (type: *Type_Info, accumulator: *int) {
+      info, isNumeric := GetNumericInfo(type);
+      if (isNumeric && info.kind != .Bool) {
+         // 64 bit vectors with more than two components consume two locations
+         accumulator.* += ifx info.bitSize == 64 && info.components > 2 then 2 else 1;
+         return;
+      }
+
       #if false {}
-      else if (CompareType(type, cast(*Type_Info) u8))      { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u8x2))    { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u8x3))    { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u8x4))    { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) s32))     { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) s32x2))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) s32x3))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) s32x4))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u32))     { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u32x2))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u32x3))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u32x4))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) s64))     { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) s64x2))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) s64x3))   { accumulator.* += 2; return; }
-      else if (CompareType(type, cast(*Type_Info) s64x4))   { accumulator.* += 2; return; }
-      else if (CompareType(type, cast(*Type_Info) u64))     { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u64x2))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) u64x3))   { accumulator.* += 2; return; }
-      else if (CompareType(type, cast(*Type_Info) u64x4))   { accumulator.* += 2; return; }
-      else if (CompareType(type, cast(*Type_Info) f32))     { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) f32x2))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) f32x3))   { accumulator.* += 1; return; }
-      else if (CompareType(type, cast(*Type_Info) f32x4))   { accumulator.* += 1; return; }
       else if (CompareType(type, cast(*Type_Info) f32x2x2)) { accumulator.* += 2; return; }
       else if (CompareType(type, cast(*Type_Info) f32x3x3)) { accumulator.* += 3; return; }
       else if (CompareType(type, cast(*Type_Info) f32x4x4)) { accumulator.* += 4; return; }
@@ -5032,368 +4956,46 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
          type := identifier._type;
 
          // intrinsics
-         if (CompareType(type, cast(*Type_Info) bool)) {
-            WriteSingleInstruction(
-               b,
-               .TypeBool,
-               GetSSAId(data, identifier)
-            );
-            return;
-         }
+         numericInfo, isNumeric := GetNumericInfo(type);
+         if (isNumeric) {
+            if (numericInfo.components > 1) {
+               elementIdentifier: Identifier = .{ type = ._Type, _type = GetNumericType(numericInfo.kind, numericInfo.bitSize, 1) };
+               WriteTypeOrVariableOrConstant(data, b, elementIdentifier);
 
-         if (CompareType(type, cast(*Type_Info) bool2)) {
-            boolIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) bool };
-            WriteTypeOrVariableOrConstant(data, b, boolIdentifier);
+               WriteSingleInstruction(
+                  b,
+                  .TypeVector,
+                  GetSSAId(data, identifier),
+                  GetSSAId(data, elementIdentifier),
+                  numericInfo.components
+               );
+               return;
+            }
 
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, boolIdentifier),
-               2
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) bool3)) {
-            boolIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) bool };
-            WriteTypeOrVariableOrConstant(data, b, boolIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, boolIdentifier),
-               3
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) bool4)) {
-            boolIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) bool };
-            WriteTypeOrVariableOrConstant(data, b, boolIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, boolIdentifier),
-               4
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u8)) {
-            WriteSingleInstruction(
-               b,
-               .TypeInt,
-               GetSSAId(data, identifier),
-               8,
-               0
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u8x2)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u8 };
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               2
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u8x3)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u8 };
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               3
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u8x4)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u8 };
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               4
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) s32)) {
-            WriteSingleInstruction(
-               b,
-               .TypeInt,
-               GetSSAId(data, identifier),
-               32,
-               1
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) s32x2)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) s32 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               2
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) s32x3)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) s32 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               3
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) s32x4)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) s32 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               4
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u32)) {
-            WriteSingleInstruction(
-               b,
-               .TypeInt,
-               GetSSAId(data, identifier),
-               32,
-               0
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u32x2)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u32 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               2
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u32x3)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u32 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               3
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u32x4)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u32 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               4
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) s64)) {
-            WriteSingleInstruction(
-               b,
-               .TypeInt,
-               GetSSAId(data, identifier),
-               64,
-               1
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) s64x2)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) s64 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               2
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) s64x3)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) s64 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               3
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) s64x4)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) s64 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               4
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u64)) {
-            WriteSingleInstruction(
-               b,
-               .TypeInt,
-               GetSSAId(data, identifier),
-               64,
-               0
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u64x2)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u64 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               2
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u64x3)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u64 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               3
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) u64x4)) {
-            intIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) u64 };
-            WriteTypeOrVariableOrConstant(data, b, intIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, intIdentifier),
-               4
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) f32)) {
-            WriteSingleInstruction(
-               b,
-               .TypeFloat,
-               GetSSAId(data, identifier),
-               32
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) f32x2)) {
-            floatIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) f32 };
-            WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, floatIdentifier),
-               2
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) f32x3)) {
-            floatIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) f32 };
-            WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, floatIdentifier),
-               3
-            );
-            return;
-         }
-
-         if (CompareType(type, cast(*Type_Info) f32x4)) {
-            floatIdentifier: Identifier = .{ type = ._Type, _type = cast(*Type_Info) f32 };
-            WriteTypeOrVariableOrConstant(data, b, floatIdentifier);
-
-            WriteSingleInstruction(
-               b,
-               .TypeVector,
-               GetSSAId(data, identifier),
-               GetSSAId(data, floatIdentifier),
-               4
-            );
+            if numericInfo.kind == {
+               case .Bool;
+                  WriteSingleInstruction(
+                     b,
+                     .TypeBool,
+                     GetSSAId(data, identifier)
+                  );
+               case .Signed; #through;
+               case .Unsigned;
+                  WriteSingleInstruction(
+                     b,
+                     .TypeInt,
+                     GetSSAId(data, identifier),
+                     numericInfo.bitSize,
+                     ifx numericInfo.kind == .Signed then 1 else 0
+                  );
+               case .Float;
+                  WriteSingleInstruction(
+                     b,
+                     .TypeFloat,
+                     GetSSAId(data, identifier),
+                     numericInfo.bitSize
+                  );
+            }
             return;
          }
 
@@ -6844,22 +6446,13 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
             case #char "-"; {
                subexpressionSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction);
 
+               info, isNumeric := GetNumericInfo(subexpressionType);
+
                op: SpvOp;
                #if false {
-               } else if (CompareType(subexpressionType, cast(*Type_Info) f32)   ||
-                          CompareType(subexpressionType, cast(*Type_Info) f32x2) ||
-                          CompareType(subexpressionType, cast(*Type_Info) f32x3) ||
-                          CompareType(subexpressionType, cast(*Type_Info) f32x4)) {
+               } else if (isNumeric && info.kind == .Float) {
                   op = .FNegate;
-               } else if (CompareType(subexpressionType, cast(*Type_Info) s8)    ||
-                          CompareType(subexpressionType, cast(*Type_Info) s32)   ||
-                          CompareType(subexpressionType, cast(*Type_Info) s32x2) ||
-                          CompareType(subexpressionType, cast(*Type_Info) s32x3) ||
-                          CompareType(subexpressionType, cast(*Type_Info) s32x4) ||
-                          CompareType(subexpressionType, cast(*Type_Info) s64)   ||
-                          CompareType(subexpressionType, cast(*Type_Info) s64x2) ||
-                          CompareType(subexpressionType, cast(*Type_Info) s64x3) ||
-                          CompareType(subexpressionType, cast(*Type_Info) s64x4)) {
+               } else if (isNumeric && info.kind == .Signed) {
                   op = .SNegate;
                } else {
                   assert(false, "not yet implemented! type: %", subexpressionType.*);
@@ -6898,58 +6491,19 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
                leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
                rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightType });
 
-               resultType: *Type_Info;
+               info, isNumeric := GetNumericInfo(type);
+
                op: SpvOp;
                #if false {
-               } else if (CompareType(type, cast(*Type_Info) s32)   ||
-                          CompareType(type, cast(*Type_Info) s32x2) ||
-                          CompareType(type, cast(*Type_Info) s32x3) ||
-                          CompareType(type, cast(*Type_Info) s32x4) ||
-                          CompareType(type, cast(*Type_Info) s64)   ||
-                          CompareType(type, cast(*Type_Info) s64x2) ||
-                          CompareType(type, cast(*Type_Info) s64x3) ||
-                          CompareType(type, cast(*Type_Info) s64x4)) {
-                  #if (false) {}
-                  else if (CompareType(type, cast(*Type_Info) s32))   resultType = cast(*Type_Info) bool;
-                  else if (CompareType(type, cast(*Type_Info) s32x2)) resultType = cast(*Type_Info) bool2;
-                  else if (CompareType(type, cast(*Type_Info) s32x3)) resultType = cast(*Type_Info) bool3;
-                  else if (CompareType(type, cast(*Type_Info) s32x4)) resultType = cast(*Type_Info) bool4;
-                  else if (CompareType(type, cast(*Type_Info) s64))   resultType = cast(*Type_Info) bool;
-                  else if (CompareType(type, cast(*Type_Info) s64x2)) resultType = cast(*Type_Info) bool2;
-                  else if (CompareType(type, cast(*Type_Info) s64x3)) resultType = cast(*Type_Info) bool3;
-                  else if (CompareType(type, cast(*Type_Info) s64x4)) resultType = cast(*Type_Info) bool4;
-
+               } else if (isNumeric && info.kind == .Signed) {
                   op = .SLessThan;
-               } else if (CompareType(type, cast(*Type_Info) u8)    ||
-                          CompareType(type, cast(*Type_Info) u8x2)  ||
-                          CompareType(type, cast(*Type_Info) u8x3)  ||
-                          CompareType(type, cast(*Type_Info) u8x4)  ||
-                          CompareType(type, cast(*Type_Info) u32)   ||
-                          CompareType(type, cast(*Type_Info) u32x2) ||
-                          CompareType(type, cast(*Type_Info) u32x3) ||
-                          CompareType(type, cast(*Type_Info) u32x4) ||
-                          CompareType(type, cast(*Type_Info) u64)   ||
-                          CompareType(type, cast(*Type_Info) u64x2) ||
-                          CompareType(type, cast(*Type_Info) u64x3) ||
-                          CompareType(type, cast(*Type_Info) u64x4)) {
-                  #if (false) {}
-                  else if (CompareType(type, cast(*Type_Info) u8))    resultType = cast(*Type_Info) bool;
-                  else if (CompareType(type, cast(*Type_Info) u8x2))  resultType = cast(*Type_Info) bool2;
-                  else if (CompareType(type, cast(*Type_Info) u8x3))  resultType = cast(*Type_Info) bool3;
-                  else if (CompareType(type, cast(*Type_Info) u8x4))  resultType = cast(*Type_Info) bool4;
-                  else if (CompareType(type, cast(*Type_Info) u32))   resultType = cast(*Type_Info) bool;
-                  else if (CompareType(type, cast(*Type_Info) u32x2)) resultType = cast(*Type_Info) bool2;
-                  else if (CompareType(type, cast(*Type_Info) u32x3)) resultType = cast(*Type_Info) bool3;
-                  else if (CompareType(type, cast(*Type_Info) u32x4)) resultType = cast(*Type_Info) bool4;
-                  else if (CompareType(type, cast(*Type_Info) u64))   resultType = cast(*Type_Info) bool;
-                  else if (CompareType(type, cast(*Type_Info) u64x2)) resultType = cast(*Type_Info) bool2;
-                  else if (CompareType(type, cast(*Type_Info) u64x3)) resultType = cast(*Type_Info) bool3;
-                  else if (CompareType(type, cast(*Type_Info) u64x4)) resultType = cast(*Type_Info) bool4;
-
+               } else if (isNumeric && info.kind == .Unsigned) {
                   op = .ULessThan;
                } else {
                   assert(false, "not yet implemented! loc: %", node.location);
                }
+
+               resultType := GetNumericType(.Bool, 0, info.components);
 
                WriteSingleInstructionIfReachable(
                   function,
@@ -7821,7 +7375,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general: *Bui
          found, returnType := table_find(*data.codeNodeTypes, node);
          assert(found);
 
-         returnTypeIdentifier: Identifier = .{ type = ._Type, _type = returnType };
+         returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
          resultSSAId := GetNextSSAId(data);
 
          operands: [..] Any;
@@ -8296,6 +7850,86 @@ GetScalarOrVectorIntSignedness :: (type: *Type_Info) -> Signedness {
    }
 }
 
+//
+// since vectors are structs (see the comment in DoCast) checking whether a type is one of the builtin scalars or vectors
+// used to be a long chain of CompareType calls. these describe every builtin scalar and vector so it can be done with a single lookup.
+//
+NumericKind :: enum u8 {
+   Bool;
+   Signed;
+   Unsigned;
+   Float;
+}
+
+NumericInfo :: struct {
+   kind:       NumericKind;
+   bitSize:    int; // of a single component. 0 for bool since spirv bool has no bit size.
+   components: int; // 1 for scalars.
+}
+
+NumericTypeEntry :: struct {
+   type: Type;
+   using info: NumericInfo;
+}
+
+NUMERIC_TYPES :: NumericTypeEntry.[
+   .{ bool,  .{ .Bool,     0,  1 } },
+   .{ bool2, .{ .Bool,     0,  2 } },
+   .{ bool3, .{ .Bool,     0,  3 } },
+   .{ bool4, .{ .Bool,     0,  4 } },
+   .{ u8,    .{ .Unsigned, 8,  1 } },
+   .{ u8x2,  .{ .Unsigned, 8,  2 } },
+   .{ u8x3,  .{ .Unsigned, 8,  3 } },
+   .{ u8x4,  .{ .Unsigned, 8,  4 } },
+   .{ s32,   .{ .Signed,   32, 1 } },
+   .{ s32x2, .{ .Signed,   32, 2 } },
+   .{ s32x3, .{ .Signed,   32, 3 } },
+   .{ s32x4, .{ .Signed,   32, 4 } },
+   .{ u32,   .{ .Unsigned, 32, 1 } },
+   .{ u32x2, .{ .Unsigned, 32, 2 } },
+   .{ u32x3, .{ .Unsigned, 32, 3 } },
+   .{ u32x4, .{ .Unsigned, 32, 4 } },
+   .{ s64,   .{ .Signed,   64, 1 } },
+   .{ s64x2, .{ .Signed,   64, 2 } },
+   .{ s64x3, .{ .Signed,   64, 3 } },
+   .{ s64x4, .{ .Signed,   64, 4 } },
+   .{ u64,   .{ .Unsigned, 64, 1 } },
+   .{ u64x2, .{ .Unsigned, 64, 2 } },
+   .{ u64x3, .{ .Unsigned, 64, 3 } },
+   .{ u64x4, .{ .Unsigned, 64, 4 } },
+   .{ f32,   .{ .Float,    32, 1 } },
+   .{ f32x2, .{ .Float,    32, 2 } },
+   .{ f32x3, .{ .Float,    32, 3 } },
+   .{ f32x4, .{ .Float,    32, 4 } },
+];
+
+// returns false if type is not a builtin scalar or vector
+GetNumericInfo :: (type: *Type_Info) -> NumericInfo, bool {
+   for NUMERIC_TYPES {
+      if (CompareType(type, cast(*Type_Info) it.type)) return it.info, true;
+   }
+
+   return .{}, false;
+}
+
+// returns null if there is no builtin scalar or vector with that shape. (for example there is no s8 or f64)
+GetNumericType :: (kind: NumericKind, bitSize: int, components: int) -> *Type_Info {
+   for NUMERIC_TYPES {
+      if (it.kind == kind && it.bitSize == bitSize && it.components == components) return cast(*Type_Info) it.type;
+   }
+
+   return null;
+}
+
+GetNumericType :: (info: NumericInfo) -> *Type_Info {
+   return GetNumericType(info.kind, info.bitSize, info.components);
+}
+
+IsNumericVector :: (type: *Type_Info) -> bool {
+   info, ok := GetNumericInfo(type);
+   return ok && info.components > 1;
+}
+
 // this code (and other codes) would have been a lot cleaner if i were to have proper vector types.
 //
 // "spirvType" is always castTo. better remove it      - apila, 06/06/26
@@ -8339,164 +7973,64 @@ DoCast :: (data: *CompilationData, b: *BuilderType, castTo: *Type_Info, castFrom
    // then it would have been a lot easier, but as you know defining vectors as arrays has its own downsides, so idk man.
    //       - apila, 06/06/26
 
-   #if false {
-   } else if (CompareType(castFrom, cast(*Type_Info) s32)   ||
-              CompareType(castFrom, cast(*Type_Info) s32x2) ||
-              CompareType(castFrom, cast(*Type_Info) s32x3) ||
-              CompareType(castFrom, cast(*Type_Info) s32x4) ||
-              CompareType(castFrom, cast(*Type_Info) s64)   ||
-              CompareType(castFrom, cast(*Type_Info) s64x2) ||
-              CompareType(castFrom, cast(*Type_Info) s64x3) ||
-              CompareType(castFrom, cast(*Type_Info) s64x4)) {
-      if (IsIntScalarOrVector(castTo)) {
-         // signed int to int
+   fromInfo, fromIsNumeric := GetNumericInfo(castFrom);
+   fromIsInt := fromIsNumeric && (fromInfo.kind == .Signed || fromInfo.kind == .Unsigned);
+   assert(fromIsInt, "not yet implemented! castFrom: %, loc: %", castFrom.*, GetLocationString(node));
 
-         sizeCastType: *Type_Info;
-         castToSignedness := GetScalarOrVectorIntSignedness(castTo);
-         if (castToSignedness == .Signed) {
-            sizeCastType = castTo;
-         }  else {
-            #if false {}
-            else if (CompareType(castTo, cast(*Type_Info) u32))    sizeCastType = cast(*Type_Info) s32;
-            else if (CompareType(castTo, cast(*Type_Info) u32x2))  sizeCastType = cast(*Type_Info) s32x2;
-            else if (CompareType(castTo, cast(*Type_Info) u32x3))  sizeCastType = cast(*Type_Info) s32x3;
-            else if (CompareType(castTo, cast(*Type_Info) u32x4))  sizeCastType = cast(*Type_Info) s32x4;
-            else if (CompareType(castTo, cast(*Type_Info) u64))    sizeCastType = cast(*Type_Info) s64;
-            else if (CompareType(castTo, cast(*Type_Info) u64x2))  sizeCastType = cast(*Type_Info) s64x2;
-            else if (CompareType(castTo, cast(*Type_Info) u64x3))  sizeCastType = cast(*Type_Info) s64x3;
-            else if (CompareType(castTo, cast(*Type_Info) u64x4))  sizeCastType = cast(*Type_Info) s64x4;
-            else assert(false, "not yet implemented!");
-         }
+   if (IsIntScalarOrVector(castTo)) {
+      // int to int
+      toInfo, toIsNumeric := GetNumericInfo(castTo);
+      assert(toIsNumeric, "not yet implemented! castTo: %, loc: %", castTo.*, GetLocationString(node));
 
-         sizeCastSSAId: SSAId;
-         if (!CompareType(castFrom, sizeCastType)) {
-            sizeCastSSAId = GetNextSSAId(data);
-            WriteSingleInstructionIfReachable(
-               b,
-               *data.isBlockReachable,
-               .SConvert,
-               GetSSAId(data, .{ type = ._Type, _type = sizeCastType }),
-               sizeCastSSAId,
-               expressionSSAId
-            );
-         } else {
-            sizeCastSSAId = expressionSSAId;
-         }
+      sizeCastType := GetNumericType(fromInfo.kind, toInfo.bitSize, toInfo.components);
+      assert(sizeCastType != null, "not yet implemented!");
 
-         resultSSAId: SSAId;
-         if (castToSignedness != .Signed) {
-            resultSSAId = GetNextSSAId(data);
-            WriteSingleInstructionIfReachable(
-               b,
-               *data.isBlockReachable,
-               .Bitcast,
-               GetSSAId(data, .{ type = ._Type, _type = castTo }),
-               resultSSAId,
-               sizeCastSSAId
-            );
-         } else {
-            resultSSAId = sizeCastSSAId;
-         }
-
-         return resultSSAId;
-      } else {
-         // signed int to float
-         assert(IsFloatScalarOrVector(castTo));
-
-         resultSSAId := GetNextSSAId(data);
+      sizeCastSSAId: SSAId;
+      if (!CompareType(castFrom, sizeCastType)) {
+         sizeCastSSAId = GetNextSSAId(data);
          WriteSingleInstructionIfReachable(
             b,
             *data.isBlockReachable,
-            .ConvertSToF,
-            GetSSAId(data, .{ type = ._Type, _type = castTo }),
-            resultSSAId,
+            ifx fromInfo.kind == .Signed then SpvOp.SConvert else SpvOp.UConvert,
+            GetSSAId(data, .{ type = ._Type, _type = sizeCastType }),
+            sizeCastSSAId,
             expressionSSAId
          );
-
-         return resultSSAId;
-      }
-   } else if (CompareType(castFrom, cast(*Type_Info) u8)    ||
-              CompareType(castFrom, cast(*Type_Info) u8x2)  ||
-              CompareType(castFrom, cast(*Type_Info) u8x3)  ||
-              CompareType(castFrom, cast(*Type_Info) u8x4)  ||
-              CompareType(castFrom, cast(*Type_Info) u32)   ||
-              CompareType(castFrom, cast(*Type_Info) u32x2) ||
-              CompareType(castFrom, cast(*Type_Info) u32x3) ||
-              CompareType(castFrom, cast(*Type_Info) u32x4) ||
-              CompareType(castFrom, cast(*Type_Info) u64)   ||
-              CompareType(castFrom, cast(*Type_Info) u64x2) ||
-              CompareType(castFrom, cast(*Type_Info) u64x3) ||
-              CompareType(castFrom, cast(*Type_Info) u64x4)) {
-      if (IsIntScalarOrVector(castTo)) {
-         // unsigned int to int
-
-         castToSignedness := GetScalarOrVectorIntSignedness(castTo);
-         sizeCastType: *Type_Info;
-         if (castToSignedness == .Unsigned) {
-            sizeCastType = castTo;
-         }  else {
-            #if false {}
-            else if (CompareType(castTo, cast(*Type_Info) s32))    sizeCastType = cast(*Type_Info) u32;
-            else if (CompareType(castTo, cast(*Type_Info) s32x2))  sizeCastType = cast(*Type_Info) u32x2;
-            else if (CompareType(castTo, cast(*Type_Info) s32x3))  sizeCastType = cast(*Type_Info) u32x3;
-            else if (CompareType(castTo, cast(*Type_Info) s32x4))  sizeCastType = cast(*Type_Info) u32x4;
-            else if (CompareType(castTo, cast(*Type_Info) s64))    sizeCastType = cast(*Type_Info) u64;
-            else if (CompareType(castTo, cast(*Type_Info) s64x2))  sizeCastType = cast(*Type_Info) u64x2;
-            else if (CompareType(castTo, cast(*Type_Info) s64x3))  sizeCastType = cast(*Type_Info) u64x3;
-            else if (CompareType(castTo, cast(*Type_Info) s64x4))  sizeCastType = cast(*Type_Info) u64x4;
-            else assert(false, "not yet implemented!");
-         }
-
-         sizeCastSSAId: SSAId;
-         if (!CompareType(castFrom, sizeCastType)) {
-            sizeCastSSAId = GetNextSSAId(data);
-            WriteSingleInstructionIfReachable(
-               b,
-               *data.isBlockReachable,
-               .UConvert,
-               GetSSAId(data, .{ type = ._Type, _type = sizeCastType }),
-               sizeCastSSAId,
-               expressionSSAId
-            );
-         } else {
-            sizeCastSSAId = expressionSSAId;
-         }
-
-         resultSSAId: SSAId;
-         if (castToSignedness != .Unsigned) {
-            resultSSAId = GetNextSSAId(data);
-            WriteSingleInstructionIfReachable(
-               b,
-               *data.isBlockReachable,
-               .Bitcast,
-               GetSSAId(data, .{ type = ._Type, _type = castTo }),
-               resultSSAId,
-               sizeCastSSAId
-            );
-         } else {
-            resultSSAId = sizeCastSSAId;
-         }
-
-         return resultSSAId;
       } else {
-         // unsigned int to float
-         assert(IsFloatScalarOrVector(castTo));
+         sizeCastSSAId = expressionSSAId;
+      }
 
-         resultSSAId := GetNextSSAId(data);
+      resultSSAId: SSAId;
+      if (toInfo.kind != fromInfo.kind) {
+         resultSSAId = GetNextSSAId(data);
          WriteSingleInstructionIfReachable(
             b,
             *data.isBlockReachable,
-            .ConvertUToF,
+            .Bitcast,
             GetSSAId(data, .{ type = ._Type, _type = castTo }),
             resultSSAId,
-            expressionSSAId
+            sizeCastSSAId
          );
-
-         return resultSSAId;
+      } else {
+         resultSSAId = sizeCastSSAId;
       }
+
+      return resultSSAId;
    } else {
-      assert(false, "not yet implemented! castFrom: %, loc: %", castFrom.*, GetLocationString(node));
-      return 0;
+      // int to float
+      assert(IsFloatScalarOrVector(castTo));
+
+      resultSSAId := GetNextSSAId(data);
+      WriteSingleInstructionIfReachable(
+         b,
+         *data.isBlockReachable,
+         ifx fromInfo.kind == .Signed then SpvOp.ConvertSToF else SpvOp.ConvertUToF,
+         GetSSAId(data, .{ type = ._Type, _type = castTo }),
+         resultSSAId,
+         expressionSSAId
+      );
+
+      return resultSSAId;
    }
 }
 
@@ -8513,53 +8047,27 @@ DoBinaryArithmetic :: (data: *CompilationData, b: *BuilderType, leftType: *Type_
       if (spirvType != null) spirvType.* = type;
 
       typeIdentifier: Identifier = .{ type = ._Type, _type = type };
-      if (CompareType(type, cast(*Type_Info) f32)   ||
-          CompareType(type, cast(*Type_Info) f32x2) ||
-          CompareType(type, cast(*Type_Info) f32x3) ||
-          CompareType(type, cast(*Type_Info) f32x4)) {
-         op := GetFloatOpFromOperatorType(operatorType);
-         WriteSingleInstructionIfReachable(
-            b,
-            *data.isBlockReachable,
-            op,
-            GetSSAId(data, typeIdentifier),
-            resultSSAId,
-            leftId,
-            rightId
-         );
-      } else if (CompareType(type, cast(*Type_Info) u8)    ||
-                 CompareType(type, cast(*Type_Info) u8x2)  ||
-                 CompareType(type, cast(*Type_Info) u8x3)  ||
-                 CompareType(type, cast(*Type_Info) u8x4)  ||
-                 CompareType(type, cast(*Type_Info) s32)   ||
-                 CompareType(type, cast(*Type_Info) s32x2) ||
-                 CompareType(type, cast(*Type_Info) s32x3) ||
-                 CompareType(type, cast(*Type_Info) s32x4) ||
-                 CompareType(type, cast(*Type_Info) u32)   ||
-                 CompareType(type, cast(*Type_Info) u32x2) ||
-                 CompareType(type, cast(*Type_Info) u32x3) ||
-                 CompareType(type, cast(*Type_Info) u32x4) ||
-                 CompareType(type, cast(*Type_Info) s64)   ||
-                 CompareType(type, cast(*Type_Info) s64x2) ||
-                 CompareType(type, cast(*Type_Info) s64x3) ||
-                 CompareType(type, cast(*Type_Info) s64x4) ||
-                 CompareType(type, cast(*Type_Info) u64)   ||
-                 CompareType(type, cast(*Type_Info) u64x2) ||
-                 CompareType(type, cast(*Type_Info) u64x3) ||
-                 CompareType(type, cast(*Type_Info) u64x4)) {
-         op := GetIntegerOpFromOperatorType(operatorType);
-         WriteSingleInstructionIfReachable(
-            b,
-            *data.isBlockReachable,
-            op,
-            GetSSAId(data, typeIdentifier),
-            resultSSAId,
-            leftId,
-            rightId
-         );
+      info, isNumeric := GetNumericInfo(type);
+
+      op: SpvOp;
+      #if false {
+      } else if (isNumeric && info.kind == .Float) {
+         op = GetFloatOpFromOperatorType(operatorType);
+      } else if (isNumeric && (info.kind == .Signed || info.kind == .Unsigned)) {
+         op = GetIntegerOpFromOperatorType(operatorType);
       } else {
          assert(false, "not implemented yet! type: %\n", type.*);
       }
+
+      WriteSingleInstructionIfReachable(
+         b,
+         *data.isBlockReachable,
+         op,
+         GetSSAId(data, typeIdentifier),
+         resultSSAId,
+         leftId,
+         rightId
+      );
    } else {
       // either need to broadcast from scalar to vector type
       // or if it is multiplication there are specific instructions for the multiplication. i should use them.
@@ -8979,29 +8487,7 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          //
          // since i dont have a proper vector type, i have to manually check, again.
          //          - apila, 07/06/26
-         if (  isLocalDeclaration                           &&
-               type.type == .STRUCT                         &&
-               !CompareType(type, cast(*Type_Info) bool2)   &&
-               !CompareType(type, cast(*Type_Info) bool3)   &&
-               !CompareType(type, cast(*Type_Info) bool4)   &&
-               !CompareType(type, cast(*Type_Info) u8x2)    &&
-               !CompareType(type, cast(*Type_Info) u8x3)    &&
-               !CompareType(type, cast(*Type_Info) u8x4)    &&
-               !CompareType(type, cast(*Type_Info) s32x2)   &&
-               !CompareType(type, cast(*Type_Info) s32x3)   &&
-               !CompareType(type, cast(*Type_Info) s32x4)   &&
-               !CompareType(type, cast(*Type_Info) u32x2)   &&
-               !CompareType(type, cast(*Type_Info) u32x3)   &&
-               !CompareType(type, cast(*Type_Info) u32x4)   &&
-               !CompareType(type, cast(*Type_Info) s64x2)   &&
-               !CompareType(type, cast(*Type_Info) s64x3)   &&
-               !CompareType(type, cast(*Type_Info) s64x4)   &&
-               !CompareType(type, cast(*Type_Info) u64x2)   &&
-               !CompareType(type, cast(*Type_Info) u64x3)   &&
-               !CompareType(type, cast(*Type_Info) u64x4)   &&
-               !CompareType(type, cast(*Type_Info) f32x2)   &&
-               !CompareType(type, cast(*Type_Info) f32x3)   &&
-               !CompareType(type, cast(*Type_Info) f32x4)) {
+         if (isLocalDeclaration && type.type == .STRUCT && !IsNumericVector(type)) {
             newType := New(TypeInfoDecorationlessCopyOfStruct);
             newType.runtime_size = type.runtime_size;
             newType.copyOf = xx type;

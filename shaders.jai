@@ -2501,6 +2501,15 @@ TestBoolLocals :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    if d  data.i = 3;
 } @mesh @1_1_1 @1_1 @triangles
 
+TestHelperVoid :: (data: *TestData, value: s32) {
+   data.i = value;
+}
+
+TestHelperVoidEarlyReturn :: (data: *TestData) {
+   if (data.i < 0) return;
+   data.i = 0;
+}
+
 TestHelperAdd :: (a: f32, b: f32) -> f32 {
    return a + b;
 }
@@ -2535,6 +2544,8 @@ TestHelperLoop :: (n: s32) -> s32 {
 
 TestFunctionCalls :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    data.i = TestHelperPointer(data);
+   TestHelperVoid(data, 3);
+   TestHelperVoidEarlyReturn(data);
    data.f = TestHelperAdd(data.f, 1);
    data.v3 = TestHelperVector(data.v3, 2);
    data.f = TestHelperNested(1, 2);
@@ -2719,14 +2730,6 @@ FailNestedUntypedLiteralWithRuntimeValues :: (o: [] TestOut, p: [] TestPrim, dat
 FailStoreLocalStructToBuffer :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    s := data.inner[0];
    data.inner[1] = s;
-} @mesh @1_1_1 @1_1 @triangles
-
-// "not yet implemented! if it is a variant then idk. type: {VOID, 0}"
-FailVoidHelper :: (data: *TestData) {
-   data.i = 1;
-}
-FailCallVoidHelper :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
-   FailVoidHelper(data);
 } @mesh @1_1_1 @1_1 @triangles
 
 // spirv-val: "Instruction may not have a logical pointer operand". a pointer to a Function variable is stored in a variable.
