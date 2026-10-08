@@ -3277,6 +3277,642 @@ TestRmissBuiltins :: (data: *TestRayBuiltinsData) {
    payload.hit = false;
 } @rmiss
 
+// integer switches become an OpSwitch, #through is its fallthrough
+TestSwitchInt :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   r: s32;
+   if data.i == {
+      case 1;  r = 10;
+      case 2;  #through;
+      case 3;  r += 20;
+      case -4; r = 5;
+      case;    r = 30;
+   }
+
+   // the default doesnt have to be the last case
+   if data.u == {
+      case 0; r += 1;
+      case;   r += 2; #through;
+      case 7; r += 3;
+   }
+
+   big: s64 = xx data.i;
+   if big == {
+      case 0x1_0000_0000; r += 8;
+      case -1;            r += 9;
+   }
+
+   // break and continue are for the loop
+   for 0..3 {
+      if it == {
+         case 1; continue;
+         case 2; break;
+      }
+      r += 1;
+   }
+
+   data.i = r;
+} @mesh @1_1_1 @1_1 @triangles
+
+// floats and bools cant be the selector of OpSwitch. the index of the case is selected and switched on instead
+TestSwitchFloatBool :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   r: s32;
+   if data.f == {
+      case 1.5; r += 4;
+      case 2;   r += 5;
+      case;     r += 6;
+   }
+
+   b := data.i > 3;
+   if b == {
+      case true; r += 7;
+   }
+
+   data.i = r;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestMode  :: enum s32 { A; B :: 5; C; }
+TestFlags :: enum_flags u32 { X; Y; Z; }
+TestSmall :: enum u8 { P; Q; }
+
+TestEnumData :: struct {
+   i:     s32;
+   u:     u32;
+   mode:  TestMode;
+   flags: TestFlags;
+   small: TestSmall;
+}
+
+TestEnumDefaults :: struct {
+   mode:  TestMode = .C;
+   flags: TestFlags = .X | .Z;
+}
+
+TestPickMode :: (m: TestMode) -> s32 {
+   if m == .B return 1;
+   return 2;
+}
+
+// an enum is its integer type. its values are constants
+TestEnum :: (o: [] TestOut, p: [] TestPrim, data: *TestEnumData) {
+   m := data.mode;
+   r: s32;
+   if m == {
+      case .A;        r = 1;
+      case .B;        r = 2;
+      case TestMode.C; r = 3;
+   }
+   if m == .C        r += 1;
+   if m != TestMode.A r += 2;
+   data.mode = .C;
+
+   f := TestFlags.X | .Z;
+   f |= .Y;
+   if f & .Y  r += 4;   // jai casts the condition to bool
+   data.flags = f;
+
+   d: TestEnumDefaults;
+   data.i = r + cast(s32) m + TestPickMode(.B) + cast(s32) d.mode;
+   data.small = .Q;
+   data.u = (cast(u32) data.flags) | (cast(u32) d.flags);
+} @mesh @1_1_1 @1_1 @triangles
+
+// casts to bool are comparisons with zero (or null), casts from bool select 1 or 0
+TestBoolCasts :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   r: s32;
+   if cast(bool) data.i      r += 1;
+   if cast(bool) data.f      r += 2;
+   if cast(bool) data.ints   r += 4;
+   b := data.u > 3;
+   r += cast(s32) b;
+   data.f = cast(f32) b;
+   data.u = cast(u32) (data.i == 2);
+   data.i = r;
+} @mesh @1_1_1 @1_1 @triangles
+
+TEST_N       :: 4 * 2;
+TEST_M       :: TEST_N + 1;
+TEST_F       :: 1.5 * 2;
+TEST_MASK    : u32 : 0xFFFF_FFFF;
+TEST_NEG     :: -TEST_N;
+TEST_SHIFTED :: 1 << 40;
+TEST_HALF    :: 1.0 / TEST_N;
+TEST_COLOR   :: f32x3.{ TEST_N, TEST_F, TEST_HALF };
+TEST_IS_BIG  :: TEST_N > 5 && TEST_F < 4;
+
+TestConstantDefaults :: struct {
+   a: s32 = TEST_N * 3;
+   b: f32 = TEST_F / 2;
+   c: u32 = ~cast(u32) 0;
+}
+
+// the jai compiler doesnt fold constant expressions, the backend evaluates them so they become spirv constants
+TestConstantExpressions :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   L :: 7 << 2;
+   data.i = TEST_N + TEST_M + L + TEST_NEG;
+   data.f = TEST_F + TEST_HALF;
+   data.u = TEST_MASK ^ (TEST_MASK >> 4);
+   big: u64 = TEST_SHIFTED;
+   data.bytes[0] = cast,trunc(u8) 300;
+   data.v3 = TEST_COLOR;
+   data.v3 = f32x3.{ TEST_N, TEST_M, L };
+   if TEST_IS_BIG  data.i += size_of(TestData);
+
+   if data.i == {
+      case TEST_M - 1; data.i += 1;
+      case L;          data.i += 2;
+   }
+
+   d: TestConstantDefaults;
+   data.i += d.a + cast(s32) d.c;
+   data.f += d.b * cast(f32) TEST_N;
+   x: s32 = xx (size_of(f32x4) / 4);
+   data.i += x / TEST_N;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestDeferHelper :: (data: *TestData) -> s32 {
+   r: s32 = 1;
+   defer data.i += r;
+   if data.f > 0 return r * 2;   // the value is evaluated before the defers run
+   r = 5;
+   return r;
+}
+
+TestDeferMacro :: (data: *TestData) #expand {
+   defer data.i += 1000;    // when the macro ends
+   `defer data.i += 2000;   // when the scope the macro is called from ends
+   data.i += 1;
+}
+
+TestDeferMacroEarlyReturn :: (data: *TestData) -> s32 #expand {
+   defer data.i += 3;
+   if data.f > 1 return 7;
+   return 9;
+}
+
+// a deferred block is generated at every exit of its scope: the end of the block, return, break and continue
+TestDefer :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   defer data.i *= 2;
+   {
+      defer data.i += 7;
+      data.i += 1;
+   }
+
+   for 0..3 {
+      defer data.ints[it] = 1;
+      tmp := it * 2;
+      defer { t2 := tmp; data.f += cast(f32) t2; }   // declared once even though it is generated three times
+      if it == 1 continue;
+      if it == 2 break;
+      data.i += 1;
+   }
+
+   x := TestDeferHelper(data);
+   TestDeferMacro(data);
+   y := TestDeferMacroEarlyReturn(data);
+
+   // #if is not a scope, this is run at the end of the shader
+   #if true {
+      defer data.i += 11;
+   }
+
+   data.i += x + y;
+   if data.i > 100 return;
+   data.i -= 1;
+} @mesh @1_1_1 @1_1 @triangles
+
+// a return from a ray tracing shader
+TestRgenEarlyReturn :: (data: *TestRayBuiltinsData) {
+   defer data.uints[1] = 2;
+   if launchid.x > 4 return;
+   data.uints[0] = launchid.y;
+} @rgen
+
+// spirv can only break out of the innermost loop. exits to outer loops are stored in a variable and done one loop at a time (see GenerateLoopExit)
+TestLabeledBreakContinue :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   for i: 0..3 {
+      defer data.f += 1;
+      for j: 0..3 {
+         for k: 0..3 {
+            if k == 1 continue j;
+            if k == 2 break i;
+            if j == 3 continue i;
+            data.ints[k] = xx (i + j + k);
+         }
+         data.i += 1;
+      }
+      data.i += 2;
+   }
+
+   n: s32 = 0;
+   while n < 10 {
+      for 0..3 {
+         if it == data.i  break;   // the innermost loop
+         if it == 2       continue;
+         n += 1;
+      }
+      n += 1;
+   }
+   data.i = n;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestMacroReturnInLoop :: (x: s32) -> s32 #expand {
+   i: s32 = 0;
+   while (i < 10) {
+      if (i == x) return i;
+      i += 1;
+   }
+   return -1;
+}
+
+TestMacroReturnInNestedLoops :: (data: *TestData, x: s32) -> s32 #expand {
+   for i: 0..3 {
+      for j: 0..3 {
+         defer data.f += 1;
+         if data.ints[i * 4 + j] == x return xx (i * 4 + j);
+      }
+   }
+   return -1;
+}
+
+// a macro with a return in a loop is a loop that is exited from inside the loop
+TestMacroReturnFromLoop :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = TestMacroReturnInLoop(data.i);
+   for 0..2  data.i += TestMacroReturnInNestedLoops(data, xx it);
+} @mesh @1_1_1 @1_1 @triangles
+
+TestTwoValues :: (x: s32) -> s32, f32 {
+   if x > 3 return x * 2, 1.5;
+   return x, 2.0;
+}
+
+TestThreeValues :: (x: s32) -> count: s32, inner: TestInner, p: *s32 {
+   inner: TestInner;
+   inner.indices.x = x;
+   return x + 1, inner, null;
+}
+
+TestNamedArguments :: (a: s32, b: s32 = 7, c: f32 = 1) -> s32 {
+   return a + b + cast(s32) c;
+}
+
+// a procedure with more than one return value returns a struct of them
+TestMultipleReturnValues :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a, b := TestTwoValues(data.i);
+   c, inner, pointer := TestThreeValues(a);
+   data.inner.* = inner;
+   data.i = TestTwoValues(c);   // the first value
+   data.f = b;
+
+   u, v := 1, 2.0;
+   w, z : s32 = 3, 4;
+   data.i, data.f = TestTwoValues(w + z);
+   w, z = z, w;   // the values are evaluated before they are stored
+   data.v2.x, data.v2.y = data.v2.y, data.v2.x;
+
+   e, f : s32;
+   data.i += TestNamedArguments(1) + TestNamedArguments(1, c = 3) + TestNamedArguments(b = 2, a = w) + e + f + z;
+   data.f += v + cast(f32) u;
+   if pointer == null  data.i += 1;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestMakeInner :: (x: s32) -> TestInner {
+   inner: TestInner;
+   inner.indices.y = x;
+   return inner;
+}
+
+TestGetInts :: (data: *TestData) -> *s32 {
+   return data.ints;
+}
+
+// a returned struct is converted to the decorationless copy of it when it is stored in a local variable. a returned pointer is PhysicalStorageBuffer
+TestStructAndPointerReturns :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   inner := TestMakeInner(3);
+   data.inner.* = TestMakeInner(4);
+   data.i = TestMakeInner(5).indices.y + inner.indices.y;
+
+   ints := TestGetInts(data);
+   ints.* = 7;
+   if ints != data.ints  data.i = 0;
+   if data.inner != null data.inner.value = 1;
+   data.ints = null;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestSum   :: (a: $T, b: T) -> T { return a + b; }
+TestTwice :: (x: $T) -> T { return x * 2; }
+
+// the compiler gives the polymorphed procedures and the code #insert inserts
+TestPolymorphicAndInsert :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = TestSum(data.i, 3);
+   data.f = TestSum(data.f, 1.5);
+   data.v3 = TestSum(data.v3, data.v3);
+   data.f += TestTwice(data.f);
+   #insert "data.i += 5;";
+   #insert -> string { return "data.f += 2;"; };
+} @mesh @1_1_1 @1_1 @triangles
+
+TestRange :: struct { from: s32; to: s32; }
+
+for_expansion :: (r: TestRange, body: Code, flags: For_Flags) #expand {
+   i := r.from;
+   while i < r.to {
+      defer i += 1;
+      `it := i;
+      `it_index := i - r.from;
+      #insert(break=break) body;
+   }
+}
+
+// the compiler gives the expansion of for_expansion with the body inserted. a local type declaration is not a value
+TestForExpansion :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   Local :: struct { a: s32; b: f32; }
+   l: Local;
+   r := TestRange.{ 2, data.i };
+   for r {
+      if it == 5 break;
+      if it == 3 continue;
+      l.a += it * it_index;
+   }
+   data.i = l.a;
+} @mesh @1_1_1 @1_1 @triangles
+
+TEST_TABLE        :: s32.[1, 2, 3, 4];
+TEST_VECTOR_TABLE :: f32x2.[.{ 1, 2 }, .{ 3, 4 }];
+TEST_INNER_TABLE  :: TestInner.[.{ 1, .{ 1, 2, 3 } }, .{ 2, .{ 4, 5, 6 } }];
+
+// constant arrays dont exist in memory, they are put in a variable when they are indexed
+TestArrayLiterals :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = TEST_TABLE[data.i] + TEST_TABLE[2] + TEST_TABLE.count;
+   data.f = TEST_VECTOR_TABLE[data.i].y + TEST_INNER_TABLE[data.i].value;
+   for TEST_TABLE  data.i += it;
+
+   a := s32.[1, 2, data.i];
+   a[data.i] = 3;
+   b: [3] s32 = .[4, 5, 6];
+   data.i += a[1] + b[data.i] + a.count;
+
+   data.i += TestMakeInner(4).indices.y + (cast(*TestInner) data.ints).*.indices.x;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestUsingBase :: struct {
+   COUNT :: 4;   // a constant is not in memory, it is not a member of the spirv struct
+   id:  s32;
+   pos: f32x3;
+}
+
+TestUsingMid :: struct {
+   using base: TestUsingBase;
+   scale: f32;
+}
+
+TestUsingData :: struct {
+   i:   s32;
+   f:   f32;
+   mid: TestUsingMid;
+}
+
+// a member of a member that is marked with using is accessed through it. using statements bring the members in scope
+TestUsing :: (o: [] TestOut, p: [] TestPrim, data: *TestUsingData) {
+   m: TestUsingMid;
+   m.id = 3;
+   m.pos.y = 2;
+   data.mid = m;
+   data.i = data.mid.id + m.base.id + TestUsingBase.COUNT + m.COUNT;
+
+   using data;
+   i += 5;
+   f = cast(f32) i;
+   {
+      using mid;
+      id = 3;
+      scale = 2;
+      pos.x = 1;
+   }
+
+   using local: TestUsingMid;
+   scale = 6;
+   id = i + 1;
+   mid = local;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestForPointerData :: struct {
+   i:      s32;
+   arr:    [4] s32;
+   inners: [] TestInner;
+}
+
+TestTouchInner :: (inner: *TestInner) { inner.value += 1; }
+
+// it of a for * loop is the address of the element, it is not a variable (a pointer to a local variable cant be stored in spirv)
+TestForPointer :: (o: [] TestOut, p: [] TestPrim, data: *TestForPointerData) {
+   for * data.inners {
+      it.value = 3;
+      it.indices.x += xx it_index;
+      TestTouchInner(it);   // a pointer to buffer memory can be passed
+   }
+   for * data.arr  it.* += 2;
+
+   local: [4] TestInner;
+   for * local {
+      it.value = xx it_index;
+      it.* = it.*;
+   }
+
+   locals: [3] s32;
+   for * locals      it.* = 5;
+   for < * locals    data.i += it.*;
+   data.i += local[1].indices.x + locals[2];
+} @mesh @1_1_1 @1_1 @triangles
+
+TestComputeData :: struct {
+   count:  u32;
+   values: *f32;
+   ids:    *u32x3;
+   sum:    u32;
+   big:    s64;
+   small:  s32;
+}
+
+// the workgroup size note is like the one of mesh shaders. the builtins are only declared if they are used
+TestCompute :: (data: *TestComputeData) {
+   index := globalinvocationid.x;
+   if index >= data.count return;
+   data.values[index] *= 2;
+   data.ids[localinvocationindex] = workgroupid + localinvocationid + numworkgroups;
+} @compute @64
+
+// workgroup variables are shared by the invocations of a workgroup. they are not initialized
+TestComputeWorkgroup :: (data: *TestComputeData) {
+   cache: [64] f32; @workgroup
+   counter: u32; @workgroup
+
+   cache[localinvocationindex] = data.values[globalinvocationid.x];
+   if localinvocationindex == 0  counter = 0;
+   Barrier();
+
+   AtomicAdd(*counter, 1);
+   Barrier();
+
+   if localinvocationindex == 0 {
+      total: f32 = 0;
+      for cache  total += it;
+      old := AtomicAdd(*data.sum, cast(u32) total);
+      AtomicMax(*data.big, 5);
+      AtomicMin(*data.small, -3);
+      AtomicOr(*data.sum, 0x10);
+      AtomicCompareExchange(*data.sum, old, counter);
+      AtomicExchange(*counter, 7);
+   }
+} @compute @8_8
+
+// mesh shaders have workgroups too
+TestMeshWorkgroup :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   shared: [32] s32; @workgroup
+   shared[localinvocationindex] = data.ints[globalinvocationid.x];
+   Barrier();
+   data.i = shared[(localinvocationindex + 1) % 32];
+} @mesh @32_1_1 @1_1 @triangles
+
+TestIntrinsicData :: struct {
+   f:  f32;
+   v2: f32x2;
+   v3: f32x3;
+   v4: f32x4;
+   i:  s32;
+   u:  u32;
+   iv: s32x3;
+   uv: u32x2;
+   m2: mat2;
+   m3: mat3;
+   m4: mat4;
+}
+
+// the math intrinsics have the names of hlsl. every overload of them
+TestHlslIntrinsics :: (data: *TestIntrinsicData) {
+   f := data.f;
+   v3 := data.v3;
+   v4 := data.v4;
+
+   data.f = sin(f) + cos(f) + tan(f) + asin(f) + acos(f) + atan(f) + atan2(f, 2) + sqrt(f) + rsqrt(f) + pow(f, 2);
+   data.f += exp(f) + exp2(f) + log(f) + log2(f) + abs(f) + sign(f) + floor(f) + ceil(f) + round(f) + trunc(f) + frac(f);
+   data.f += min(f, 1) + max(f, 2) + clamp(f, 0, 1) + saturate(f) + lerp(f, 2, 0.5) + step(0.5, f) + smoothstep(0, 1, f);
+
+   // a scalar given to a vector parameter is made a vector (clamp(v, 0, 1))
+   data.v3 = sin(v3) + abs(v3) + min(v3, v3) + clamp(v3, 0, 1) + clamp(v3, v3, v3) + saturate(v3) + lerp(v3, v3, 0.5) + step(0.5, v3) + smoothstep(0, 1, v3);
+
+   data.f += dot(v3, v3) + length(v3) + distance(v3, v3) + dot(v4, v4) + length(data.v2);
+   data.v3 = cross(v3, v3) + normalize(v3) + reflect(v3, v3) + refract(v3, v3, 1.5);
+
+   data.i = abs(data.i) + sign(data.i) + min(data.i, 3) + max(data.i, 4) + clamp(data.i, 0, 10);
+   data.iv = abs(data.iv) + clamp(data.iv, 0, 5);
+   data.uv = min(data.uv, data.uv) + clamp(data.uv, 1, 2);
+   data.u = max(data.u, 3);
+
+   data.m4 = mul(data.m4, inverse(data.m4));
+   data.m3 = transpose(data.m3);
+   data.f += determinant(data.m2) + determinant(data.m3) + determinant(data.m4);
+   data.v4 = mul(data.m4, v4) + mul(v4, data.m4);   // column vector and row vector
+   data.v2 = mul(data.m2, data.v2);
+} @compute @1
+
+// derivatives only exist in fragment shaders
+TestHlslDerivatives :: (v: TestOut, p: TestPrim, data: *TestIntrinsicData) -> f32x4 {
+   data.f = ddx(data.f) + ddy(data.f) + fwidth(data.f);
+   return fwidth(data.v4) + ddx(data.v4);
+} @fragment
+
+// discard() lets the invocation keep running as a helper (derivatives stay valid). the fragment builtins are only declared if they are used
+TestFragmentDiscardAndBuiltins :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   c := f32x4.{ v.uv.x, v.uv.y, 0, 1 };
+   if c.w < data.f  discard();
+   if !frontfacing  c.x = 1;
+   if helperinvocation  c.y = 0;
+   c.z = fragcoord.x + cast(f32) sampleid;
+   return c;
+} @fragment
+
+TestLinePrimitive :: struct { id: s32; }
+
+// the primitive indices of the topology of the mesh shader: meshpoints, meshlines or meshtriangles
+TestMeshLines :: (o: [] TestOut, p: [] TestLinePrimitive, data: *TestData) {
+   SetMeshOutputs(2, 1);
+   meshvertices[0].position = .{ 0, 0, 0, 1 };
+   meshvertices[1].position = .{ 1, 1, 0, 1 };
+   meshlines[0] = .{ 0, 1 };
+   p[0].id = 3;
+} @mesh @1 @2_1 @lines
+
+TestMeshPoints :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(1, 1);
+   meshvertices[0].position = .{ 0, 0, 0, 1 };
+   meshvertices[0].pointSize = 4;
+   meshpoints[0] = 0;
+} @mesh @1 @1_1 @points
+
+TestTextureData :: struct {
+   image:   s32;
+   depth:   s32;
+   storage: s32;
+   sampler: s32;
+   f:       f32;
+   size:    s32x2;
+   count:   s32;
+}
+
+TestTextureFunctions :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
+   c := texturebias(images[data.image], samplers[data.sampler], v.uv, 0.5);
+   c += texturegrad(images[data.image], samplers[data.sampler], v.uv, ddx(v.uv), ddy(v.uv));
+   c += texturegather(images[data.image], samplers[data.sampler], v.uv, 1);   // the component must be a constant
+   c.x += texturecmp(images[data.depth], samplers[data.sampler], v.uv, 0.5) + texturecmplod(images[data.depth], samplers[data.sampler], v.uv, 0.5, 0);
+   c += texelfetch(images[data.image], .{ 1, 2 }, 0);
+   data.size = texturesize(images[data.image], 0) + ImageSize(images[data.storage]);
+   data.count = texturelevels(images[data.image]) + texelfetchi(images[data.image], data.size, 1).x;
+   c += ImageRead(images[data.storage], data.size);
+   return c;
+} @fragment
+
+TestStorageImageReadWrite :: (data: *TestTextureData) {
+   c := texturegrad(images[data.image], samplers[data.sampler], .{ 0, 0 }, .{ 0, 0 }, .{ 1, 1 });
+   coordinate := s32x2.{ xx globalinvocationid.x, xx globalinvocationid.y };
+   ImageWrite(images[data.storage], coordinate, ImageRead(images[data.storage], coordinate) + c);
+} @compute @8_8
+
+TestSmallAndDoubleData :: struct {
+   a: s8;
+   b: s16;
+   c: u16;
+   d: f64;
+   v: s16x3;
+   w: u16x2;
+   x: f64x4;
+   y: s8x4;
+   f: f32;
+   i: s32;
+}
+
+// s8, s16, u16 and f64 and their vectors. Int16 and Float64 are only declared if they are used
+TestSmallIntegersAndDoubles :: (data: *TestSmallAndDoubleData) {
+   a: s8 = -3;
+   b: s16 = -300;
+   c: u16 = 60000;
+   d: f64 = 1.5;
+
+   data.a = a + data.a;
+   data.b = b * data.b;
+   data.c = c + 1;
+   data.d = d * data.d + 2;
+   data.v = data.v + s16x3.{ 1, -2, 3 };
+   data.w = data.w * 2;
+   data.x = data.x + f64x4.{ 1, 2, 3, 4 };
+   data.y = -data.y;
+
+   data.f = cast(f32) data.d;
+   data.d = cast(f64) data.f;
+   data.i = cast(s32) data.b + cast(s32) data.a + cast(s32) data.c;
+   data.b = cast,trunc(s16) data.i;
+   if data.x.y > 2  data.d = 0;
+} @compute @1
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.
@@ -3298,20 +3934,53 @@ UnsupportedNestedUntypedLiteralWithRuntimeValues :: (o: [] TestOut, p: [] TestPr
    t := TestInner.{ data.f, .{ data.i, data.i, data.i } };
 } @mesh @1_1_1 @1_1 @triangles
 
-TestMacroReturnInLoop :: (x: s32) -> s32 #expand {
-   i: s32 = 0;
-   while (i < 10) {
-      if (i == x) return i;
-      i += 1;
-   }
-   return -1;
+TEST_RUN :: #run (3 + 4);
+
+// the jai compiler doesnt give the result of #run to the metaprogram.
+// (it does replace the constant with its value when the constant is implicitly converted to a smaller type, data.i = TEST_RUN; works. but that is not something to rely on)
+UnsupportedRunConstant :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   x := TEST_RUN;
+   data.i = xx x;
+} @mesh @1_1_1 @1_1 @triangles
+
+TestUserOperatorStruct :: struct { a: s32; }
+operator + :: (x: TestUserOperatorStruct, y: TestUserOperatorStruct) -> TestUserOperatorStruct { return .{ x.a + y.a }; }
+
+// the jai compiler doesnt tell the metaprogram which operator procedure an operator calls
+UnsupportedUserOperator :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   a, b: TestUserOperatorStruct;
+   c := a + b;
+   data.i = c.a;
+} @mesh @1_1_1 @1_1 @triangles
+
+UnsupportedRecursion :: (x: s32) -> s32 {
+   if x <= 0 return 0;
+   return UnsupportedRecursion(x - 1) + 1;
 }
 
-// returning from a macro from inside a loop would need to break out of more than one loop, which spirv doesnt allow.
-// (it is possible with extra flag variables but it is not implemented)
-UnsupportedMacroReturnInLoop :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
-   data.i = TestMacroReturnInLoop(data.i);
+// spirv doesnt allow recursion
+UnsupportedRecursiveCall :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = UnsupportedRecursion(data.i);
 } @mesh @1_1_1 @1_1 @triangles
+
+UnsupportedUsingParameterHelper :: (using data: *TestData) -> s32 { return i; }
+
+// the jai compiler doesnt mark the parameters that are using, so the members cant be found
+UnsupportedUsingParameter :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   data.i = UnsupportedUsingParameterHelper(data);
+} @mesh @1_1_1 @1_1 @triangles
+
+// spirv doesnt allow a pointer to a local variable to be passed to a procedure
+UnsupportedPointerToLocalPassed :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   local: [4] TestInner;
+   for * local  TestTouchInner(it);
+} @mesh @1_1_1 @1_1 @triangles
+
+// a workgroup variable is shared by all the invocations of the workgroup, they would all initialize it
+UnsupportedWorkgroupInitializer :: (data: *TestComputeData) {
+   counter: u32 = 0; @workgroup
+   AtomicAdd(*counter, 1);
+} @compute @64
 
 // a builtin can only be used in the stages that have it. there is no hit in a miss shader.
 UnsupportedBuiltinInWrongStage :: (data: *TestRayBuiltinsData) {
