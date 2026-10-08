@@ -354,7 +354,7 @@ MATH_INTRINSICS :: MathIntrinsic.[
    .{ "atan",        UNARY_FLOAT, .Atan,        .Bad,    .Bad,    .Nop, false },
    .{ "atan2",       .[.{ "(y: T, x: T) -> T", FLOATS }], .Atan2, .Bad, .Bad, .Nop, false },
    .{ "sqrt",        UNARY_FLOAT, .Sqrt,        .Bad,    .Bad,    .Nop, false },
-   .{ "rsqrt",       UNARY_FLOAT, .InverseSqrt, .Bad,    .Bad,    .Nop, false },
+   .{ "inversesqrt", UNARY_FLOAT, .InverseSqrt, .Bad,    .Bad,    .Nop, false },
    .{ "pow",         BINARY_FLOAT, .Pow,        .Bad,    .Bad,    .Nop, false },
    .{ "exp",         UNARY_FLOAT, .Exp,         .Bad,    .Bad,    .Nop, false },
    .{ "exp2",        UNARY_FLOAT, .Exp2,        .Bad,    .Bad,    .Nop, false },

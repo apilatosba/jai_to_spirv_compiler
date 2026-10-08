@@ -3793,7 +3793,7 @@ TestHlslIntrinsics :: (data: *TestIntrinsicData) {
    v3 := data.v3;
    v4 := data.v4;
 
-   data.f = sin(f) + cos(f) + tan(f) + asin(f) + acos(f) + atan(f) + atan2(f, 2) + sqrt(f) + rsqrt(f) + pow(f, 2);
+   data.f = sin(f) + cos(f) + tan(f) + asin(f) + acos(f) + atan(f) + atan2(f, 2) + sqrt(f) + inversesqrt(f) + pow(f, 2);
    data.f += exp(f) + exp2(f) + log(f) + log2(f) + abs(f) + sign(f) + floor(f) + ceil(f) + round(f) + trunc(f) + frac(f);
    data.f += min(f, 1) + max(f, 2) + clamp(f, 0, 1) + saturate(f) + lerp(f, 2, 0.5) + step(0.5, f) + smoothstep(0, 1, f);
 
