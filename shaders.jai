@@ -3954,6 +3954,25 @@ TestForSemantics :: (o: [] TestOut, p: [] TestPrim, data: *TestLoopSemanticsData
    for < lo..n    { if it == 3 lo = 2; }
 } @mesh @1_1_1 @1_1 @triangles
 
+TestHandle :: #type,isa u32;
+
+TestHashData :: struct {
+   handle: TestHandle;
+   u:      u32;
+   f:      f32;
+}
+
+// constants are compared by their bits (0.0 and -0.0 are different constants, NaN is equal to itself), a variant that is not distinct is its type
+TestConstantBitsAndVariants :: (data: *TestHashData) {
+   h: TestHandle = data.handle;
+   data.u = h + data.u;
+
+   TEST_NAN :: 0h7FC0_0000;
+   zero := -0.0;
+   n: f32 = TEST_NAN;
+   data.f = zero + 0.0 + n + TEST_NAN;
+} @compute @1
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.

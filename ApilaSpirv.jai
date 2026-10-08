@@ -1267,8 +1267,9 @@ Identifier :: struct {
 }
 
 HashType :: (type_: *Type_Info) -> u32 {
-   // must agree with CompareType, which compares an enum as its integer type
-   type := UnwindEnum(type_);
+   // must agree with CompareType: types that are equal must have the same hash.
+   // CompareType unwinds the variants that are not distinct and compares an enum as its integer type.
+   type := UnwindEnum(UnwindVariantsUpToDistinct(type_));
 
    // since an array of pointers is not supported and the notes on the struct members are enough
    // the only thing that remains is TypeInfoPointer. so i dont need to check if a type contains pointer.
@@ -1348,8 +1349,26 @@ HashType :: (type_: *Type_Info) -> u32 {
       }
    }
 
-   // my types doesnt clash with those. so it is enough to use jai pointers (they are deduplicated)
-   return cast,trunc(u32) fnv1a_hash(xx type, size_of(type_of(type)));
+   //
+   // the jai types cant be hashed by their pointers. the same type has different Type_Infos in different workspaces
+   // (u32 of the metaprogram is not the u32 of the shaders), CompareType compares what they are.
+   //
+   hash: u32 = 29;
+   hash = hash * 31 + cast,no_check(u32) type.type;
+   hash = hash * 31 + cast,no_check(u32) type.runtime_size;
+
+   if type.type == {
+      case .INTEGER;
+         hash = hash * 31 + cast(u32) (cast(*Type_Info_Integer) type).signed;
+
+      // compared by their names
+      case .STRUCT;
+         hash = hash * 31 + get_hash((cast(*Type_Info_Struct) type).name);
+      case .VARIANT;
+         hash = hash * 31 + get_hash((cast(*Type_Info_Variant) type).name);
+   }
+
+   return hash;
 }
 
 // cant do "==" anymore even if the types are jai types because they come from different workspaces.
@@ -1515,8 +1534,8 @@ IdentifierHash :: (using identifier: Identifier) -> u32 {
             return get_hash(intLiteral.value._s64);
          }
 
-      case .FloatLiteral; return get_hash(floatLiteral);
-      case .Float64Literal; return get_hash(float64Literal) * 31 + 64;
+      case .FloatLiteral; return get_hash((cast(*u32) *floatLiteral).*);
+      case .Float64Literal; return get_hash((cast(*u64) *float64Literal).*) * 31 + 64;
       case .Function; return get_hash(function);
       case ._Type; return HashType(_type);
       case .Void; return 69; // does the hash matter here?
@@ -1561,8 +1580,9 @@ IdentifierCompare :: (a: Identifier, b: Identifier) -> bool {
          }
 
          return true;
-      case .FloatLiteral; return a.floatLiteral == b.floatLiteral;
-      case .Float64Literal; return a.float64Literal == b.float64Literal;
+      // by their bits, like IdentifierHash. (0.0 == -0.0 but they are different constants, and NaN != NaN)
+      case .FloatLiteral; return (cast(*u32) *a.floatLiteral).* == (cast(*u32) *b.floatLiteral).*;
+      case .Float64Literal; return (cast(*u64) *a.float64Literal).* == (cast(*u64) *b.float64Literal).*;
       case .Function; return a.function == b.function; // if they point to the same code node
       case ._Type;
          return CompareType(a._type, b._type);
