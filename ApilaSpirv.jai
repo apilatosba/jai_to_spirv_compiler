@@ -202,96 +202,111 @@ MESH_PRIMITIVE_INDICES :: MeshPrimitiveIndices.[
 
 #insert #run sprint("% :: (vertexCount: u32, primitiveCount: u32) {} @%", SET_MESH_OUTPUTS_NAME, INTRINSIC_FUNCTION_NOTE_NAME); // SetMeshOutputsEXT
 
-// each texture variant corresponds to sampling of one single OpTypeImage.
-#insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2)            -> f32x4 { return .{}; } @%", TEXTURE_FLOAT_2D_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2, lod: f32)  -> f32x4 { return .{}; } @%", TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2)            -> s32x4 { return .{}; } @%", TEXTURE_INT_2D_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-
-// overloads determine the type of some stuff.
-// type of texel determines the sampled type of OpTypeImage.
-#insert #run sprint("% :: (image: __Image__, coordinate: s32x2, texel: f32x4) { } @%", IMAGE_WRITE_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-
-// sampling variants. bias and the depth compare without a lod only exist in fragment shaders (the lod is implicit). the component of gather must be a constant.
-#insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2, bias: f32)                   -> f32x4 { return .{}; } @%", TEXTURE_BIAS_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2, ddx: f32x2, ddy: f32x2)      -> f32x4 { return .{}; } @%", TEXTURE_GRAD_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2, component: s32)              -> f32x4 { return .{}; } @%", TEXTURE_GATHER_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2, reference: f32)              -> f32   { return 0;   } @%", TEXTURE_CMP_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__, sampler: __Sampler__, uv: f32x2, reference: f32, lod: f32)    -> f32   { return 0;   } @%", TEXTURE_CMP_LOD_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-
-// sampled images without a sampler
-#insert #run sprint("% :: (image: __Image__, coordinate: s32x2, lod: s32) -> f32x4 { return .{}; } @%", TEXEL_FETCH_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__, coordinate: s32x2, lod: s32) -> s32x4 { return .{}; } @%", TEXEL_FETCH_INT_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__, lod: s32) -> s32x2 { return .{}; } @%", TEXTURE_SIZE_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__) -> s32 { return 0; } @%", TEXTURE_LEVELS_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-
-// storage images (like ImageWrite)
-#insert #run sprint("% :: (image: __Image__, coordinate: s32x2) -> f32x4 { return .{}; } @%", IMAGE_READ_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-#insert #run sprint("% :: (image: __Image__) -> s32x2 { return .{}; } @%", IMAGE_SIZE_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
-
-//
-// every function that takes an image, a sampler or a tlas also takes their offsets in the heaps: texture(imageOffset, samplerOffset, uv) is texture(images[imageOffset], samplers[samplerOffset], uv).
-// they are macros so the heap accesses are the arguments of the intrinsic (the type of an image is decided by how it is used, see accessChainBaseArrayElementTypeIfImageHeap).
-// the offsets are u32 like spirv wants them, a signed offset has to be cast.
-//
-HeapOffsetFunction :: struct {
-   name:          string;
-   resources:     [] string; // the heap of each resource argument, in order
-   parameters:    string;    // the parameters after the resources
-   arguments:     string;    // the parameters after the resources as arguments
-   returnType:    string;    // empty if the function doesnt return anything
+// the resources a function can take, see RESOURCE_FUNCTIONS
+HeapResource :: enum u8 {
+   Image;
+   Sampler;
+   Tlas;
 }
 
-HEAP_OFFSET_FUNCTIONS :: HeapOffsetFunction.[
-   .{ TEXTURE_FLOAT_2D_FUNCTION_NAME,     .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2",                           "uv",                     "f32x4" },
-   .{ TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME, .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, lod: f32",                 "uv, lod",                "f32x4" },
-   .{ TEXTURE_INT_2D_FUNCTION_NAME,       .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2",                           "uv",                     "s32x4" },
-   .{ TEXTURE_BIAS_FUNCTION_NAME,         .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, bias: f32",                "uv, bias",               "f32x4" },
-   .{ TEXTURE_GRAD_FUNCTION_NAME,         .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, ddx: f32x2, ddy: f32x2",   "uv, ddx, ddy",           "f32x4" },
-   .{ TEXTURE_GATHER_FUNCTION_NAME,       .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, component: s32",           "uv, component",          "f32x4" },
-   .{ TEXTURE_CMP_FUNCTION_NAME,          .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, reference: f32",           "uv, reference",          "f32"   },
-   .{ TEXTURE_CMP_LOD_FUNCTION_NAME,      .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, reference: f32, lod: f32", "uv, reference, lod",     "f32"   },
-   .{ IMAGE_WRITE_FUNCTION_NAME,          .[IMAGE_HEAP_VARIABLE_NAME],                             "coordinate: s32x2, texel: f32x4",     "coordinate, texel",      ""      },
-   .{ TEXEL_FETCH_FUNCTION_NAME,          .[IMAGE_HEAP_VARIABLE_NAME],                             "coordinate: s32x2, lod: s32",         "coordinate, lod",        "f32x4" },
-   .{ TEXEL_FETCH_INT_FUNCTION_NAME,      .[IMAGE_HEAP_VARIABLE_NAME],                             "coordinate: s32x2, lod: s32",         "coordinate, lod",        "s32x4" },
-   .{ TEXTURE_SIZE_FUNCTION_NAME,         .[IMAGE_HEAP_VARIABLE_NAME],                             "lod: s32",                            "lod",                    "s32x2" },
-   .{ TEXTURE_LEVELS_FUNCTION_NAME,       .[IMAGE_HEAP_VARIABLE_NAME],                             "",                                    "",                       "s32"   },
-   .{ IMAGE_READ_FUNCTION_NAME,           .[IMAGE_HEAP_VARIABLE_NAME],                             "coordinate: s32x2",                   "coordinate",             "f32x4" },
-   .{ IMAGE_SIZE_FUNCTION_NAME,           .[IMAGE_HEAP_VARIABLE_NAME],                             "",                                    "",                       "s32x2" },
-   .{ TRACE_RAY_FUNCTION_NAME,            .[TLAS_HEAP_VARIABLE_NAME],
-      "rayFlags: RayFlags, cullMask: u32, sbtOffset: u32, sbtStride: u32, missIndex: u32, rayOrigin: f32x3, rayTMin: f32, rayDirection: f32x3, rayTMax: f32, payload: *$T",
-      "rayFlags, cullMask, sbtOffset, sbtStride, missIndex, rayOrigin, rayTMin, rayDirection, rayTMax, payload", "" },
+ResourceFunction :: struct {
+   name:          string;
+   resources:     [] HeapResource; // the first parameters
+   parameters:    string;          // the parameters after the resources
+   returnType:    string;          // empty if the function doesnt return anything
+}
+
+//
+// the functions that take images, samplers or a tlas. each one is declared twice:
+//    the intrinsic, it takes the resources:            texture :: (image: __Image__, sampler: __Sampler__, uv: f32x2) -> f32x4
+//    a macro that takes their offsets in the heaps:    texture :: (imageOffset: u32, samplerOffset: u32, uv: f32x2) -> f32x4 #expand { return texture(images[imageOffset], samplers[samplerOffset], uv); }
+// it is a macro so the heap accesses are the arguments of the intrinsic (the type of an image is decided by how it is used, see accessChainBaseArrayElementTypeIfImageHeap).
+// the offsets are u32 like spirv wants them, a signed offset has to be cast.
+//
+RESOURCE_FUNCTIONS :: ResourceFunction.[
+   // each texture variant corresponds to sampling of one single OpTypeImage.
+   // the ones whose lod is implicit (texture, texturei, texturebias, texturecmp) only exist in fragment shaders. the component of gather must be a constant.
+   .{ TEXTURE_FLOAT_2D_FUNCTION_NAME,     .[.Image, .Sampler], "uv: f32x2",                           "f32x4" },
+   .{ TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME, .[.Image, .Sampler], "uv: f32x2, lod: f32",                 "f32x4" },
+   .{ TEXTURE_INT_2D_FUNCTION_NAME,       .[.Image, .Sampler], "uv: f32x2",                           "s32x4" },
+   .{ TEXTURE_BIAS_FUNCTION_NAME,         .[.Image, .Sampler], "uv: f32x2, bias: f32",                "f32x4" },
+   .{ TEXTURE_GRAD_FUNCTION_NAME,         .[.Image, .Sampler], "uv: f32x2, ddx: f32x2, ddy: f32x2",   "f32x4" },
+   .{ TEXTURE_GATHER_FUNCTION_NAME,       .[.Image, .Sampler], "uv: f32x2, component: s32",           "f32x4" },
+   .{ TEXTURE_CMP_FUNCTION_NAME,          .[.Image, .Sampler], "uv: f32x2, reference: f32",           "f32"   },
+   .{ TEXTURE_CMP_LOD_FUNCTION_NAME,      .[.Image, .Sampler], "uv: f32x2, reference: f32, lod: f32", "f32"   },
+
+   // sampled images without a sampler
+   .{ TEXEL_FETCH_FUNCTION_NAME,          .[.Image], "coordinate: s32x2, lod: s32",     "f32x4" },
+   .{ TEXEL_FETCH_INT_FUNCTION_NAME,      .[.Image], "coordinate: s32x2, lod: s32",     "s32x4" },
+   .{ TEXTURE_SIZE_FUNCTION_NAME,         .[.Image], "lod: s32",                        "s32x2" },
+   .{ TEXTURE_LEVELS_FUNCTION_NAME,       .[.Image], "",                                "s32"   },
+
+   // storage images. overloads determine the type of some stuff: the type of the texel of ImageWrite determines the sampled type of OpTypeImage.
+   .{ IMAGE_WRITE_FUNCTION_NAME,          .[.Image], "coordinate: s32x2, texel: f32x4", ""      },
+   .{ IMAGE_READ_FUNCTION_NAME,           .[.Image], "coordinate: s32x2",               "f32x4" },
+   .{ IMAGE_SIZE_FUNCTION_NAME,           .[.Image], "",                                "s32x2" },
+
+   // maybe rayFlags should be an enum. tho i never dealt with enums so im skipping it for now.
+   // payload is the address of the payload variable.
+   //          - apila, 07/09/26
+   //
+   // rayFlags is an enum now, RayFlags.
+   //
+   .{ TRACE_RAY_FUNCTION_NAME, .[.Tlas], "rayFlags: RayFlags, cullMask: u32, sbtOffset: u32, sbtStride: u32, missIndex: u32, rayOrigin: f32x3, rayTMin: f32, rayDirection: f32x3, rayTMax: f32, payload: *$T", "" },
 ];
 
 #insert #run -> string {
    builder: String_Builder;
 
-   for HEAP_OFFSET_FUNCTIONS {
-      // texture :: (imageOffset: u32, samplerOffset: u32, uv: f32x2) -> f32x4 #expand { return texture(images[imageOffset], samplers[samplerOffset], uv); }
-      parameters: [..] string;
-      arguments:  [..] string;
-      for heap: it.resources {
-         offsetName: string;
-         if heap == {
-            case IMAGE_HEAP_VARIABLE_NAME;   offsetName = "imageOffset";
-            case SAMPLER_HEAP_VARIABLE_NAME; offsetName = "samplerOffset";
-            case TLAS_HEAP_VARIABLE_NAME;    offsetName = "tlasOffset";
-            case; assert(false, "heap: %", heap);
-         }
-         array_add(*parameters, sprint("%: u32", offsetName));
-         array_add(*arguments, sprint("%[%]", heap, offsetName));
+   for RESOURCE_FUNCTIONS {
+      intrinsicParameters: [..] string;
+      macroParameters:     [..] string;
+      callArguments:       [..] string;
+      for resource: it.resources {
+         name, typeName, heap := GetHeapResourceInfo(resource);
+         array_add(*intrinsicParameters, sprint("%: %", name, typeName));
+         array_add(*macroParameters, sprint("%Offset: u32", name));
+         array_add(*callArguments, sprint("%[%Offset]", heap, name));
       }
-      if (it.parameters) array_add(*parameters, it.parameters);
-      if (it.arguments)  array_add(*arguments, it.arguments);
 
-      returns := ifx it.returnType then sprint(" -> %", it.returnType) else "";
-      call := sprint("%(%)", it.name, join(..arguments, ", "));
-      if (it.returnType) call = sprint("return %", call);
+      if (it.parameters) {
+         array_add(*intrinsicParameters, it.parameters);
+         array_add(*macroParameters, it.parameters);
 
-      print_to_builder(*builder, "% :: (%)% #expand { %; }\n", it.name, join(..parameters, ", "), returns, call);
+         // "uv: f32x2, lod: f32" is called with "uv, lod"
+         for parameter: split(it.parameters, ",") {
+            found, name := split_from_left(parameter, #char ":");
+            assert(found, "parameter: %", parameter);
+            array_add(*callArguments, trim(name));
+         }
+      }
+
+      // texture :: (image: __Image__, sampler: __Sampler__, uv: f32x2) -> f32x4 { result: f32x4; return result; } @intrinsic
+      // texture :: (imageOffset: u32, samplerOffset: u32, uv: f32x2) -> f32x4 #expand { return texture(images[imageOffset], samplers[samplerOffset], uv); }
+      call := sprint("%(%)", it.name, join(..callArguments, ", "));
+      if (it.returnType) {
+         print_to_builder(*builder, "% :: (%) -> % { result: %; return result; } @%\n", it.name, join(..intrinsicParameters, ", "), it.returnType, it.returnType, INTRINSIC_FUNCTION_NOTE_NAME);
+         print_to_builder(*builder, "% :: (%) -> % #expand { return %; }\n", it.name, join(..macroParameters, ", "), it.returnType, call);
+      } else {
+         print_to_builder(*builder, "% :: (%) { } @%\n", it.name, join(..intrinsicParameters, ", "), INTRINSIC_FUNCTION_NOTE_NAME);
+         print_to_builder(*builder, "% :: (%) #expand { %; }\n", it.name, join(..macroParameters, ", "), call);
+      }
    }
 
    return builder_to_string(*builder);
 };
+
+// the parameter of the intrinsic that takes the resource, and the heap the resource is in
+GetHeapResourceInfo :: (resource: HeapResource) -> name: string, typeName: string, heap: string {
+   if resource == {
+      case .Image;   return "image",   "__Image__",   IMAGE_HEAP_VARIABLE_NAME;
+      case .Sampler; return "sampler", "__Sampler__", SAMPLER_HEAP_VARIABLE_NAME;
+      case .Tlas;    return "tlas",    "__TLAS__",    TLAS_HEAP_VARIABLE_NAME;
+   }
+
+   assert(false, "resource: %", resource);
+   return "", "", "";
+}
 
 // the flags of TraceRay (and of incomingrayflags), the bits are the ones of the RayFlagsMask of spirv
 RayFlags :: enum_flags u32 {
@@ -398,14 +413,6 @@ BUILTIN_VARIABLES :: BuiltinVariable.[
 
    return builder_to_string(*builder);
 };
-
-// maybe rayFlags should be an enum. tho i never dealt with enums so im skipping it for now.
-// payload is the address of the payload variable.
-//          - apila, 07/09/26
-//
-// rayFlags is an enum now, RayFlags.
-//
-#insert #run sprint("% :: (tlas: __TLAS__, rayFlags: RayFlags, cullMask: u32, sbtOffset: u32, sbtStride: u32, missIndex: u32, rayOrigin: f32x3, rayTMin: f32, rayDirection: f32x3, rayTMax: f32, payload: *$T) { } @%", TRACE_RAY_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
 //
 // the math intrinsics have the names of hlsl. each is a GLSL.std.450 instruction or a spirv instruction.
@@ -608,10 +615,11 @@ GenerateTextureFunction :: (data: *CompilationData, name: string, cpc: *Code_Pro
 
    isDepth   := name == TEXTURE_CMP_FUNCTION_NAME || name == TEXTURE_CMP_LOD_FUNCTION_NAME;
    isStorage := name == IMAGE_READ_FUNCTION_NAME || name == IMAGE_SIZE_FUNCTION_NAME;
-   isInteger := name == TEXEL_FETCH_INT_FUNCTION_NAME;
+   isInteger := name == TEXTURE_INT_2D_FUNCTION_NAME || name == TEXEL_FETCH_INT_FUNCTION_NAME;
    usesSampler := header.arguments.count > 1 && CompareType(header.arguments[1].type, type_info(__Sampler__));
 
-   if (name == TEXTURE_BIAS_FUNCTION_NAME || name == TEXTURE_CMP_FUNCTION_NAME) {
+   isImplicitLod := name == TEXTURE_FLOAT_2D_FUNCTION_NAME || name == TEXTURE_INT_2D_FUNCTION_NAME || name == TEXTURE_BIAS_FUNCTION_NAME || name == TEXTURE_CMP_FUNCTION_NAME;
+   if (isImplicitLod) {
       assert(data.shaderType == .Fragment, "% only exists in fragment shaders (the lod is implicit). loc: %", name, GetLocationString(cpc));
    }
 
@@ -630,33 +638,48 @@ GenerateTextureFunction :: (data: *CompilationData, name: string, cpc: *Code_Pro
    imageSSAId := GenerateInstructions(data, arguments[0], general, function, currentFunction, .{ accessChainBaseArrayElementTypeIfImageHeap = imageType });
 
    if (usesSampler) {
+      samplerSSAId := GenerateInstructions(data, arguments[1], general, function, currentFunction);
+
+      // the operands are generated before the sampled image. spirv requires OpSampledImage to be in the block its result is used in, and an operand can branch (a && b for example)
+      operands: [4] SSAId; // uv and the operands after it
+      for 2..arguments.count - 1 {
+         identifier: Identifier;
+         operands[it - 2] = GenerateInstructions(data, arguments[it], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[it].type }, identifierOut = *identifier);
+
+         if (name == TEXTURE_GATHER_FUNCTION_NAME && it == 3) {
+            assert(identifier.type == .IntLiteral, "the component of % must be a constant. loc: %", name, GetLocationString(arguments[it]));
+         }
+      }
+
       sampledImageType := New(TypeInfoSampledImage);
       sampledImageType.image = imageType;
-
-      samplerSSAId := GenerateInstructions(data, arguments[1], general, function, currentFunction);
       sampledImageSSAId := GetNextSSAId(data);
       WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .SampledImage, GetSSAId(data, .{ type = ._Type, _type = sampledImageType }), sampledImageSSAId, imageSSAId, samplerSSAId);
 
-      uvSSAId := Argument(2);
+      uvSSAId := operands[0];
 
       if name == {
+         case TEXTURE_FLOAT_2D_FUNCTION_NAME; #through;
+         case TEXTURE_INT_2D_FUNCTION_NAME;
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleImplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId);
+
+         case TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME;
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleExplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, SpvImageOperandsMask.LodMask, operands[1]);
+
          case TEXTURE_BIAS_FUNCTION_NAME;
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleImplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, SpvImageOperandsMask.BiasMask, Argument(3));
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleImplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, SpvImageOperandsMask.BiasMask, operands[1]);
 
          case TEXTURE_GRAD_FUNCTION_NAME;
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleExplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, SpvImageOperandsMask.GradMask, Argument(3), Argument(4));
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleExplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, SpvImageOperandsMask.GradMask, operands[1], operands[2]);
 
          case TEXTURE_GATHER_FUNCTION_NAME;
-            component: Identifier;
-            componentSSAId := GenerateInstructions(data, arguments[3], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[3].type }, identifierOut = *component);
-            assert(component.type == .IntLiteral, "the component of % must be a constant. loc: %", name, GetLocationString(arguments[3]));
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageGather, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, componentSSAId);
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageGather, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, operands[1]);
 
          case TEXTURE_CMP_FUNCTION_NAME;
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleDrefImplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, Argument(3));
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleDrefImplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, operands[1]);
 
          case TEXTURE_CMP_LOD_FUNCTION_NAME;
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleDrefExplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, Argument(3), SpvImageOperandsMask.LodMask, Argument(4));
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageSampleDrefExplicitLod, resultTypeSSAId, resultSSAId, sampledImageSSAId, uvSSAId, operands[1], SpvImageOperandsMask.LodMask, operands[2]);
 
          case; assert(false, "unreachable");
       }
@@ -6515,8 +6538,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
 
             for data.interfaceVariableIdentifiers {
                if (IdentifierCompare(identifier, it)) {
-                  found, variableType := table_find(*data.codeNodeTypes, it.variable.declaration);
-                  assert(found);
+                  variableType := GetNodeType(it.variable.declaration);
 
                   storageClass := GetVariableStorageClass(data, it);
                   pointerTypeIdentifier := GetPointerTypeIdentifier(variableType, storageClass);
@@ -7288,8 +7310,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
       case .LITERAL;
          cl := cast(*Code_Literal) node;
 
-         found, type := table_find(*data.codeNodeTypes, node);
-         assert(found, "loc: %", GetLocationString(node));
+         type := GetNodeType(node);
 
          if cl.value_type == {
             case .NUMBER;
@@ -7362,8 +7383,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             // GetAutoCastAdditionalData prolly needs to take the whole member not just the type of it
             //       - apila, 26/04/26
             case .STRUCT;
-               success, type := table_find(*data.codeNodeTypes, node);
-               assert(success);
+               type := GetNodeType(node);
                assert(type.type == .STRUCT, "type: %, loc: %", type.*, GetLocationString(node));
 
                tis := cast(*Type_Info_Struct) type;
@@ -7381,8 +7401,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
                      if (it == null) {
                         argumentIdentifier = GetDefaultValueIdentifier(data, general, function, currentFunction, shouldHaveBeenType);
                      } else {
-                        found, argumentNodeType := table_find(*data.codeNodeTypes, it);
-                        assert(found);
+                        argumentNodeType := GetNodeType(it);
 
                         _ := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = shouldHaveBeenType }, identifierOut = *argumentIdentifier);
                         assert(argumentIdentifier.type != .Invalid, "struct: %, index: %, loc: %:%", tis.name, it_index, node.c0, node.l0);
@@ -7410,8 +7429,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
                      if (it == null) {
                         argumentSSAId = GetSSAId(data, GetDefaultValueIdentifier(data, general, function, currentFunction, shouldHaveBeenType));
                      } else {
-                        found, argumentNodeType := table_find(*data.codeNodeTypes, it);
-                        assert(found);
+                        argumentNodeType := GetNodeType(it);
 
                         argumentSSAId = GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = shouldHaveBeenType });
                      }
@@ -7552,7 +7570,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          variableStorageClass := GetVariableStorageClass(data, variableIdentifier);
 
          found, variableType := table_find(*data.codeNodeTypes, node);
-         assert(found, "declaration: %, ident: %", GetLocationString(declaration), GetLocationString(ci));
+         if (!found)  assert(false, "the identifier has no type. declaration: %, ident: %", GetLocationString(declaration), GetLocationString(ci));
 
          if (table_contains(*userFunctionArguments, declaration)) {
             if (!IsSmallArgument(variableType)) {
@@ -7709,10 +7727,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             case .GREATER_OR_EQUAL;    #through;
             case .IS_EQUAL;            #through;
             case .IS_NOT_EQUAL; {
-               found1, rightType := table_find(*data.codeNodeTypes, cbo.right);
-               assert(found1);
-               found2, leftType := table_find(*data.codeNodeTypes, cbo.left);
-               assert(found2);
+               rightType := GetNodeType(cbo.right);
+               leftType := GetNodeType(cbo.left);
 
                // pointers are compared by their addresses
                if (leftType.type == TYPE_INFO_POINTER_TAG && rightType.type == TYPE_INFO_POINTER_TAG) {
@@ -7879,10 +7895,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             case #char "*";         #through;
             case #char "-";         #through;
             case #char "+"; {
-               found, leftType := table_find(*data.codeNodeTypes, cbo.left);
-               assert(found);
-               found2, rightType := table_find(*data.codeNodeTypes, cbo.right);
-               assert(found2);
+               leftType := GetNodeType(cbo.left);
+               rightType := GetNodeType(cbo.right);
 
                //
                // in some cases the jai compiler converts the type, sometimes it doesnt.
@@ -7961,10 +7975,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
                      "cbo.left.kind: %", cbo.left.kind
                );
 
-               found, leftType := table_find(*data.codeNodeTypes, cbo.left);
-               assert(found);
-               found2, rightType := table_find(*data.codeNodeTypes, cbo.right);
-               assert(found2);
+               leftType := GetNodeType(cbo.left);
+               rightType := GetNodeType(cbo.right);
 
                // p += n, p -= n (see OffsetPointer)
                if (leftType.type == TYPE_INFO_POINTER_TAG) {
@@ -8031,8 +8043,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
                      "cbo.left.kind: %", cbo.left.kind
                );
 
-               found, leftType := table_find(*data.codeNodeTypes, cbo.left);
-               assert(found);
+               leftType := GetNodeType(cbo.left);
 
                rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
 
@@ -8188,7 +8199,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          }
 
          identifierName := identifierExpression.name;
-         arguments := cpc.arguments_unsorted;
+         arguments := cpc.arguments_sorted; // in the order of the parameters, the compiler puts named arguments in their place
 
          //
          // for intrinsic functions i need to get the argument type from the function header, and DetermineCodeNodeTypes only operates on Code_Nodes that are child of the entry point function.
@@ -8215,8 +8226,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
 
          if identifierName == {
             case SET_MESH_OUTPUTS_NAME; {
-               vertexCountExpression := arguments[0].expression;
-               primitiveCountExpression := arguments[1].expression;
+               vertexCountExpression := arguments[0];
+               primitiveCountExpression := arguments[1];
 
                // literalShouldHaveBeenType is needed here. meanign that i cant use node.type as literalShouldHaveBeenType. because jai reports literals as s64.
                // it doesnt do the conversion here. in direct assign it does tho.
@@ -8235,76 +8246,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
                return 42000; // doesnt matter since OpSetMeshOutputsEXT doesnt return
             }
 
-            case TEXTURE_FLOAT_2D_FUNCTION_NAME;      #through;
-            case TEXTURE_INT_2D_FUNCTION_NAME;        #through;
-            case TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME; {
-               // the sampled type of the image is the element type of what the function returns. f32x4 -> f32, s32x4 -> s32
-               resultType := GetReturnTypeIdentifier(xx header.type)._type;
-               sampledType := GetScalarTypeOrVectorElementType(resultType);
-
-               sampledImageType := New(TypeInfoSampledImage);
-               sampledImageType.image = New(TypeInfoImage);
-               sampledImageType.image.* = .{
-                  sampledType       = sampledType,
-                  dimensionality    = ._2D,
-                  depth             = 0,
-                  arrayed           = 0,
-                  ms                = 0,
-                  sampled           = 1,
-                  imageFormat       = .Unknown
-               };
-
-               imageSSAId := GenerateInstructions(data, arguments[0].expression, general, function, currentFunction, .{ accessChainBaseArrayElementTypeIfImageHeap = sampledImageType.image });
-               samplerSSAId := GenerateInstructions(data, arguments[1].expression, general, function, currentFunction);
-               uvSSAId := GenerateInstructions(data, arguments[2].expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[2].type });
-
-               sampledImageSSAId := GetNextSSAId(data);
-
-               WriteSingleInstructionIfReachable(
-                  function,
-                  *data.isBlockReachable,
-                  .SampledImage,
-                  GetSSAId(data, .{ type = ._Type, _type = sampledImageType }),
-                  sampledImageSSAId,
-                  imageSSAId,
-                  samplerSSAId
-               );
-
-               sampledValueSSAId := GetNextSSAId(data);
-               if (identifierName == TEXTURE_FLOAT_2D_FUNCTION_NAME || identifierName == TEXTURE_INT_2D_FUNCTION_NAME) {
-                  assert(arguments.count == 3, "arguments.count: %", arguments.count);
-
-                  WriteSingleInstructionIfReachable(
-                     function,
-                     *data.isBlockReachable,
-                     .ImageSampleImplicitLod,
-                     GetSSAId(data, .{ type = ._Type, _type = resultType }),
-                     sampledValueSSAId,
-                     sampledImageSSAId,
-                     uvSSAId
-                  );
-               } else if (identifierName == TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME) {
-                  assert(arguments.count == 4, "arguments.count: %", arguments.count);
-                  lodSSAId := GenerateInstructions(data, arguments[3].expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[3].type });
-
-                  WriteSingleInstructionIfReachable(
-                     function,
-                     *data.isBlockReachable,
-                     .ImageSampleExplicitLod,
-                     GetSSAId(data, .{ type = ._Type, _type = resultType }),
-                     sampledValueSSAId,
-                     sampledImageSSAId,
-                     uvSSAId,
-                     SpvImageOperandsMask.LodMask,
-                     lodSSAId
-                  );
-               } else {
-                  assert(false, "not yet implemented!");
-               }
-
-               RETURN(sampledValueSSAId, resultType);
-            }
-
+            case TEXTURE_FLOAT_2D_FUNCTION_NAME;     #through;
+            case TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME; #through;
+            case TEXTURE_INT_2D_FUNCTION_NAME;       #through;
             case TEXTURE_BIAS_FUNCTION_NAME;    #through;
             case TEXTURE_GRAD_FUNCTION_NAME;    #through;
             case TEXTURE_GATHER_FUNCTION_NAME;  #through;
@@ -8322,12 +8266,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             }
 
             case IMAGE_WRITE_FUNCTION_NAME; {
-               imageNode := arguments[0].expression;
+               imageNode := arguments[0];
 
-               coordinateNode := arguments[1].expression;
+               coordinateNode := arguments[1];
                coordinateType := GetNodeType(header.arguments[1]);
 
-               texelNode := arguments[2].expression;
+               texelNode := arguments[2];
                texelType := GetNodeType(header.arguments[2]);
 
                sampledType := GetScalarTypeOrVectorElementType(texelType);
@@ -8434,68 +8378,18 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             }
 
             case TRACE_RAY_FUNCTION_NAME; {
-               // OpTraceRayKHR
-               tlasNode := arguments[0].expression;
-               tlasType := header.arguments[0].type;
-               tlasSSAId := GenerateInstructions(data, tlasNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = tlasType });
+               // OpTraceRayKHR, its operands are the arguments
+               operands: [..] Any;
+               operands.allocator = temp;
+               for arguments {
+                  // the payload is the address of the payload variable. its type is a pointer to RayPayloadKHR memory, not the type in the header (see IsTraceRayFunction)
+                  isPayload := it_index == arguments.count - 1;
+                  argumentType := ifx isPayload then GetNodeType(header.arguments[it_index]) else header.arguments[it_index].type;
+                  argumentSSAId := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = argumentType });
+                  array_add(*operands, ac(argumentSSAId));
+               }
 
-               rayFlagsNode := arguments[1].expression;
-               rayFlagsType := header.arguments[1].type;
-               rayFlagsSSAId := GenerateInstructions(data, rayFlagsNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayFlagsType });
-
-               cullMaskNode := arguments[2].expression;
-               cullMaskType := header.arguments[2].type;
-               cullMaskSSAId := GenerateInstructions(data, cullMaskNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = cullMaskType });
-
-               sbtOffsetNode := arguments[3].expression;
-               sbtOffsetType := header.arguments[3].type;
-               sbtOffsetSSAId := GenerateInstructions(data, sbtOffsetNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = sbtOffsetType });
-
-               sbtStrideNode := arguments[4].expression;
-               sbtStrideType := header.arguments[4].type;
-               sbtStrideSSAId := GenerateInstructions(data, sbtStrideNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = sbtStrideType });
-
-               missIndexNode := arguments[5].expression;
-               missIndexType := header.arguments[5].type;
-               missIndexSSAId := GenerateInstructions(data, missIndexNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = missIndexType });
-
-               rayOriginNode := arguments[6].expression;
-               rayOriginType := header.arguments[6].type;
-               rayOriginSSAId := GenerateInstructions(data, rayOriginNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayOriginType });
-
-               rayTMinNode := arguments[7].expression;
-               rayTMinType := header.arguments[7].type;
-               rayTMinSSAId := GenerateInstructions(data, rayTMinNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayTMinType });
-
-               rayDirectionNode := arguments[8].expression;
-               rayDirectionType := header.arguments[8].type;
-               rayDirectionSSAId := GenerateInstructions(data, rayDirectionNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayDirectionType });
-
-               rayTMaxNode := arguments[9].expression;
-               rayTMaxType := header.arguments[9].type;
-               rayTMaxSSAId := GenerateInstructions(data, rayTMaxNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = rayTMaxType });
-
-               payloadNode := arguments[10].expression;
-               payloadType  := GetNodeType(header.arguments[10]);
-               payloadSSAId := GenerateInstructions(data, payloadNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = payloadType });
-
-               WriteSingleInstructionIfReachable(
-                  function,
-                  *data.isBlockReachable,
-                  .TraceRayKHR,
-                  tlasSSAId,
-                  rayFlagsSSAId,
-                  cullMaskSSAId,
-                  sbtOffsetSSAId,
-                  sbtStrideSSAId,
-                  missIndexSSAId,
-                  rayOriginSSAId,
-                  rayTMinSSAId,
-                  rayDirectionSSAId,
-                  rayTMaxSSAId,
-                  payloadSSAId,
-               );
-
+               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .TraceRayKHR, .. operands);
                RETURN(0, null);
             }
          }
@@ -8508,8 +8402,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          AddFunctionDependency(*functionDependencyTable, currentFunction, header);
          CreateFunctionDependencyEntryIfNotExists(*functionDependencyTable, header);
 
-         found, returnType := table_find(*data.codeNodeTypes, node);
-         assert(found);
+         returnType := GetNodeType(node);
 
          returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
          resultSSAId := GetNextSSAId(data);
@@ -8610,8 +8503,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
       case .WHILE;
          cw := cast(*Code_While) node;
 
-         found, conditionType := table_find(*data.codeNodeTypes, cw.condition);
-         assert(found);
+         conditionType := GetNodeType(cw.condition);
 
          headerLabelSSAId := GetNextSSAId(data);
          conditionLabelSSAId := GetNextSSAId(data);
@@ -8687,8 +8579,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          //    result: T;
          //    if condition  result = then; else result = else;
          if (ci.if_flags & .IS_IFX) {
-            found, resultType := table_find(*data.codeNodeTypes, node);
-            assert(found);
+            resultType := GetNodeType(node);
             assert(ci.then_block.statements.count == 1 && ci.else_block.statements.count == 1, "loc: %", GetLocationString(node));
 
             variableType := GetFunctionStorageClassType(resultType);
@@ -9112,8 +9003,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          isIncomingPayload := IsIncomingPayloadVariable(cd);
          isWorkgroup := IsWorkgroupVariable(cd);
 
-         found, variableType := table_find(*data.codeNodeTypes, node);
-         assert(found);
+         variableType := GetNodeType(node);
 
          storageClass := GetVariableStorageClass(data, variableIdentifier);
          variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
@@ -9122,8 +9012,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          // the value is stored where the declaration is, not given as the initializer of OpVariable.
          // the initializer is applied once when the function starts but a declaration inside a loop must be initialized in every iteration.
          if (cd.expression != null) {
-            found, expressionType := table_find(*data.codeNodeTypes, cd.expression);
-            assert(found);
+            expressionType := GetNodeType(cd.expression);
 
             // in the declaration apperantly i dont need to explicitly say the literalShouldHaveBeenType because jai does convert in this case.
             // but since i cant rely on it because it looks unstable and unfinished im gonna pass the literalShouldHaveBeenType
@@ -9189,10 +9078,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             RETURN(valueSSAId, valueSpirvType);
          }
 
-         found, castTo := table_find(*data.codeNodeTypes, node);
-         assert(found);
-         found2, castFrom := table_find(*data.codeNodeTypes, cc.expression);
-         assert(found2);
+         castTo := GetNodeType(node);
+         castFrom := GetNodeType(cc.expression);
 
          expressionSSAId := GenerateInstructions(data, cc.expression, general, function, currentFunction);
 
@@ -9285,7 +9172,8 @@ IsWorkgroupVariable :: (cd: *Code_Declaration) -> bool {
 
 GetNodeType :: (node: *Code_Node) -> *Type_Info #expand {
    found, type := table_find(*`data.codeNodeTypes, node);
-   assert(found, "loc: %", GetLocationString(node));
+   // the arguments of assert are evaluated even if it doesnt fail, the location is only formatted if it is needed
+   if (!found)  assert(false, "the node has no type. loc: %", GetLocationString(node));
 
    return type;
 }
@@ -10316,8 +10204,7 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
          // recursed in to header above which then recurses into the arguments and the returns
          // return count here is 1 as asserted above
-         found, returnType := table_find(*data.codeNodeTypes, header.returns[0]);
-         assert(found);
+         returnType := GetNodeType(header.returns[0]);
 
          TableAdd(*data.codeNodeTypes, node, returnType);
          return returnType;
@@ -10728,7 +10615,7 @@ GetArrayViewTypeInfo :: (elementType: *Type_Info) -> *Type_Info_Struct {
 arrayViewTypeInfos: Table(*Type_Info, *Type_Info_Struct);
 
 IsTraceRayFunction :: (cph: *Code_Procedure_Header) -> bool {
-   return cph.name == TRACE_RAY_FUNCTION_NAME && !IsMacroProcedure(cph); // not the one that takes the offset of the tlas (see HEAP_OFFSET_FUNCTIONS)
+   return cph.name == TRACE_RAY_FUNCTION_NAME && !IsMacroProcedure(cph); // not the one that takes the offset of the tlas (see RESOURCE_FUNCTIONS)
 }
 
 //
@@ -11810,8 +11697,8 @@ IsStructLiteralConstant :: (data: *CompilationData, literal: *Code_Literal) -> b
          case .STRUCT;
             array: [] *Code_Node;
             if (literal.value_type == .STRUCT) {
-               found, type := table_find(*data.codeNodeTypes, literal);
-               assert(found && type.type == .STRUCT, "loc: %", GetLocationString(literal));
+               type := GetNodeType(literal);
+               assert(type.type == .STRUCT, "loc: %", GetLocationString(literal));
                array = GetStructLiteralMemberExpressions(literal, xx type);
             } else {
                array = literal.array_literal_info.array_members;

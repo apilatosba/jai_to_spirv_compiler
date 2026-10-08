@@ -2423,6 +2423,11 @@ TestSetMeshOutputs :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    o[2].uv = .{ 0, 1 };
 } @mesh @1_1_1 @3_1 @triangles
 
+// intrinsics take the arguments in the order of the parameters, named arguments are put in their place
+TestSetMeshOutputsNamedArguments :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(primitiveCount = 2, vertexCount = 4);
+} @mesh @1_1_1 @4_2 @triangles
+
 TestLocalStruct :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    s: TestInner;
    s.value = data.f;
@@ -2661,6 +2666,12 @@ TestRgenTraceRayOffset :: (data: *TestRgenData) {
    payload: TestRayPayload; @payload
    TraceRay(cast(u32) data.tlas, .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
    ImageWrite(cast(u32) data.image, .{ 0, 0 }, payload.color);
+} @rgen
+
+TestRgenTraceRayNamedArguments :: (data: *TestRgenData) {
+   payload: TestRayPayload; @payload
+   TraceRay(tlases[data.tlas], .Opaque, 0xFF, 0, 0, 0, rayDirection = f32x3.{ 0, 0, 1 }, rayOrigin = f32x3.{ 1, 2, 3 }, rayTMax = 500, rayTMin = 0.25, payload = *payload);
+   ImageWrite(texel = payload.color, image = images[data.image], coordinate = .{ 0, 0 });
 } @rgen
 
 TestRgenTwoPayloads :: (data: *TestRgenData) {
@@ -3946,6 +3957,23 @@ TestTextureOffsetFunctions :: (v: TestOut, p: TestPrim, data: *TestTextureData) 
    data.size = texturesize(image, 0) + ImageSize(cast(u32) data.storage);
    data.count = texturelevels(image) + texelfetchi(image, data.size, 1).x;
    c += ImageRead(cast(u32) data.storage, data.size);
+   return c;
+} @fragment
+
+TestTextureNamedArguments :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
+   c := texture(uv = v.uv, sampler = samplers[data.sampler], image = images[data.image]);
+   c += texturelod(lod = data.f, uv = v.uv, image = images[data.image], sampler = samplers[data.sampler]);
+   c += texturegrad(images[data.image], samplers[data.sampler], ddy = ddy(v.uv), ddx = ddx(v.uv), uv = v.uv);
+   c += texture(uv = v.uv, samplerOffset = cast(u32) data.sampler, imageOffset = cast(u32) data.image);
+   return c;
+} @fragment
+
+// the operands of a sampling function can branch (&& and ||). spirv requires the sampled image to be in the block it is used in, so it is made after them
+TestTextureBranchingOperands :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
+   c := texturebias(images[data.image], samplers[data.sampler], v.uv, cast(f32) (data.f > 0 && data.count > 0));
+   c += texturelod(images[data.image], samplers[data.sampler], v.uv, cast(f32) (data.f > 0 || data.count > 0));
+   c += texture(images[data.image], samplers[data.sampler], ifx data.f > 0 && data.count > 0 then v.uv else ddx(v.uv));
+   c.x += texturecmplod(images[data.depth], samplers[data.sampler], v.uv, 0.5, cast(f32) (data.count > 0 && data.f > 1));
    return c;
 } @fragment
 
