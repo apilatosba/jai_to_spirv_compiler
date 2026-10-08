@@ -228,6 +228,33 @@ MESH_PRIMITIVE_INDICES :: MeshPrimitiveIndices.[
 #insert #run sprint("% :: (image: __Image__, coordinate: s32x2) -> f32x4 { return .{}; } @%", IMAGE_READ_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 #insert #run sprint("% :: (image: __Image__) -> s32x2 { return .{}; } @%", IMAGE_SIZE_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
+// the flags of TraceRay (and of incomingrayflags), the bits are the ones of the RayFlagsMask of spirv
+RayFlags :: enum_flags u32 {
+   Opaque;
+   NoOpaque;
+   TerminateOnFirstHit;
+   SkipClosestHitShader;
+   CullBackFacingTriangles;
+   CullFrontFacingTriangles;
+   CullOpaque;
+   CullNoOpaque;
+   SkipTriangles;
+   SkipAABBs;
+}
+
+#run {
+   #assert cast(u32) RayFlags.Opaque                    == cast(u32) SpvRayFlagsMask.OpaqueKHRMask;
+   #assert cast(u32) RayFlags.NoOpaque                  == cast(u32) SpvRayFlagsMask.NoOpaqueKHRMask;
+   #assert cast(u32) RayFlags.TerminateOnFirstHit       == cast(u32) SpvRayFlagsMask.TerminateOnFirstHitKHRMask;
+   #assert cast(u32) RayFlags.SkipClosestHitShader      == cast(u32) SpvRayFlagsMask.SkipClosestHitShaderKHRMask;
+   #assert cast(u32) RayFlags.CullBackFacingTriangles   == cast(u32) SpvRayFlagsMask.CullBackFacingTrianglesKHRMask;
+   #assert cast(u32) RayFlags.CullFrontFacingTriangles  == cast(u32) SpvRayFlagsMask.CullFrontFacingTrianglesKHRMask;
+   #assert cast(u32) RayFlags.CullOpaque                == cast(u32) SpvRayFlagsMask.CullOpaqueKHRMask;
+   #assert cast(u32) RayFlags.CullNoOpaque              == cast(u32) SpvRayFlagsMask.CullNoOpaqueKHRMask;
+   #assert cast(u32) RayFlags.SkipTriangles             == cast(u32) SpvRayFlagsMask.SkipTrianglesKHRMask;
+   #assert cast(u32) RayFlags.SkipAABBs                 == cast(u32) SpvRayFlagsMask.SkipAABBsKHRMask;
+}
+
 // built in input variables (gl_WorkGroupID, gl_LaunchIDEXT...).
 // they are only declared in the entry point if the shader uses them, and using one in a stage that doesnt have it is an error.
 BuiltinVariable :: struct {
@@ -263,7 +290,7 @@ BUILTIN_VARIABLES :: BuiltinVariable.[
    .{ "objectraydirection",   "f32x3",    .ObjectRayDirectionKHR,    .Rchit                   },
    .{ "raytmin",              "f32",      .RayTminKHR,               .Rchit | .Rmiss          },
    .{ "raytmax",              "f32",      .RayTmaxKHR,               .Rchit | .Rmiss          },
-   .{ "incomingrayflags",     "u32",      .IncomingRayFlagsKHR,      .Rchit | .Rmiss          },
+   .{ "incomingrayflags",     "RayFlags", .IncomingRayFlagsKHR,      .Rchit | .Rmiss          },
    .{ "hitkind",              "u32",      .HitKindKHR,               .Rchit                   },
    .{ "instancecustomindex",  "s32",      .InstanceCustomIndexKHR,   .Rchit                   },
    .{ "instanceid",           "s32",      .InstanceId,               .Rchit                   },
@@ -310,7 +337,10 @@ BUILTIN_VARIABLES :: BuiltinVariable.[
 // maybe rayFlags should be an enum. tho i never dealt with enums so im skipping it for now.
 // payload is the address of the payload variable.
 //          - apila, 07/09/26
-#insert #run sprint("% :: (tlas: __TLAS__, rayFlags: u32, cullMask: u32, sbtOffset: u32, sbtStride: u32, missIndex: u32, rayOrigin: f32x3, rayTMin: f32, rayDirection: f32x3, rayTMax: f32, payload: *$T) { } @%", TRACE_RAY_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
+//
+// rayFlags is an enum now, RayFlags.
+//
+#insert #run sprint("% :: (tlas: __TLAS__, rayFlags: RayFlags, cullMask: u32, sbtOffset: u32, sbtStride: u32, missIndex: u32, rayOrigin: f32x3, rayTMin: f32, rayDirection: f32x3, rayTMax: f32, payload: *$T) { } @%", TRACE_RAY_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
 //
 // the math intrinsics have the names of hlsl. each is a GLSL.std.450 instruction or a spirv instruction.

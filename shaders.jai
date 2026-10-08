@@ -72,7 +72,7 @@ RgenShader :: (data: *RgenData) {
    d := uv * f32x2.{2, 2} - f32x2.{1, 1}; // :broadcast
    origin := f32x3.{0,0,-2};
    direction := normalize(f32x3.{d.x, d.y, 1});
-   rayFlags: u32 = 1;
+   rayFlags := RayFlags.Opaque;
    tMin := 0.0001;
    tMax := 1000.0;
 
@@ -2644,7 +2644,7 @@ TestRgenTraceRay :: (data: *TestRgenData) {
    coordinates := s32x2.{ xx launchid.x, xx launchid.y };
    size := launchsize.x * launchsize.y;
    payload.color = f32x4.{ 0, 0, 0, 0 };
-   TraceRay(tlases[data.tlas], 1, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   TraceRay(tlases[data.tlas], .Opaque | .TerminateOnFirstHit, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
    ImageWrite(images[data.image], coordinates, payload.color);
 } @rgen
 
@@ -3263,7 +3263,7 @@ TestRchitBuiltins :: (data: *TestRayBuiltinsData) {
 
    data.floats[0] = world.x + object.y + column.z;
    data.ints[0] = instancecustomindex + instanceid + geometryindex + primitiveid;
-   data.uints[0] = hitkind + incomingrayflags;
+   data.uints[0] = hitkind + cast(u32) incomingrayflags;
    payload.hit = true;
 } @rchit
 
@@ -3273,7 +3273,8 @@ TestRmissBuiltins :: (data: *TestRayBuiltinsData) {
 
    direction := worldraydirection;
    data.floats[0] = worldrayorigin.x + direction.y + raytmin + raytmax;
-   data.uints[0] = incomingrayflags;
+   data.uints[0] = cast(u32) incomingrayflags;
+   if incomingrayflags & .SkipTriangles  data.uints[1] = 1;
    payload.hit = false;
 } @rmiss
 
