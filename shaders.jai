@@ -2618,6 +2618,15 @@ TestFragmentTextures :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
    return f32x4.{ a.x + b.y, a.y, a.z, b.w };
 } @fragment
 
+// the offsets in the heaps instead of the heap accesses
+TestFragmentTextureOffsets :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   a := texture(data.u, data.u + 1, v.uv);
+   b := texturelod(cast(u32) data.i, data.u, v.uv, data.f);
+   c := texturei(data.u, 0, v.uv);
+   d := texture(images[data.i], samplers[data.u], v.uv);
+   return a + b + d + f32x4.{ xx c.x, 0, 0, 0 };
+} @fragment
+
 TestFragmentBranching :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
    color := f32x4.{ 0, 0, 0, 1 };
    if (data.i < 0) {
@@ -2646,6 +2655,12 @@ TestRgenTraceRay :: (data: *TestRgenData) {
    payload.color = f32x4.{ 0, 0, 0, 0 };
    TraceRay(tlases[data.tlas], .Opaque | .TerminateOnFirstHit, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
    ImageWrite(images[data.image], coordinates, payload.color);
+} @rgen
+
+TestRgenTraceRayOffset :: (data: *TestRgenData) {
+   payload: TestRayPayload; @payload
+   TraceRay(cast(u32) data.tlas, .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   ImageWrite(cast(u32) data.image, .{ 0, 0 }, payload.color);
 } @rgen
 
 TestRgenTwoPayloads :: (data: *TestRgenData) {
@@ -3039,6 +3054,29 @@ TestMacroEarlyReturn :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    }
    data.f += TestMacroZero();
 } @mesh @1_1_1 @1_1 @triangles
+
+TestMacroIncrement :: (p: *s32, amount: s32) #expand {
+   p.* += amount;
+}
+
+TestMacroLoadEither :: (p: *s32, other: *s32, useOther: bool) -> s32 #expand {
+   if useOther  p = other;
+   return p.*;
+}
+
+// a pointer to buffer memory is a variable in the macro, it can be changed
+TestMacroPointerArguments :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   TestMacroIncrement(data.ints, data.i);
+   data.i = TestMacroLoadEither(data.ints, *data.inner.indices.y, data.f > 0);
+} @mesh @1_1_1 @1_1 @triangles
+
+// a pointer to a workgroup variable is used directly by the macro, spirv doesnt allow storing it
+TestMacroWorkgroupPointer :: (data: *TestComputeData) {
+   counter: s32; @workgroup
+   if localinvocationindex == 0  counter = 0;
+   Barrier();
+   TestMacroIncrement(*counter, 1);
+} @compute @8_8
 
 TestNestedDefaults :: struct {
    inner:  TestDefaults;
@@ -3871,6 +3909,26 @@ TestTextureFunctions :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32
    c += ImageRead(images[data.storage], data.size);
    return c;
 } @fragment
+
+// the offsets in the heaps instead of the heap accesses. the offsets are u32, the s32 ones are cast.
+TestTextureOffsetFunctions :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
+   image   := cast(u32) data.image;
+   sampler := cast(u32) data.sampler;
+   c := texturebias(image, sampler, v.uv, 0.5);
+   c += texturegrad(image, sampler, v.uv, ddx(v.uv), ddy(v.uv));
+   c += texturegather(image, sampler, v.uv, 2);
+   c.x += texturecmp(cast(u32) data.depth, sampler, v.uv, 0.5) + texturecmplod(cast(u32) data.depth, sampler, v.uv, 0.5, 0);
+   c += texelfetch(image, .{ 1, 2 }, 0);
+   data.size = texturesize(image, 0) + ImageSize(cast(u32) data.storage);
+   data.count = texturelevels(image) + texelfetchi(image, data.size, 1).x;
+   c += ImageRead(cast(u32) data.storage, data.size);
+   return c;
+} @fragment
+
+TestStorageImageOffsetReadWrite :: (data: *TestTextureData) {
+   coordinate := s32x2.{ xx globalinvocationid.x, xx globalinvocationid.y };
+   ImageWrite(cast(u32) data.storage, coordinate, ImageRead(cast(u32) data.storage, coordinate));
+} @compute @8_8
 
 TestStorageImageReadWrite :: (data: *TestTextureData) {
    c := texturegrad(images[data.image], samplers[data.sampler], .{ 0, 0 }, .{ 0, 0 }, .{ 1, 1 });

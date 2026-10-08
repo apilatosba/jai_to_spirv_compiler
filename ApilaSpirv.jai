@@ -228,6 +228,71 @@ MESH_PRIMITIVE_INDICES :: MeshPrimitiveIndices.[
 #insert #run sprint("% :: (image: __Image__, coordinate: s32x2) -> f32x4 { return .{}; } @%", IMAGE_READ_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 #insert #run sprint("% :: (image: __Image__) -> s32x2 { return .{}; } @%", IMAGE_SIZE_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
+//
+// every function that takes an image, a sampler or a tlas also takes their offsets in the heaps: texture(imageOffset, samplerOffset, uv) is texture(images[imageOffset], samplers[samplerOffset], uv).
+// they are macros so the heap accesses are the arguments of the intrinsic (the type of an image is decided by how it is used, see accessChainBaseArrayElementTypeIfImageHeap).
+// the offsets are u32 like spirv wants them, a signed offset has to be cast.
+//
+HeapOffsetFunction :: struct {
+   name:          string;
+   resources:     [] string; // the heap of each resource argument, in order
+   parameters:    string;    // the parameters after the resources
+   arguments:     string;    // the parameters after the resources as arguments
+   returnType:    string;    // empty if the function doesnt return anything
+}
+
+HEAP_OFFSET_FUNCTIONS :: HeapOffsetFunction.[
+   .{ TEXTURE_FLOAT_2D_FUNCTION_NAME,     .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2",                           "uv",                     "f32x4" },
+   .{ TEXTURE_FLOAT_2D_LOD_FUNCTION_NAME, .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, lod: f32",                 "uv, lod",                "f32x4" },
+   .{ TEXTURE_INT_2D_FUNCTION_NAME,       .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2",                           "uv",                     "s32x4" },
+   .{ TEXTURE_BIAS_FUNCTION_NAME,         .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, bias: f32",                "uv, bias",               "f32x4" },
+   .{ TEXTURE_GRAD_FUNCTION_NAME,         .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, ddx: f32x2, ddy: f32x2",   "uv, ddx, ddy",           "f32x4" },
+   .{ TEXTURE_GATHER_FUNCTION_NAME,       .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, component: s32",           "uv, component",          "f32x4" },
+   .{ TEXTURE_CMP_FUNCTION_NAME,          .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, reference: f32",           "uv, reference",          "f32"   },
+   .{ TEXTURE_CMP_LOD_FUNCTION_NAME,      .[IMAGE_HEAP_VARIABLE_NAME, SAMPLER_HEAP_VARIABLE_NAME], "uv: f32x2, reference: f32, lod: f32", "uv, reference, lod",     "f32"   },
+   .{ IMAGE_WRITE_FUNCTION_NAME,          .[IMAGE_HEAP_VARIABLE_NAME],                             "coordinate: s32x2, texel: f32x4",     "coordinate, texel",      ""      },
+   .{ TEXEL_FETCH_FUNCTION_NAME,          .[IMAGE_HEAP_VARIABLE_NAME],                             "coordinate: s32x2, lod: s32",         "coordinate, lod",        "f32x4" },
+   .{ TEXEL_FETCH_INT_FUNCTION_NAME,      .[IMAGE_HEAP_VARIABLE_NAME],                             "coordinate: s32x2, lod: s32",         "coordinate, lod",        "s32x4" },
+   .{ TEXTURE_SIZE_FUNCTION_NAME,         .[IMAGE_HEAP_VARIABLE_NAME],                             "lod: s32",                            "lod",                    "s32x2" },
+   .{ TEXTURE_LEVELS_FUNCTION_NAME,       .[IMAGE_HEAP_VARIABLE_NAME],                             "",                                    "",                       "s32"   },
+   .{ IMAGE_READ_FUNCTION_NAME,           .[IMAGE_HEAP_VARIABLE_NAME],                             "coordinate: s32x2",                   "coordinate",             "f32x4" },
+   .{ IMAGE_SIZE_FUNCTION_NAME,           .[IMAGE_HEAP_VARIABLE_NAME],                             "",                                    "",                       "s32x2" },
+   .{ TRACE_RAY_FUNCTION_NAME,            .[TLAS_HEAP_VARIABLE_NAME],
+      "rayFlags: RayFlags, cullMask: u32, sbtOffset: u32, sbtStride: u32, missIndex: u32, rayOrigin: f32x3, rayTMin: f32, rayDirection: f32x3, rayTMax: f32, payload: *$T",
+      "rayFlags, cullMask, sbtOffset, sbtStride, missIndex, rayOrigin, rayTMin, rayDirection, rayTMax, payload", "" },
+];
+
+#insert #run -> string {
+   builder: String_Builder;
+
+   for HEAP_OFFSET_FUNCTIONS {
+      // texture :: (imageOffset: u32, samplerOffset: u32, uv: f32x2) -> f32x4 #expand { return texture(images[imageOffset], samplers[samplerOffset], uv); }
+      parameters: [..] string;
+      arguments:  [..] string;
+      for heap: it.resources {
+         offsetName: string;
+         if heap == {
+            case IMAGE_HEAP_VARIABLE_NAME;   offsetName = "imageOffset";
+            case SAMPLER_HEAP_VARIABLE_NAME; offsetName = "samplerOffset";
+            case TLAS_HEAP_VARIABLE_NAME;    offsetName = "tlasOffset";
+            case; assert(false, "heap: %", heap);
+         }
+         array_add(*parameters, sprint("%: u32", offsetName));
+         array_add(*arguments, sprint("%[%]", heap, offsetName));
+      }
+      if (it.parameters) array_add(*parameters, it.parameters);
+      if (it.arguments)  array_add(*arguments, it.arguments);
+
+      returns := ifx it.returnType then sprint(" -> %", it.returnType) else "";
+      call := sprint("%(%)", it.name, join(..arguments, ", "));
+      if (it.returnType) call = sprint("return %", call);
+
+      print_to_builder(*builder, "% :: (%)% #expand { %; }\n", it.name, join(..parameters, ", "), returns, call);
+   }
+
+   return builder_to_string(*builder);
+};
+
 // the flags of TraceRay (and of incomingrayflags), the bits are the ones of the RayFlagsMask of spirv
 RayFlags :: enum_flags u32 {
    Opaque;
@@ -1781,7 +1846,7 @@ CompilationData :: struct {
    usingStack:                               [..] *Code_Node;  // the expressions of the using statements in scope while typing, the innermost last. see GetUsingAccess
    usingAccesses:                            Table(*Code_Ident, *Code_Binary_Operator); // an identifier that is a member reached through using is generated as this access (base.member)
    pointerIterators:                         Table(*Code_Declaration, *Code_For); // the it of a for * loop. it is the address of the element, see the .FOR case of DetermineCodeNodeTypes
-   pointerIteratorAddresses:                 Table(*Code_Declaration, PointerIteratorAddress); // the address the it of a for * loop is in the current iteration
+   pointerValues:                            Table(*Code_Declaration, PointerValue); // variables that are a pointer that is not stored anywhere, see PointerValue
    loopBases:                                Table(*Code_Declaration, LoopBase); // see LoopBase
    interfaceVariableIdentifiers:             [..] Identifier; // other global variables the entry point uses (workgroup variables)
    usesInt64Atomics:                         bool;
@@ -7445,11 +7510,11 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             RETURN(accessSSAId, accessSpirvType);
          }
 
-         // the it of a for * loop is the address of the element, it is computed at the start of each iteration
-         isPointerIterator, pointerIteratorAddress := table_find(*data.pointerIteratorAddresses, ci.resolved_declaration);
-         if (isPointerIterator) {
-            assert(!additionalData.isLValue, "the it of a for * loop cant be assigned. loc: %", GetLocationString(node));
-            RETURN(pointerIteratorAddress.ssaId, pointerIteratorAddress.spirvType);
+         // the it of a for * loop or a macro parameter that is a pointer to a payload or a workgroup variable, see PointerValue
+         isPointerValue, pointerValue := table_find(*data.pointerValues, ci.resolved_declaration);
+         if (isPointerValue) {
+            assert(!additionalData.isLValue, "% cant be assigned (it is the it of a for * loop, or a macro parameter that points to a payload or a workgroup variable which spirv doesnt allow to store). loc: %", ci.name, GetLocationString(node));
+            RETURN(pointerValue.ssaId, pointerValue.spirvType);
          }
 
          // the array a for loop iterates, see LoopBase
@@ -8935,10 +9000,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
 
          // it of a for * loop is the address of the element, computed once in each iteration (changing it_index in the loop doesnt change it)
          if (isPointerLoop) {
-            address: PointerIteratorAddress;
+            address: PointerValue;
             address.ssaId = GenerateInstructions(data, nodes.element, general, function, currentFunction, .{ isLValue = true }, spirvType = *address.spirvType);
             assert(address.spirvType != null && address.spirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(cf));
-            table_set(*data.pointerIteratorAddresses, cf.ident_decl, address);
+            table_set(*data.pointerValues, cf.ident_decl, address);
          }
          GenerateInstructions(data, cf.block, general, function, currentFunction);
          WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
@@ -8979,6 +9044,22 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          // identifiers that refer to it use its value directly. see the .IDENT case
          if (cd.flags & .IS_CONSTANT) return 0;
 
+         // a macro parameter that is a pointer. the argument is generated with its own type: if it points to a payload or a workgroup variable
+         // spirv doesnt allow storing it so the parameter is the pointer itself (see PointerValue). a pointer to buffer memory is an ordinary variable.
+         macroPointerArgumentSSAId: SSAId;
+         if (cd.type.type == .POINTER && cd.expression != null && cd.expression.kind == .EXTRACT && (cast(*Code_Extract) cd.expression).from == null) {
+            argumentSpirvType: *Type_Info;
+            argumentSSAId := GenerateInstructions(data, cd.expression, general, function, currentFunction, spirvType = *argumentSpirvType);
+            assert(argumentSpirvType != null && argumentSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
+
+            if ((cast(*TypeInfoPointer) argumentSpirvType).storageClass != .PhysicalStorageBuffer) {
+               table_set(*data.pointerValues, cd, .{ ssaId = argumentSSAId, spirvType = argumentSpirvType });
+               return 0;
+            }
+
+            macroPointerArgumentSSAId = ConvertValue(data, function, argumentSSAId, argumentSpirvType, GetNodeType(cd), node);
+         }
+
          variableIdentifier: Identifier = .{ type = .Variable, variable.declaration = cd };
          variableSSAId := GetSSAId(data, variableIdentifier);
 
@@ -9002,7 +9083,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             // in the declaration apperantly i dont need to explicitly say the literalShouldHaveBeenType because jai does convert in this case.
             // but since i cant rely on it because it looks unstable and unfinished im gonna pass the literalShouldHaveBeenType
             //    - apila, 07/05/26
-            expressionSSAId := GenerateInstructions(data, cd.expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = variableType });
+            expressionSSAId := macroPointerArgumentSSAId;
+            if (expressionSSAId == 0)  expressionSSAId = GenerateInstructions(data, cd.expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = variableType });
 
             // if you just declared something you cant be storing into PhysicalStorageBuffer therefore i dont need to use the dedicated Store function
             WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, variableSSAId, expressionSSAId);
@@ -10594,7 +10676,7 @@ GetArrayViewTypeInfo :: (elementType: *Type_Info) -> *Type_Info_Struct {
 arrayViewTypeInfos: Table(*Type_Info, *Type_Info_Struct);
 
 IsTraceRayFunction :: (cph: *Code_Procedure_Header) -> bool {
-   return cph.name == TRACE_RAY_FUNCTION_NAME;
+   return cph.name == TRACE_RAY_FUNCTION_NAME && !IsMacroProcedure(cph); // not the one that takes the offset of the tlas (see HEAP_OFFSET_FUNCTIONS)
 }
 
 //
@@ -11249,7 +11331,11 @@ ForLoopNodes :: struct {
 //    - otherwise (a call for example) its value is put in a variable.
 // the base of a loop is a declaration created by the backend, whose address is that.
 //
-PointerIteratorAddress :: struct {
+// a pointer that is used directly instead of being stored in a variable:
+//    - the it of a for * loop, the address of the element in the current iteration
+//    - a macro parameter whose argument is a pointer to a payload or a workgroup variable. spirv doesnt allow storing such a pointer.
+// they cant be assigned.
+PointerValue :: struct {
    ssaId:      SSAId;
    spirvType:  *Type_Info;
 }
@@ -12093,12 +12179,12 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
       leftType := GetNodeType(cbo.left);
       leftType = UnwindVariantsAllTheWay(leftType);
 
-      // it.x in a for * loop is array[it_index].x
+      // it.x in a for * loop is array[it_index].x (and the same for a macro parameter that points to a payload, see PointerValue)
       if (cbo.left.kind == .IDENT) {
-         isPointerIterator, pointerIteratorAddress := table_find(*data.pointerIteratorAddresses, (cast(*Code_Ident) cbo.left).resolved_declaration);
-         if (isPointerIterator) {
-            currentBaseSSAId.* = pointerIteratorAddress.ssaId;
-            currentBaseSpirvType.* = pointerIteratorAddress.spirvType;
+         isPointerValue, pointerValue := table_find(*data.pointerValues, (cast(*Code_Ident) cbo.left).resolved_declaration);
+         if (isPointerValue) {
+            currentBaseSSAId.* = pointerValue.ssaId;
+            currentBaseSpirvType.* = pointerValue.spirvType;
 
             elementType := (cast(*TypeInfoPointer) leftType).pointerTo;
             assert(cbo.operator_type == #char ".", "indexing the it of a for * loop is not supported. loc: %", GetLocationString(cbo));
@@ -12410,7 +12496,7 @@ IsLValueExpression :: (data: *CompilationData, node: *Code_Node) -> bool {
          isUsingAccess, usingAccess := table_find(*data.usingAccesses, ci);
          if (isUsingAccess) return IsLValueExpression(data, usingAccess);
          if (table_contains(*data.loopBases, ci.resolved_declaration)) return true;
-         if (table_contains(*data.pointerIteratorAddresses, ci.resolved_declaration) || table_contains(*data.pointerIterators, ci.resolved_declaration)) return false;
+         if (table_contains(*data.pointerValues, ci.resolved_declaration) || table_contains(*data.pointerIterators, ci.resolved_declaration)) return false;
          return ci.resolved_declaration != null && !(ci.resolved_declaration.flags & .IS_CONSTANT);
 
       case .BINARY_OPERATOR;
