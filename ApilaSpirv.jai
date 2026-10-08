@@ -7901,6 +7901,33 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
                //       - apila, 07/05/26
                //
 
+               // pointer arithmetic: p + n, n + p, p - n (see OffsetPointer) and p - q (see PointerDifference). the operands are generated in order, the integer as u64.
+               leftIsPointer := leftType.type == TYPE_INFO_POINTER_TAG;
+               rightIsPointer := rightType.type == TYPE_INFO_POINTER_TAG;
+               if ((cbo.operator_type == #char "+" || cbo.operator_type == #char "-") && (leftIsPointer || rightIsPointer)) {
+                  u64Type := cast(*Type_Info) u64;
+                  leftSpirvType: *Type_Info;
+                  rightSpirvType: *Type_Info;
+                  leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = ifx leftIsPointer then null else u64Type }, spirvType = *leftSpirvType);
+                  rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = ifx rightIsPointer then null else u64Type }, spirvType = *rightSpirvType);
+                  assert(leftSpirvType != null && rightSpirvType != null, "loc: %", GetLocationString(node));
+
+                  if (leftIsPointer && rightIsPointer) {
+                     assert(cbo.operator_type == #char "-", "loc: %", GetLocationString(node));
+                     resultSSAId := PointerDifference(data, function, leftSSAId, cast(*TypeInfoPointer) leftSpirvType, rightSSAId, cast(*TypeInfoPointer) rightSpirvType, node);
+                     RETURN(resultSSAId, cast(*Type_Info) s64);
+                  }
+
+                  if (leftIsPointer) {
+                     resultSSAId := OffsetPointer(data, function, leftSSAId, cast(*TypeInfoPointer) leftSpirvType, rightSSAId, cbo.operator_type == #char "-", node);
+                     RETURN(resultSSAId, leftSpirvType);
+                  }
+
+                  assert(cbo.operator_type == #char "+", "loc: %", GetLocationString(node)); // n - p is not allowed by jai
+                  resultSSAId := OffsetPointer(data, function, rightSSAId, cast(*TypeInfoPointer) rightSpirvType, leftSSAId, false, node);
+                  RETURN(resultSSAId, rightSpirvType);
+               }
+
                // not sure about literalShouldHaveBeenTypes here
                AssertNotUserOperator(leftType, rightType, cbo);
                leftType, rightType = GetArithmeticOperandTypes(leftType, rightType, cbo.operator_type);
@@ -7938,6 +7965,24 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
                assert(found);
                found2, rightType := table_find(*data.codeNodeTypes, cbo.right);
                assert(found2);
+
+               // p += n, p -= n (see OffsetPointer)
+               if (leftType.type == TYPE_INFO_POINTER_TAG) {
+                  assert(cbo.operator_type == .PLUS_ASSIGN || cbo.operator_type == .MINUS_ASSIGN, "loc: %", GetLocationString(node));
+                  offsetSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) u64 });
+
+                  pointerLValueSSAId: SSAId = U32_MAX;
+                  pointerLValueSpirvType: *Type_Info;
+                  pointerSpirvType: *Type_Info;
+                  pointerSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, lValueOut = *pointerLValueSSAId, spirvType = *pointerSpirvType, lValueOutSpirvType = *pointerLValueSpirvType);
+                  assert(pointerSpirvType != null && pointerSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
+
+                  resultSSAId := OffsetPointer(data, function, pointerSSAId, cast(*TypeInfoPointer) pointerSpirvType, offsetSSAId, cbo.operator_type == .MINUS_ASSIGN, node);
+
+                  assert(pointerLValueSSAId != U32_MAX && pointerLValueSpirvType != null, "the pointer cant be assigned. loc: %", GetLocationString(node));
+                  Store(data, function, pointerLValueSSAId, resultSSAId, (cast(*TypeInfoPointer) pointerLValueSpirvType).storageClass == .PhysicalStorageBuffer, pointerSpirvType);
+                  RETURN(resultSSAId, null);
+               }
 
                operatorType := GetOperatorFromCompoundAssignment(cbo.operator_type);
 
@@ -10066,6 +10111,12 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
                   assert(tipLeft.storageClass == tipRight.storageClass, "tipLeft.storageClass: %, tipRight.storageClass: %", tipLeft.storageClass, tipRight.storageClass);
 
+                  // p - q is the number of elements between them (s64)
+                  if (cbo.operator_type == #char "-") {
+                     TableAdd(*data.codeNodeTypes, node, node.type);
+                     return node.type;
+                  }
+
                   TableAdd(*data.codeNodeTypes, node, rightType);
                   return rightType;
                }
@@ -10506,6 +10557,7 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
                tip.storageClass = GetLValueStorageClass(data, cuo.subexpression);
                tip.pointerTo = subexpressionType;
+               resultType = tip;
             }
 
             case; assert(false, "not yet implemented! type: %", cuo.operator_type);
@@ -12134,23 +12186,66 @@ IndexPointer :: (data: *CompilationData, b: *BuilderType, addressOfPointer: SSAI
 
    // since i set spirvShouldHaveBeenType it is now guranteed that the returned ssa id will be casted to that type no matter what.
    indexSSAId := GenerateInstructions(data, indexNode, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) u64 });
+
+   return OffsetPointer(data, b, pointerSSAId, pointerType, indexSSAId, false, indexNode);
+}
+
+//
+// p + n, n + p, p - n (and p[n], see IndexPointer) move the address n elements, like jai: n * size_of(element) bytes (a *void moves n bytes).
+// the offset is u64. a negative offset is sign extended when it is converted (see DoCast) and the arithmetic wraps around.
+// spirv only allows it on buffer memory: the address is converted to an integer and back.
+//
+OffsetPointer :: (data: *CompilationData, b: *BuilderType, pointerSSAId: SSAId, pointerType: *TypeInfoPointer, offsetSSAId: SSAId, subtract: bool, node: *Code_Node) -> SSAId {
+   AssertPointerArithmeticAllowed(pointerType, node);
    u64TypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) u64 });
 
-   // jai lays out arrays with a stride of size_of(element)
-   strideSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx pointerType.pointerTo.runtime_size, bitSize = 64 } });
-   offsetSSAId := GetNextSSAId(data);
-   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .IMul, u64TypeSSAId, offsetSSAId, indexSSAId, strideSSAId);
+   strideSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx GetPointerArithmeticStride(pointerType), bitSize = 64 } });
+   byteOffsetSSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .IMul, u64TypeSSAId, byteOffsetSSAId, offsetSSAId, strideSSAId);
 
-   pointerAsU64SSAId := GetNextSSAId(data);
-   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .ConvertPtrToU, u64TypeSSAId, pointerAsU64SSAId, pointerSSAId);
+   addressSSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .ConvertPtrToU, u64TypeSSAId, addressSSAId, pointerSSAId);
 
-   elementAddressAsU64SSAId := GetNextSSAId(data);
-   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .IAdd, u64TypeSSAId, elementAddressAsU64SSAId, pointerAsU64SSAId, offsetSSAId);
+   resultAddressSSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, ifx subtract then SpvOp.ISub else .IAdd, u64TypeSSAId, resultAddressSSAId, addressSSAId, byteOffsetSSAId);
 
-   elementAddressSSAId := GetNextSSAId(data);
-   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .ConvertUToPtr, GetSSAId(data, .{ type = ._Type, _type = pointerType }), elementAddressSSAId, elementAddressAsU64SSAId);
+   resultSSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .ConvertUToPtr, GetSSAId(data, .{ type = ._Type, _type = pointerType }), resultSSAId, resultAddressSSAId);
 
-   return elementAddressSSAId;
+   return resultSSAId;
+}
+
+// p - q is the number of elements between them (s64), like jai
+PointerDifference :: (data: *CompilationData, b: *BuilderType, leftSSAId: SSAId, leftType: *TypeInfoPointer, rightSSAId: SSAId, rightType: *TypeInfoPointer, node: *Code_Node) -> SSAId {
+   AssertPointerArithmeticAllowed(leftType, node);
+   AssertPointerArithmeticAllowed(rightType, node);
+   u64TypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) u64 });
+   s64TypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) s64 });
+
+   addresses: [2] SSAId;
+   for pointerSSAId, pointerIndex: SSAId.[leftSSAId, rightSSAId] {
+      addresses[pointerIndex] = GetNextSSAId(data);
+      WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .ConvertPtrToU, u64TypeSSAId, addresses[pointerIndex], pointerSSAId);
+   }
+
+   byteDifferenceSSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .ISub, s64TypeSSAId, byteDifferenceSSAId, addresses[0], addresses[1]);
+
+   strideSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = GetPointerArithmeticStride(leftType), bitSize = 64 } });
+   resultSSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .SDiv, s64TypeSSAId, resultSSAId, byteDifferenceSSAId, strideSSAId);
+
+   return resultSSAId;
+}
+
+AssertPointerArithmeticAllowed :: (pointerType: *TypeInfoPointer, node: *Code_Node) {
+   assert(pointerType.storageClass == .PhysicalStorageBuffer, "pointer arithmetic is only allowed on pointers to buffer memory (PhysicalStorageBuffer), spirv doesnt allow it on % memory. loc: %", pointerType.storageClass, GetLocationString(node));
+}
+
+// jai lays out arrays with a stride of size_of(element)
+GetPointerArithmeticStride :: (pointerType: *TypeInfoPointer) -> s64 {
+   if (pointerType.pointerTo.type == .VOID) return 1;
+   return pointerType.pointerTo.runtime_size;
 }
 
 DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code_Binary_Operator, currentFunction: *Code_Procedure_Header, isLValue: bool, lValueOut: *SSAId = null, spirvType: **Type_Info = null, lValueOutSpirvType: **Type_Info = null) -> SSAId {
@@ -12201,12 +12296,13 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
       if cbo.left.kind == {
          case .BINARY_OPERATOR; {
             cboLeft := cast(*Code_Binary_Operator) cbo.left;
-            assert(cboLeft.operator_type == #char "." || // member access and pointer access
-                   cboLeft.operator_type == .ARRAY_SUBSCRIPT,
-               "operator: %", cboLeft.operator_type
-            );
-
-            Helper(data, b, cboLeft, currentBaseSpirvType, currentBaseSSAId, indices, literalIndices, lastAccessOperation, currentFunction);
+            if (cboLeft.operator_type == #char "." || // member access and pointer access
+                cboLeft.operator_type == .ARRAY_SUBSCRIPT) {
+               Helper(data, b, cboLeft, currentBaseSpirvType, currentBaseSSAId, indices, literalIndices, lastAccessOperation, currentFunction);
+            } else {
+               // any other operator, (p + 1).x for example. its value is put in a variable like the other expressions below
+               currentBaseSSAId.*, currentBaseSpirvType.* = MaterializeValue(data, b, cbo.left, currentFunction);
+            }
          }
 
          // reached to the base

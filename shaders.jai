@@ -3064,10 +3064,16 @@ TestMacroLoadEither :: (p: *s32, other: *s32, useOther: bool) -> s32 #expand {
    return p.*;
 }
 
+TestMacroNextInt :: (p: *s32) -> s32 #expand {
+   p += 1;
+   return p.*;
+}
+
 // a pointer to buffer memory is a variable in the macro, it can be changed
 TestMacroPointerArguments :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    TestMacroIncrement(data.ints, data.i);
    data.i = TestMacroLoadEither(data.ints, *data.inner.indices.y, data.f > 0);
+   data.i += TestMacroNextInt(data.ints);
 } @mesh @1_1_1 @1_1 @triangles
 
 // a pointer to a workgroup variable is used directly by the macro, spirv doesnt allow storing it
@@ -3077,6 +3083,24 @@ TestMacroWorkgroupPointer :: (data: *TestComputeData) {
    Barrier();
    TestMacroIncrement(*counter, 1);
 } @compute @8_8
+
+// pointer arithmetic moves the address n elements like jai (n * size_of(element)). it is only allowed on buffer memory.
+TestPointerArithmetic :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   q := data.ints + 2;
+   q += 1;
+   q -= data.i;                         // a signed offset, it can be negative
+   q = 1 + q;
+   q = q - cast(u8) 1;
+   data.i = q.*;
+   data.f = (data.floats + data.u).*;
+   data.v4 = (data.vectors + 1).*;
+   data.f += (data.inner + 1).value;
+   data.inner += 1;                     // the pointer is in buffer memory
+   data.bytes -= 3;
+   data.i += xx (q - data.ints);        // the number of elements between them
+   data.ints[1] = (data.ints + 1).*;    // the same address as data.ints[1]
+   data.ints[0] = (*data.ints[2] + 1).*;
+} @mesh @1_1_1 @1_1 @triangles
 
 TestNestedDefaults :: struct {
    inner:  TestDefaults;
