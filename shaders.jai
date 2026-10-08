@@ -2428,6 +2428,19 @@ TestSetMeshOutputsNamedArguments :: (o: [] TestOut, p: [] TestPrim, data: *TestD
    SetMeshOutputs(primitiveCount = 2, vertexCount = 4);
 } @mesh @1_1_1 @4_2 @triangles
 
+// the per primitive builtins. a fragment shader reads primitiveId as primitiveid
+TestMeshPerPrimitiveBuiltins :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(3, 1);
+   meshvertices[0].position = .{ 0, 0, 0, 1 };
+   meshvertices[1].position = .{ 1, 0, 0, 1 };
+   meshvertices[2].position = .{ 0, 1, 0, 1 };
+   meshtriangles[0] = .{ 0, 1, 2 };
+   meshprimitives[0].primitiveId = data.i;
+   meshprimitives[0].layer = 0;
+   meshprimitives[0].viewportIndex = 0;
+   meshprimitives[0].cullPrimitive = data.f < 0;
+} @mesh @1_1_1 @3_1 @triangles
+
 TestLocalStruct :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    s: TestInner;
    s.value = data.f;
@@ -2681,6 +2694,111 @@ TestRgenTwoPayloads :: (data: *TestRgenData) {
    TraceRay(tlases[data.tlas], 1, 0xFF, 0, 0, 1, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 1, 0 }, 1000, *second);
    data.values[0] = second.distance;
 } @rgen
+
+testGlobalPayload: TestRayPayload; @payload
+testGlobalPayloadIn: TestRayPayload; @payloadin
+
+TestRgenGlobalPayload :: (data: *TestRgenData) {
+   testGlobalPayload.color = f32x4.{ 0, 0, 0, 0 };
+   TraceRay(tlases[data.tlas], .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *testGlobalPayload);
+   ImageWrite(images[data.image], .{ 0, 0 }, testGlobalPayload.color);
+} @rgen
+
+TestRmissGlobalPayloadIn :: (data: *TestRgenData) {
+   testGlobalPayloadIn.hit = false;
+   testGlobalPayloadIn.color = f32x4.{ 0, 0, 1, 1 };
+} @rmiss
+
+// a miss shader doesnt have to use a payload
+TestRmissNoPayload :: (data: *TestRgenData) {
+   data.values[0] = 1;
+} @rmiss
+
+// the hit attributes of a triangle hit are its barycentrics
+TestRchitHitAttributes :: (data: *TestRgenData) {
+   payload: TestRayPayload; @payloadin
+   attribs: f32x2; @hitattribute
+   barycentrics := f32x3.{ 1 - attribs.x - attribs.y, attribs.x, attribs.y };
+   payload.color = f32x4.{ barycentrics.x, barycentrics.y, barycentrics.z, cast(f32) hitkind };
+} @rchit
+
+// an any hit shader can ignore the hit (alpha test) or stop the ray
+TestRahit :: (data: *TestRgenData) {
+   payload: TestRayPayload; @payloadin
+   attribs: f32x2; @hitattribute
+   alpha := data.values[primitiveid] * attribs.x;
+   if alpha < 0.5  IgnoreIntersection();
+   if raytmax > 100  TerminateRay();
+   payload.hit = true;
+} @rahit
+
+// an intersection shader reports the hits of procedural geometry, the hit attributes are what it wrote
+TestRint :: (data: *TestRgenData) {
+   attribs: f32x2; @hitattribute
+   attribs = f32x2.{ 0.25, 0.5 };
+   t := (data.values[0] - objectrayorigin.z) / objectraydirection.z;
+   if t > raytmin && t < raytmax  ReportIntersection(t, 1);
+} @rint
+
+TestCallableData :: struct {
+   value: f32;
+}
+
+// a callable shader gets the data of the caller
+TestRgenExecuteCallable :: (data: *TestRgenData) {
+   callable: TestCallableData; @callabledata
+   callable.value = 2;
+   ExecuteCallable(0, *callable);
+   data.values[0] = callable.value;
+} @rgen
+
+TestRcall :: (data: *TestRgenData) {
+   incoming: TestCallableData; @callabledatain
+   incoming.value *= cast(f32) launchid.x;
+} @rcall
+
+// a ray traced inline: a shadow ray from a fragment shader
+TestFragmentRayQuery :: (v: TestOut, p: TestPrim, data: *TestRgenData) -> f32x4 {
+   q: RayQuery;
+   RayQueryInitialize(*q, tlases[data.tlas], .Opaque | .TerminateOnFirstHit, 0xFF, f32x3.{ v.uv.x, v.uv.y, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);
+   while RayQueryProceed(*q) {}
+   shadow := ifx RayQueryGetCommittedType(*q) == .Triangle then 0.2 else 1.0;
+   return f32x4.{ shadow, shadow, shadow, 1 };
+} @fragment
+
+TestRayQueryData :: struct {
+   tlas:    u32;
+   t:       f32;
+   bary:    f32x2;
+   indices: s32x4;
+   origin:  f32x3;
+   dir:     f32x3;
+   flags:   u32;
+}
+
+// every function of a ray query. the committed argument says which intersection (the committed one or the candidate one)
+TestComputeRayQuery :: (data: *TestRayQueryData) {
+   q: RayQuery;
+   RayQueryInitialize(*q, data.tlas, .Opaque, 0xFF, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);   // the offset of the tlas in the heap
+   while RayQueryProceed(*q) {
+      if RayQueryGetCandidateType(*q) == .Triangle {
+         if RayQueryGetIntersectionFrontFace(*q, false) && RayQueryGetIntersectionT(*q, false) > 0  RayQueryConfirmIntersection(*q);
+      } else {
+         RayQueryGenerateIntersection(*q, 5);
+      }
+   }
+
+   if RayQueryGetCommittedType(*q) != .None {
+      data.t = RayQueryGetIntersectionT(*q, true) + RayQueryGetRayTMin(*q);
+      data.bary = RayQueryGetIntersectionBarycentrics(*q, true);
+      data.indices = s32x4.{ RayQueryGetIntersectionInstanceCustomIndex(*q, true), RayQueryGetIntersectionInstanceId(*q, true), RayQueryGetIntersectionGeometryIndex(*q, true), RayQueryGetIntersectionPrimitiveIndex(*q, true) };
+      data.origin = RayQueryGetIntersectionObjectRayOrigin(*q, true) + RayQueryGetWorldRayOrigin(*q);
+      data.dir = RayQueryGetIntersectionObjectRayDirection(*q, true) + RayQueryGetWorldRayDirection(*q);
+      data.dir += RayQueryGetIntersectionObjectToWorld(*q, true) * f32x4.{ 0, 0, 0, 1 } + RayQueryGetIntersectionWorldToObject(*q, true) * f32x4.{ 1, 0, 0, 0 };
+      data.flags = cast(u32) RayQueryGetRayFlags(*q);
+   }
+   RayQueryTerminate(*q);
+} @compute @1
 
 TestRgenPayloadB :: struct {
    distance: f32;
@@ -3094,6 +3212,38 @@ TestMacroWorkgroupPointer :: (data: *TestComputeData) {
    Barrier();
    TestMacroIncrement(*counter, 1);
 } @compute @8_8
+
+// the pointers in an array point to buffer memory, like the other pointers
+TestPointerArrayData :: struct {
+   ptrs:    [2] *s32;
+   inners:  [2] *TestInner;
+   nested:  [2] [2] *f32;
+   views:   [] *s32;
+   result:  s32;
+}
+
+TestPointerArrays :: (o: [] TestOut, p: [] TestPrim, data: *TestPointerArrayData) {
+   data.ptrs[1].* = 5;
+   data.result = data.ptrs[0].* + data.ptrs[1][2];
+   data.inners[1].value = 2;
+   data.nested[1][0].* = data.inners[0].value;
+   local := data.ptrs;
+   data.result += local[0].*;
+   for data.ptrs  data.result += it.*;
+   data.views[1].* = data.result;
+   data.ptrs[0] = data.ptrs[1] + 1;
+} @mesh @1_1_1 @1_1 @triangles
+
+TEST_PRINT_FORMAT :: "constant format %\n";
+
+// DebugPrint is written like jai's print, the specifiers of printf come from the types
+TestDebugPrint :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   DebugPrint("i = %, u = %, f = %\n", data.i, data.u, data.f);
+   DebugPrint("v3 = %, v4 = %, positional: %2 %1, then % \% done\n", data.v3, data.v4, data.i);
+   DebugPrint("bool % small % big % double % pointer % enum %\n", data.f > 0, cast(u8) data.u, cast(s64) data.i, cast(f64) data.f, data.ints, RayFlags.Opaque);
+   DebugPrint("no arguments\n");
+   DebugPrint(TEST_PRINT_FORMAT, data.i);
+} @mesh @1_1_1 @1_1 @triangles
 
 // pointer arithmetic moves the address n elements like jai (n * size_of(element)). it is only allowed on buffer memory.
 TestPointerArithmetic :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
@@ -3839,6 +3989,54 @@ TestComputeWorkgroup :: (data: *TestComputeData) {
    }
 } @compute @8_8
 
+// a global variable has to have a note that says which memory it is in. it is declared in every shader that uses it
+testGlobalCache: [64] f32; @workgroup
+
+TestComputeGlobalWorkgroup :: (data: *TestComputeData) {
+   testGlobalCache[localinvocationindex] = data.values[globalinvocationid.x];
+   Barrier();
+   if localinvocationindex == 0  data.values[0] = testGlobalCache[63];
+} @compute @64
+
+TestSubgroupData :: struct {
+   f:      f32;
+   i:      s32;
+   u:      u32;
+   v3:     f32x3;
+   mask:   u32x4;
+   values: *u32;
+}
+
+// the subgroup operations, every family of them
+TestSubgroups :: (data: *TestSubgroupData) {
+   active := data.values[globalinvocationid.x] > 0;
+   data.u = subgroupsize + subgroupinvocationid + numsubgroups + subgroupid;
+   if SubgroupElect()  data.i = 1;
+   if SubgroupAll(active) || SubgroupAny(active) || SubgroupAllEqual(data.f) || SubgroupAllEqual(active)  data.i += 1;
+   data.f = SubgroupBroadcast(data.f, 0) + SubgroupBroadcastFirst(data.f);
+
+   mask := SubgroupBallot(active);
+   data.mask = mask;
+   data.u += SubgroupBallotBitCount(mask) + SubgroupBallotInclusiveBitCount(mask) + SubgroupBallotExclusiveBitCount(mask) + SubgroupBallotFindLSB(mask) + SubgroupBallotFindMSB(mask);
+   if SubgroupInverseBallot(mask) && SubgroupBallotBitExtract(mask, 3)  data.i += 2;
+
+   data.f += SubgroupAdd(data.f) + SubgroupMul(data.f) + SubgroupMin(data.f) + SubgroupMax(data.f);
+   data.i += SubgroupInclusiveAdd(data.i) + SubgroupExclusiveMin(data.i) + SubgroupAnd(data.i) + SubgroupOr(data.i) + SubgroupXor(data.i) + SubgroupInclusiveMul(data.i);
+   data.u += SubgroupExclusiveAdd(data.u) + SubgroupInclusiveMax(data.u) + SubgroupExclusiveXor(data.u) + SubgroupInclusiveAnd(data.u) + SubgroupExclusiveOr(data.u);
+   data.v3 = SubgroupAdd(data.v3) + SubgroupShuffle(data.v3, 1) + SubgroupShuffleXor(data.v3, 1) + SubgroupShuffleUp(data.v3, 1) + SubgroupShuffleDown(data.v3, 1);
+   if SubgroupAnd(active) || SubgroupInclusiveOr(active) || SubgroupExclusiveXor(active)  data.i += 3;
+   SubgroupBarrier();
+} @compute @64
+
+// a ballot compacts the visible ones (the usual way to cull in a mesh shader)
+TestMeshSubgroups :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   visible := data.floats[localinvocationindex] > 0;
+   mask := SubgroupBallot(visible);
+   index := SubgroupBallotExclusiveBitCount(mask);
+   if visible  data.ints[index] = cast(s32) localinvocationindex;
+   if SubgroupElect()  data.i = cast(s32) SubgroupBallotBitCount(mask);
+} @mesh @32 @1_1 @triangles
+
 // mesh shaders have workgroups too
 TestMeshWorkgroup :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    shared: [32] s32; @workgroup
@@ -3888,6 +4086,29 @@ TestHlslIntrinsics :: (data: *TestIntrinsicData) {
    data.v4 = mul(data.m4, v4) + mul(v4, data.m4);   // column vector and row vector
    data.v2 = mul(data.m2, data.v2);
 } @compute @1
+
+// the bits of integers, bitcasts and packing
+TestBitIntrinsics :: (data: *TestIntrinsicData) {
+   data.u = asuint(data.f) + asuint(data.i) + countbits(data.u) + reversebits(data.u) + firstbitlow(data.u) + firstbithigh(data.u);
+   data.i = asint(data.f) + asint(data.u) + firstbithigh(data.i) + firstbitlow(data.i) + countbits(data.i) + reversebits(data.i);
+   data.f = asfloat(data.u) + asfloat(data.i);
+   data.uv = asuint(data.v2) + countbits(data.uv);
+   data.iv = asint(data.v3) + firstbithigh(data.iv);
+   data.v4 = unpackunorm4x8(packunorm4x8(data.v4)) + unpacksnorm4x8(packsnorm4x8(data.v4));
+   data.v2 = unpackhalf2x16(packhalf2x16(data.v2)) + unpackunorm2x16(packunorm2x16(data.v2)) + unpacksnorm2x16(packsnorm2x16(data.v2));
+} @compute @1
+
+TestFragmentSubgroups :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   lanes := cast(f32) subgroupsize;
+   return f32x4.{ SubgroupAdd(v.uv.x) / lanes, cast(f32) subgroupinvocationid, SubgroupMax(v.uv.y), 1 };
+} @fragment
+
+// the fragment builtins that are read and the ones that are written
+TestFragmentBuiltinsReadWrite :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+   fragdepth = barycoord.x * 0.5 + barycoordnoperspective.y * 0.5;
+   samplemask = samplemaskin & 1;
+   return f32x4.{ cast(f32) primitiveid, barycoord.x, barycoord.y, fragdepth };
+} @fragment
 
 // derivatives only exist in fragment shaders
 TestHlslDerivatives :: (v: TestOut, p: TestPrim, data: *TestIntrinsicData) -> f32x4 {
@@ -3974,6 +4195,32 @@ TestTextureBranchingOperands :: (v: TestOut, p: TestPrim, data: *TestTextureData
    c += texturelod(images[data.image], samplers[data.sampler], v.uv, cast(f32) (data.f > 0 || data.count > 0));
    c += texture(images[data.image], samplers[data.sampler], ifx data.f > 0 && data.count > 0 then v.uv else ddx(v.uv));
    c.x += texturecmplod(images[data.depth], samplers[data.sampler], v.uv, 0.5, cast(f32) (data.count > 0 && data.f > 1));
+   return c;
+} @fragment
+
+// 3D, cube and 2D array images. the name of the 2D function + 3d, cube or array
+TestTextureKinds :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
+   uvw := f32x3.{ v.uv.x, v.uv.y, data.f };
+   c := texture3d(images[data.image], samplers[data.sampler], uvw);
+   c += texturelod3d(images[data.image], samplers[data.sampler], uvw, 1) + texturebias3d(images[data.image], samplers[data.sampler], uvw, 0.5);
+   c += texturegrad3d(images[data.image], samplers[data.sampler], uvw, ddx(uvw), ddy(uvw));
+   c += texelfetch3d(images[data.image], .{ 1, 2, 3 }, 0);
+
+   c += texturecube(images[data.image], samplers[data.sampler], uvw) + texturelodcube(images[data.image], samplers[data.sampler], uvw, 2);
+   c += texturebiascube(images[data.image], samplers[data.sampler], uvw, 1) + texturegradcube(images[data.image], samplers[data.sampler], uvw, ddx(uvw), ddy(uvw));
+   c += texturegathercube(images[data.image], samplers[data.sampler], uvw, 0);
+   c.x += texturecmpcube(images[data.depth], samplers[data.sampler], uvw, 0.5) + texturecmplodcube(images[data.depth], samplers[data.sampler], uvw, 0.5, 0);
+
+   c += texturearray(images[data.image], samplers[data.sampler], v.uv, 2) + texturelodarray(images[data.image], samplers[data.sampler], v.uv, 2, 1);
+   c += texturebiasarray(images[data.image], samplers[data.sampler], v.uv, 2, 0.5) + texturegradarray(images[data.image], samplers[data.sampler], v.uv, 2, ddx(v.uv), ddy(v.uv));
+   c += texturegatherarray(images[data.image], samplers[data.sampler], v.uv, 1, 3);
+   c.x += texturecmparray(images[data.depth], samplers[data.sampler], v.uv, 1, 0.5) + texturecmplodarray(images[data.depth], samplers[data.sampler], v.uv, 1, 0.5, 0);
+   c += texelfetcharray(images[data.image], .{ 1, 2 }, 3, 0);
+
+   size3 := texturesize3d(images[data.image], 0) + texturesizearray(images[data.image], 0);
+   data.size = texturesizecube(images[data.image], 0) + s32x2.{ size3.x, size3.z };
+   data.count = texturelevels3d(images[data.image]) + texturelevelscube(images[data.image]) + texturelevelsarray(images[data.image]);
+   c += texturecube(cast(u32) data.image, cast(u32) data.sampler, uvw);   // the offsets in the heaps
    return c;
 } @fragment
 
