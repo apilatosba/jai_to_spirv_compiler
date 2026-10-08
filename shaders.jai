@@ -3913,6 +3913,47 @@ TestSmallIntegersAndDoubles :: (data: *TestSmallAndDoubleData) {
    if data.x.y > 2  data.d = 0;
 } @compute @1
 
+TestLoopSemanticsData :: struct {
+   view:  [] s32;
+   other: *s32;
+   out:   *s32;
+   n:     s32;
+}
+
+TestGetLoopView :: (data: *TestLoopSemanticsData) -> [] s32 { return data.view; }
+
+// the loops behave like the cpu backend of jai
+TestForSemantics :: (o: [] TestOut, p: [] TestPrim, data: *TestLoopSemanticsData) {
+   // it of a for * loop is computed at the start of the iteration. changing it_index or the array doesnt change it
+   for * data.view {
+      before := it.*;
+      it_index += 1;
+      data.view.data = data.other;
+      data.out[0] = before + it.*;
+   }
+
+   // a call is evaluated once, its value is iterated
+   for * TestGetLoopView(data)  it.* += 1;
+   for TestGetLoopView(data)    data.n += it;
+
+   // the array is referenced: the count of the view is read in every iteration
+   for data.view {
+      if it_index == 0  data.view.count = 2;
+      data.n += it;
+   }
+
+   // a local array view
+   view := data.view;
+   view[0] = 3;
+
+   // the end of a range is read in every iteration if it is a local variable, otherwise it is evaluated once
+   n: s32 = 3;
+   for 0..n       { if it == 0 n = 1; data.n += it; }
+   for 0..data.n  { if it == 0 data.n = 1; }
+   lo: s32 = 0;
+   for < lo..n    { if it == 3 lo = 2; }
+} @mesh @1_1_1 @1_1 @triangles
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.

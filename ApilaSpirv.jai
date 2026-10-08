@@ -1337,6 +1337,15 @@ HashType :: (type_: *Type_Info) -> u32 {
 
          return hash;
       }
+
+      // must agree with CompareType which compares the element types
+      if (tia.array_type == .VIEW) {
+         hash: u32 = 19;
+         hash = hash * 31 + HashType(tia.element_type);
+         hash = hash * 31 + cast(u32) IsDecorationlessArray(tia);
+
+         return hash;
+      }
    }
 
    // my types doesnt clash with those. so it is enough to use jai pointers (they are deduplicated)
@@ -1450,6 +1459,7 @@ CompareType :: (a_: *Type_Info, b_: *Type_Info) -> bool {
                if (IsDecorationlessArray(tiaA) != IsDecorationlessArray(tiaB)) return false;
                return tiaA.array_count == tiaB.array_count && CompareType(tiaA.element_type, tiaB.element_type);
             case .VIEW;
+               if (IsDecorationlessArray(tiaA) != IsDecorationlessArray(tiaB)) return false;
                return CompareType(tiaA.element_type, tiaB.element_type);
             case; assert(false); return false;
          }
@@ -1721,6 +1731,8 @@ CompilationData :: struct {
    usingStack:                               [..] *Code_Node;  // the expressions of the using statements in scope while typing, the innermost last. see GetUsingAccess
    usingAccesses:                            Table(*Code_Ident, *Code_Binary_Operator); // an identifier that is a member reached through using is generated as this access (base.member)
    pointerIterators:                         Table(*Code_Declaration, *Code_For); // the it of a for * loop. it is the address of the element, see the .FOR case of DetermineCodeNodeTypes
+   pointerIteratorAddresses:                 Table(*Code_Declaration, PointerIteratorAddress); // the address the it of a for * loop is in the current iteration
+   loopBases:                                Table(*Code_Declaration, LoopBase); // see LoopBase
    interfaceVariableIdentifiers:             [..] Identifier; // other global variables the entry point uses (workgroup variables)
    usesInt64Atomics:                         bool;
    usesDemote:                               bool;
@@ -2449,7 +2461,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    for ssaId, identifier: data.identifierToSSAId {
       if (identifier.type != ._Type) continue;
       ti := cast(*Type_Info) identifier._type;
-      if (!(ti.type == .STRUCT || (ti.type == .ARRAY && ti.(*Type_Info_Array).array_type == .VIEW))) continue;
+      if (!(ti.type == .STRUCT || (ti.type == .ARRAY && ti.(*Type_Info_Array).array_type == .VIEW && !IsDecorationlessArray(ti)))) continue;
 
       if (CompareType(identifier._type, cast(*Type_Info) MeshPerVertex))  continue; // builtin struct handled seperately
       if (IsMatrixType(identifier._type))                                 continue;
@@ -7383,13 +7395,24 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             RETURN(accessSSAId, accessSpirvType);
          }
 
-         // the it of a for * loop is the address of the element
-         isPointerIterator, pointerLoop := table_find(*data.pointerIterators, ci.resolved_declaration);
+         // the it of a for * loop is the address of the element, it is computed at the start of each iteration
+         isPointerIterator, pointerIteratorAddress := table_find(*data.pointerIteratorAddresses, ci.resolved_declaration);
          if (isPointerIterator) {
             assert(!additionalData.isLValue, "the it of a for * loop cant be assigned. loc: %", GetLocationString(node));
-            addressSpirvType: *Type_Info;
-            addressSSAId := GenerateInstructions(data, GetForLoopNodes(data, pointerLoop).element, general, function, currentFunction, .{ isLValue = true }, spirvType = *addressSpirvType);
-            RETURN(addressSSAId, addressSpirvType);
+            RETURN(pointerIteratorAddress.ssaId, pointerIteratorAddress.spirvType);
+         }
+
+         // the array a for loop iterates, see LoopBase
+         isLoopBase, loopBase := table_find(*data.loopBases, ci.resolved_declaration);
+         if (isLoopBase) {
+            baseType := GetNodeType(node);
+            pointerType := GetPointerType(baseType, loopBase.storageClass);
+            if (additionalData.isLValue) RETURN(loopBase.addressSSAId, pointerType);
+
+            valueSSAId := Load(data, function, .{ type = ._Type, _type = baseType }, loopBase.addressSSAId, loopBase.storageClass == .PhysicalStorageBuffer);
+            if (lValueOutSpirvType != null) lValueOutSpirvType.* = pointerType;
+            if (lValueOut != null)           lValueOut.* = loopBase.addressSSAId;
+            RETURN(valueSSAId, baseType);
          }
 
          // if it is constant global variable like PI then what do i do?
@@ -8755,9 +8778,15 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
             indexTypeSSAId = GetSSAId(data, .{ type = ._Type, _type = indexType });
          }
 
-         // range bounds (or the count of the array) are evaluated once, before the loop.
+         //
+         // like the cpu backend of jai:
+         //    - the bound a range ends at (the end, or the start for "for <") is read in every iteration if it is a local variable, otherwise it is evaluated once.
+         //      the other bound is the first value of it, it is evaluated once.
+         //    - the array is evaluated once (see LoopBase). the count of an array view is read in every iteration (for "for <" it is read once, for the first index)
+         //
          startSSAId, endSSAId, countSSAId: SSAId;
          itInfo: NumericInfo;
+         rereadBound := false;
          if (isRange) {
             itIsNumeric: bool;
             itInfo, itIsNumeric = GetNumericInfo(itType);
@@ -8765,13 +8794,25 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
 
             startSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
             endSSAId = GenerateInstructions(data, cf.iteration_expression_right, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
+            rereadBound = IsRereadRangeBound(data, ifx reverse then cf.iteration_expression else cf.iteration_expression_right);
 
             WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, itSSAId, ifx reverse then endSSAId else startSSAId);
          } else {
+            loopBase := table_find_pointer(*data.loopBases, nodes.baseDeclaration);
+            assert(loopBase != null);
+
+            if (loopBase.isLValue) {
+               addressSpirvType: *Type_Info;
+               loopBase.addressSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ isLValue = true }, spirvType = *addressSpirvType);
+               assert(addressSpirvType != null && addressSpirvType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) addressSpirvType).storageClass == loopBase.storageClass, "loc: %", GetLocationString(cf.iteration_expression));
+            } else {
+               loopBase.addressSSAId = MaterializeValue(data, function, cf.iteration_expression, currentFunction);
+            }
+
             tia := cast(*Type_Info_Array) GetNodeType(cf.iteration_expression);
             if (tia.array_type == .FIXED) {
                countSSAId = GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = indexInfo.kind == .Unsigned, value._s64 = tia.array_count, bitSize = indexInfo.bitSize } });
-            } else {
+            } else if (reverse) {
                countSSAId = GenerateInstructions(data, nodes.count, general, function, currentFunction, .{ spirvShouldHaveBeenType = indexType });
             }
 
@@ -8810,6 +8851,12 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, conditionLabelSSAId);
          conditionSSAId := GetNextSSAId(data);
          if (isRange) {
+            // a local variable is read again
+            if (rereadBound) {
+               if (reverse) startSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
+               else         endSSAId = GenerateInstructions(data, cf.iteration_expression_right, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
+            }
+
             itValueSSAId := Load(data, function, .{ type = ._Type, _type = itType }, itSSAId, false);
             if (reverse) {
                WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.GREATER_OR_EQUAL, itInfo.kind), boolTypeSSAId, conditionSSAId, itValueSSAId, startSSAId);
@@ -8817,6 +8864,9 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
                WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.LESS_OR_EQUAL, itInfo.kind), boolTypeSSAId, conditionSSAId, itValueSSAId, endSSAId);
             }
          } else {
+            // the count of an array view is read in every iteration
+            if (!reverse && nodes.count != null) countSSAId = GenerateInstructions(data, nodes.count, general, function, currentFunction, .{ spirvShouldHaveBeenType = indexType });
+
             indexValueSSAId := Load(data, function, .{ type = ._Type, _type = indexType }, indexSSAId, false);
             if (reverse) {
                WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.GREATER_OR_EQUAL, indexInfo.kind), boolTypeSSAId, conditionSSAId, indexValueSSAId, indexZero);
@@ -8831,6 +8881,14 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
          if (!isRange && !isPointerLoop) {
             elementSSAId := GenerateInstructions(data, nodes.element, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
             WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, itSSAId, elementSSAId);
+         }
+
+         // it of a for * loop is the address of the element, computed once in each iteration (changing it_index in the loop doesnt change it)
+         if (isPointerLoop) {
+            address: PointerIteratorAddress;
+            address.ssaId = GenerateInstructions(data, nodes.element, general, function, currentFunction, .{ isLValue = true }, spirvType = *address.spirvType);
+            assert(address.spirvType != null && address.spirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(cf));
+            table_set(*data.pointerIteratorAddresses, cf.ident_decl, address);
          }
          GenerateInstructions(data, cf.block, general, function, currentFunction);
          WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
@@ -10339,6 +10397,25 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          if (cf.iteration_expression_right != null) DetermineCodeNodeTypes(data, cf.iteration_expression_right);
 
          nodes := GetForLoopNodes(data, cf);
+
+         // the array is the address of the expression or a variable that has its value (see LoopBase)
+         if (nodes.baseDeclaration != null) {
+            loopBase: LoopBase;
+            loopBase.isLValue = IsLValueExpression(data, cf.iteration_expression);
+
+            baseType := GetNodeType(cf.iteration_expression);
+            if (loopBase.isLValue) {
+               loopBase.storageClass = GetLValueStorageClass(data, cf.iteration_expression);
+            } else {
+               loopBase.storageClass = .Function;
+               baseType = GetFunctionStorageClassType(baseType);
+            }
+
+            TableAdd(*data.loopBases, nodes.baseDeclaration, loopBase);
+            TableAdd(*data.codeNodeTypes, nodes.baseDeclaration, baseType);
+            TableAdd(*data.codeNodeTypes, nodes.base, baseType);
+         }
+
          if (nodes.indexDeclaration != null) DetermineCodeNodeTypes(data, nodes.indexDeclaration);
          if (nodes.element != null) DetermineCodeNodeTypes(data, nodes.element);
          if (nodes.count != null)   DetermineCodeNodeTypes(data, nodes.count);
@@ -11105,11 +11182,32 @@ Load :: (data: *CompilationData, b: *BuilderType, typeIdentifier: Identifier, lo
 // so i think it is still fine even if this function returns false all the time
 //       - apila, 18/04/26
 // a for loop is generated using the existing code for subscripts and member access, so these nodes are created for it:
-//    for array  ->  index: s64; while index < array.count { it = array[index]; ... index += 1; }
+//    for array  ->  base := *array; index: s64; while index < base.count { it = base[index]; ... index += 1; }
+// base is the array the loop iterates, it is not the iteration expression itself because the expression is evaluated once (see LoopBase).
 ForLoopNodes :: struct {
    indexDeclaration:  *Code_Declaration; // it_index, or a declaration created by the backend if the loop doesnt have one. null for ranges (they dont have it_index)
-   element:           *Code_Node;        // array[index], null for ranges
-   count:             *Code_Node;        // array.count for array views, null for ranges and fixed arrays
+   element:           *Code_Node;        // base[index], null for ranges
+   count:             *Code_Node;        // base.count for array views, null for ranges and fixed arrays
+   baseDeclaration:   *Code_Declaration; // null for ranges
+   base:              *Code_Ident;       // refers to baseDeclaration
+}
+
+//
+// like the cpu backend of jai, the expression a for loop iterates over is evaluated once, before the loop:
+//    - if it is an lvalue (a variable, a member, an element, x.*), its address. the count and the elements are read through it in every iteration,
+//      so the changes to the array (or to the count and data of an array view) in the loop are seen by the next iterations.
+//    - otherwise (a call for example) its value is put in a variable.
+// the base of a loop is a declaration created by the backend, whose address is that.
+//
+PointerIteratorAddress :: struct {
+   ssaId:      SSAId;
+   spirvType:  *Type_Info;
+}
+
+LoopBase :: struct {
+   isLValue:      bool;
+   storageClass:  SpvStorageClass;
+   addressSSAId:  SSAId;   // set when the loop is generated
 }
 
 GetForLoopNodes :: (data: *CompilationData, cf: *Code_For) -> ForLoopNodes {
@@ -11142,9 +11240,15 @@ GetForLoopNodes :: (data: *CompilationData, cf: *Code_For) -> ForLoopNodes {
       index.name = nodes.indexDeclaration.name;
       index.resolved_declaration = nodes.indexDeclaration;
 
+      nodes.baseDeclaration = NewNode(Code_Declaration, .DECLARATION, arrayType);
+      nodes.baseDeclaration.name = "for_base";
+      nodes.base = NewNode(Code_Ident, .IDENT, arrayType);
+      nodes.base.name = nodes.baseDeclaration.name;
+      nodes.base.resolved_declaration = nodes.baseDeclaration;
+
       element := NewNode(Code_Binary_Operator, .BINARY_OPERATOR, tia.element_type);
       element.operator_type = .ARRAY_SUBSCRIPT;
-      element.left = cf.iteration_expression;
+      element.left = nodes.base;
       element.right = index;
       nodes.element = element;
 
@@ -11154,7 +11258,7 @@ GetForLoopNodes :: (data: *CompilationData, cf: *Code_For) -> ForLoopNodes {
 
          count := NewNode(Code_Binary_Operator, .BINARY_OPERATOR, cast(*Type_Info) s64);
          count.operator_type = #char ".";
-         count.left = cf.iteration_expression;
+         count.left = nodes.base;
          count.right = countIdent;
          nodes.count = count;
       }
@@ -11269,9 +11373,17 @@ GetDecoratedType :: (type: *Type_Info) -> *Type_Info {
 GetFunctionStorageClassType :: (type: *Type_Info) -> *Type_Info {
    if (type.type == .ARRAY) {
       tia := cast(*Type_Info_Array) type;
-      if (tia.array_type != .FIXED) return type;
-
       if (IsDecorationlessArray(tia)) return type;
+
+      // an array view is a struct { count; data; }. the elements are in buffer memory, they keep their layout
+      if (tia.array_type == .VIEW) {
+         newType := New(Type_Info_Array);
+         newType.* = tia.*;
+         TableAdd(*decorationlessArrays, newType, tia);
+         return newType;
+      }
+
+      if (tia.array_type != .FIXED) return type;
 
       newType := New(Type_Info_Array);
       newType.* = tia.*;
@@ -11589,6 +11701,9 @@ GetDescriptorHeapArrayElementType :: (descriptorType: *Type_Info) -> *Type_Info 
 // this function returns the storage class of the variable. not where the storage class of where it points to if it is a pointer
 GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> SpvStorageClass {
    assert(variable.type == .Variable, "type: %", variable.type);
+
+   isLoopBase, loopBase := table_find(*data.loopBases, variable.variable.declaration);
+   if (isLoopBase) return loopBase.storageClass;
 
    if (GetBuiltinVariableIndex(variable) != -1) {
       return .Input;
@@ -11930,10 +12045,10 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
 
       // it.x in a for * loop is array[it_index].x
       if (cbo.left.kind == .IDENT) {
-         isPointerIterator, pointerLoop := table_find(*data.pointerIterators, (cast(*Code_Ident) cbo.left).resolved_declaration);
+         isPointerIterator, pointerIteratorAddress := table_find(*data.pointerIteratorAddresses, (cast(*Code_Ident) cbo.left).resolved_declaration);
          if (isPointerIterator) {
-            element := cast(*Code_Binary_Operator) GetForLoopNodes(data, pointerLoop).element;
-            Helper(data, b, element, currentBaseSpirvType, currentBaseSSAId, indices, literalIndices, lastAccessOperation, currentFunction);
+            currentBaseSSAId.* = pointerIteratorAddress.ssaId;
+            currentBaseSpirvType.* = pointerIteratorAddress.spirvType;
 
             elementType := (cast(*TypeInfoPointer) leftType).pointerTo;
             assert(cbo.operator_type == #char ".", "indexing the it of a for * loop is not supported. loc: %", GetLocationString(cbo));
@@ -11975,7 +12090,12 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
 
                   // a member reached through using is an access itself (see GetUsingAccess)
                   isUsingAccess, usingAccess := table_find(*data.usingAccesses, ciBase);
-                  if (isUsingAccess) {
+                  isLoopBase, loopBase := table_find(*data.loopBases, ciBase.resolved_declaration);
+                  if (isLoopBase) {
+                     // the array a for loop iterates (see LoopBase)
+                     currentBaseSSAId.* = loopBase.addressSSAId;
+                     currentBaseSpirvType.* = GetPointerType(baseType, loopBase.storageClass);
+                  } else if (isUsingAccess) {
                      Helper(data, b, usingAccess, currentBaseSpirvType, currentBaseSSAId, indices, literalIndices, lastAccessOperation, currentFunction);
                   } else if (ciBase.resolved_declaration.flags & .IS_CONSTANT) {
                      // a constant (a lookup table TABLE :: s32.[...]) doesnt exist in memory. it is put in a variable so it can be indexed
@@ -12230,6 +12350,50 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
 
    if (spirvType != null) spirvType.* = loadedTypeIdentifier._type;
    return dereferencedSSAId;
+}
+
+// whether the expression has an address (a variable, a member, an element, x.*), see LoopBase
+IsLValueExpression :: (data: *CompilationData, node: *Code_Node) -> bool {
+   if node.kind == {
+      case .IDENT;
+         ci := cast(*Code_Ident) node;
+         isUsingAccess, usingAccess := table_find(*data.usingAccesses, ci);
+         if (isUsingAccess) return IsLValueExpression(data, usingAccess);
+         if (table_contains(*data.loopBases, ci.resolved_declaration)) return true;
+         if (table_contains(*data.pointerIteratorAddresses, ci.resolved_declaration) || table_contains(*data.pointerIterators, ci.resolved_declaration)) return false;
+         return ci.resolved_declaration != null && !(ci.resolved_declaration.flags & .IS_CONSTANT);
+
+      case .BINARY_OPERATOR;
+         cbo := cast(*Code_Binary_Operator) node;
+         if (cbo.operator_type != #char "." && cbo.operator_type != .ARRAY_SUBSCRIPT) return false;
+         if (cbo.left.type != null && cbo.left.type.type == .TYPE) return false; // E.A, Module.x
+         _, isConstant := EvaluateConstant(data, node);
+         if (isConstant) return false;
+
+         leftType := UnwindVariantsAllTheWay(GetNodeType(cbo.left));
+         if (leftType.type == TYPE_INFO_POINTER_TAG) return true;
+         if (leftType.type == .ARRAY && (cast(*Type_Info_Array) leftType).array_type == .VIEW && cbo.operator_type == .ARRAY_SUBSCRIPT) return true;
+         return IsLValueExpression(data, cbo.left);
+
+      case .UNARY_OPERATOR;
+         cuo := cast(*Code_Unary_Operator) node;
+         return cuo.operator_type == .POSTFIX_DEREFERENCE || cuo.operator_type == .POINTER_DEREFERENCE;
+
+      case .DIRECTIVE_INSERT;
+         return IsLValueExpression(data, (cast(*Code_Directive_Insert) node).expansion);
+   }
+
+   return false;
+}
+
+// the cpu backend of jai reads the bound of a range again in every iteration if it is a local variable (for 0..n), otherwise it is evaluated once (n - 1, s.n, a global...)
+IsRereadRangeBound :: (data: *CompilationData, node: *Code_Node) -> bool {
+   if (node.kind != .IDENT) return false;
+   ci := cast(*Code_Ident) node;
+   if (table_contains(*data.usingAccesses, ci)) return false;
+
+   declaration := ci.resolved_declaration;
+   return declaration != null && !(declaration.flags & (.IS_CONSTANT | .IS_GLOBAL));
 }
 
 // the storage class of the memory an lvalue (a variable, a member, an element...) is in
