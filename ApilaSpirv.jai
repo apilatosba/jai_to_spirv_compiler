@@ -6,6 +6,7 @@
 #import "Queue";
 #import "Hash";
 #import "File";
+#import "Process";
 #import "SpirvTools";
 #import "SpirvHeaders";
 
@@ -1426,6 +1427,8 @@ ProcessMessage :: (message: *Message) {
             fileName := sprint("%.spv", header.name);
             outputPath := path_join(buildOptions.buildFolder, fileName);
             write_entire_file(outputPath, spirv.data, spirv.count);
+
+            if (buildOptions.optimize)  Optimize(buildOptions, outputPath);
          }
       }
    }
@@ -1435,6 +1438,30 @@ ProcessMessage :: (message: *Message) {
 workspaceToBuildOptions: Table(Workspace, BuildOptions);
 BuildOptions :: struct {
    buildFolder: string = ".";
+
+   // runs spirv-opt -O on the output of each entry point (the optimizations are not done by this compiler). spirv-opt has to be installed.
+   optimize:      bool   = false;
+   spirvOptPath:  string = "spirv-opt";
+}
+
+// the file is replaced by its optimized version.
+// the inputs and outputs of the shader are kept even if they are unused, so the stages still match each other like the unoptimized shaders do.
+Optimize :: (buildOptions: BuildOptions, path: string) {
+   result, output, errors := run_command(
+      buildOptions.spirvOptPath,
+      "-O",
+      "--preserve-interface",
+      "--target-env=vulkan1.4",
+      "--scalar-block-layout",
+      "--relax-block-layout",
+      path,
+      "-o",
+      path,
+      capture_and_return_output = true,
+   );
+
+   assert(result.type != .FAILED_TO_LAUNCH, "couldnt run spirv-opt (\"%\"). install it, or set spirvOptPath in the BuildOptions to where it is.", buildOptions.spirvOptPath);
+   assert(result.type == .EXITED && result.exit_code == 0, "spirv-opt failed on %:\n%\n%", path, output, errors);
 }
 
 GetBuildOptions :: (w: Workspace) -> BuildOptions {
@@ -7981,6 +8008,7 @@ GenerateInstructionsData :: struct {
    spirvShouldHaveBeenType:                     *Type_Info;
    isLValue:                                    bool     = false; // maybe i should have two functions GenerateAddress and GenerateExpression instead of single GenerateInstructions function and a lvalue boolean like this. idk man. - apila, 15/04/26
    accessChainBaseArrayElementTypeIfImageHeap:  *TypeInfoImage;
+   isMacroPointerArgument:                      bool     = false; // the argument of a pointer parameter of a macro, the macro uses the pointer directly (see PointerValue)
 }
 
 // traverse AST and output the generated spirv.
@@ -7988,48 +8016,50 @@ GenerateInstructionsData :: struct {
 // function is to be appended to general.
 // the Identifier returned doesnt always make sense if the thing returned doesnt have an identifier. for example result of an addition operation. use ssaId instead
 // lValueOut: if additionalData.isLValue is false, the lvalue is returned via this pointer. if additionalData.isLValue is true then it is returned by the function
+// the return of GenerateInstructions and of the procedures it calls for each kind of node (they have the same parameters).
+// i need this because jai does allow upcasting if data is not lost without an explicit cast, but this is not allowed in spirv:
+//    q: u8;
+//    w: s32;
+//    w = q; // this is fine. since all of the values of u8 can fit in s32. but not fine in spirv. in spirv, types has to match
+//
+// and this situation may appear anywhere. in a function call, struct literal, assignment (as above)...
+//                - apila, 06/06/26
+//
+// this return only deals with:
+//    return value of GenerateInstructions.
+//    spirvType out variable.
+// the rest of the out variables, the caller needs to manage.
+//
+// if you pass "ssaIdSpirvType = null", then it means you don't care, and if the caller of GenerateInstructions also doesn't care then it is fine
+// otherwise it is not fine you must care too. this is what the assertion does.
+RETURN :: (ssaId: SSAId, ssaIdSpirvType: *Type_Info) #expand {
+   resultSSAId: SSAId;
+   resultSpirvType: *Type_Info;
+
+   if (`additionalData.spirvShouldHaveBeenType != null) {
+      assert(ssaIdSpirvType != null);
+   }
+
+   if (`spirvType != null) {
+      assert(ssaIdSpirvType != null);
+   }
+
+   if (`additionalData.spirvShouldHaveBeenType != null && !CompareType(`additionalData.spirvShouldHaveBeenType, ssaIdSpirvType)) {
+      resultSpirvType = `additionalData.spirvShouldHaveBeenType;
+      resultSSAId = ConvertValue(`data, `function, ssaId, ssaIdSpirvType, resultSpirvType, `node);
+   } else {
+      resultSSAId = ssaId;
+      resultSpirvType = ssaIdSpirvType;
+   }
+
+   if (`spirvType != null) `spirvType.* = resultSpirvType;
+   `return resultSSAId;
+}
+
 GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData = .{}, lValueOut: *SSAId = null, spirvType: **Type_Info = null, lValueOutSpirvType: **Type_Info = null, identifierOut: *Identifier = null) -> SSAId {
    general := ifx general_ != null then general_ else data.generalBuilder;
    assert(general != null);
 
-   // i need this because jai does allow upcasting if data is not lost without an explicit cast, but this is not allowed in spirv:
-   //    q: u8;
-   //    w: s32;
-   //    w = q; // this is fine. since all of the values of u8 can fit in s32. but not fine in spirv. in spirv, types has to match
-   //
-   // and this situation may appear anywhere. in a function call, struct literal, assignment (as above)...
-   //                - apila, 06/06/26
-   //
-   // this return only deals with:
-   //    return value of GenerateInstructions.
-   //    spirvType out variable.
-   // the rest of the out variables, the caller needs to manage.
-   //
-   // if you pass "ssaIdSpirvType = null", then it means you don't care, and if the caller of GenerateInstructions also doesn't care then it is fine
-   // otherwise it is not fine you must care too. this is what the assertion does.
-   RETURN :: (ssaId: SSAId, ssaIdSpirvType: *Type_Info) #expand {
-      resultSSAId: SSAId;
-      resultSpirvType: *Type_Info;
-
-      if (`additionalData.spirvShouldHaveBeenType != null) {
-         assert(ssaIdSpirvType != null);
-      }
-
-      if (`spirvType != null) {
-         assert(ssaIdSpirvType != null);
-      }
-
-      if (`additionalData.spirvShouldHaveBeenType != null && !CompareType(`additionalData.spirvShouldHaveBeenType, ssaIdSpirvType)) {
-         resultSpirvType = `additionalData.spirvShouldHaveBeenType;
-         resultSSAId = ConvertValue(`data, `function, ssaId, ssaIdSpirvType, resultSpirvType, `node);
-      } else {
-         resultSSAId = ssaId;
-         resultSpirvType = ssaIdSpirvType;
-      }
-
-      if (`spirvType != null) `spirvType.* = resultSpirvType;
-      `return resultSSAId;
-   }
 
    // constant expressions become spirv constants (see EvaluateConstant). the constant is created in the type the caller wants if it is a scalar, so no conversion is needed.
    if (!additionalData.isLValue && (node.kind == .IDENT || node.kind == .UNARY_OPERATOR || node.kind == .BINARY_OPERATOR || node.kind == .CAST || node.kind == .TYPE_QUERY)) {
@@ -8093,36 +8123,8 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
       case .RESOLVED_OVERLOAD;
          assert(false, "code node kind: %. idk what to do with this", node.kind);
 
-      case .EXTRACT; {
-         ce := cast(*Code_Extract) node;
-
-         // a value of a compound declaration: a, b := F();  or  a, b := x, y;
-         if (ce.from != null) {
-            if (ce.from.kind == .COMMA_SEPARATED_ARGUMENTS) {
-               valueNode := (cast(*Code_Comma_Separated_Arguments) ce.from).arguments[ce.index].node;
-               valueSpirvType: *Type_Info;
-               valueSSAId := GenerateInstructions(data, valueNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = GetNodeType(node) }, spirvType = *valueSpirvType);
-               RETURN(valueSSAId, valueSpirvType);
-            }
-
-            assert(ce.from.kind == .PROCEDURE_CALL, "kind: %, loc: %", ce.from.kind, GetLocationString(node));
-            found, structSSAId := table_find(*data.multipleReturnValues, cast(*Code_Procedure_Call) ce.from);
-            assert(found, "the call is not generated before its values are used. loc: %", GetLocationString(node));
-
-            valueType := GetNodeType(node);
-            valueSSAId := EmitCompositeExtract(data, function, .{ type = ._Type, _type = valueType }, structSSAId, .[ce.index]);
-            RETURN(valueSSAId, valueType);
-         }
-
-         argument := GetMacroExpansionArgument(data, ce.index);
-         // An Extract is the compiler's placeholder for a macro argument.
-         // Generate the original call argument with its own type first; the
-         // expansion site applies its conversion after substitution.
-         argumentSpirvType: *Type_Info;
-         argumentSSAId := GenerateInstructions(data, argument, general, function, currentFunction, spirvType = *argumentSpirvType);
-         assert(argumentSpirvType != null, "macro argument has no SPIR-V type");
-         RETURN(argumentSSAId, argumentSpirvType);
-      }
+      case .EXTRACT;
+         return GenerateExtract(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .DIRECTIVE_RUN;
          assert(false, "do the #run outside the shader procedure to let jai compiler #run it. this compiler doesnt have #run");
@@ -8158,29 +8160,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
 
       // the compiler gives the code that is inserted. it is not a scope, the declarations in it are in the enclosing scope.
       case .DIRECTIVE_INSERT;
-         cdi := cast(*Code_Directive_Insert) node;
-         assert(cdi.expansion != null, "the compiler didnt give the expansion of #insert. loc: %", GetLocationString(node));
-
-         // the break and continue in the inserted code are generated as they are, as a break or continue of the loop they are in.
-         // a replacement that is something else is not supported. (the expansion has the break, not the replacement)
-         IsPlainLoopControl :: (replacement: *Code_Node, controlType: type_of(Code_Loop_Control.control_type)) -> bool {
-            if (replacement == null) return true;
-            if (replacement.kind != .LOOP_CONTROL) return false;
-            clc := cast(*Code_Loop_Control) replacement;
-            return clc.control_type == controlType && clc.target_ident == null;
-         }
-         assert(IsPlainLoopControl(cdi.break_replacement, .BREAK) && IsPlainLoopControl(cdi.continue_replacement, .CONTINUE) && cdi.remove_replacement == null,
-                "#insert with break, continue or remove replaced by something other than break or continue is not supported. loc: %", GetLocationString(node));
-
-         if (cdi.expansion.kind == .BLOCK) {
-            for (cast(*Code_Block) cdi.expansion).statements  GenerateInstructions(data, it, general, function, currentFunction);
-            return 0;
-         }
-
-         // an expression
-         insertSpirvType: *Type_Info;
-         insertSSAId := GenerateInstructions(data, cdi.expansion, general, function, currentFunction, additionalData, lValueOut, *insertSpirvType, lValueOutSpirvType, identifierOut);
-         RETURN(insertSSAId, insertSpirvType);
+         return GenerateDirectiveInsert(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .DIRECTIVE_PROCEDURE_NAME;
          assert(false, "read the comment above");
@@ -8193,16 +8173,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
 
       // a block is a scope, its defers run at its end
       case .BLOCK;
-         cb := cast(*Code_Block)node;
-         deferBase := data.deferStack.count;
-
-         for cb.statements {
-            GenerateInstructions(data, it, general, function, currentFunction);
-         }
-
-         GenerateDefers(data, deferBase, general, function, currentFunction);
-         data.deferStack.count = deferBase;
-         return 0;
+         return GenerateBlock(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       // i think im dumb.
       // i dont need to do any of the int literal bit size additional data thingies.
@@ -8227,1554 +8198,34 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
       // because the form jai reports is not consistent.
       //    - apila, 06/05/26
       case .LITERAL;
-         cl := cast(*Code_Literal) node;
-
-         type := GetNodeType(node);
-
-         if cl.value_type == {
-            case .NUMBER;
-               assert(additionalData.spirvShouldHaveBeenType != null, "loc: %", GetLocationString(node));
-
-               // the values of enums are integer literals of the type of the enum
-               type = UnwindEnum(type);
-               shouldHaveBeenType := UnwindEnum(additionalData.spirvShouldHaveBeenType);
-
-               // number literals inside untyped struct literals have no type (void). the value is stored as float64 or s64 depending on the flags.
-               if (type.type != .INTEGER && type.type != .FLOAT) {
-                  type = ifx cl.value_flags & .FLOAT then cast(*Type_Info) float64 else cast(*Type_Info) s64;
-               }
-
-               if (type.type == .FLOAT) {
-                  // jai doesnt allow casting from float to int so shouldHaveBeenType must also be float
-                  assert(shouldHaveBeenType.type == .FLOAT, "type: %, loc: %", shouldHaveBeenType.*, GetLocationString(node));
-
-                  identifier := FloatLiteralIdentifier(cl._float64, shouldHaveBeenType.runtime_size * 8);
-                  if (identifierOut != null) identifierOut.* = identifier;
-                  RETURN(GetSSAId(data, identifier), shouldHaveBeenType);
-               } else if (type.type == .INTEGER) {
-                  assert(type.runtime_size == 1 || type.runtime_size == 2 || type.runtime_size == 4 || type.runtime_size == 8, "type.runtime_size: %, not implemented yet!", type.runtime_size);
-                  tii := cast(*Type_Info_Integer) type;
-                  identifier: Identifier;
-
-                  if (shouldHaveBeenType.type == .INTEGER) {
-                     // integer to integer
-
-                     tiiShouldHaveBeen := cast(*Type_Info_Integer) shouldHaveBeenType;
-                     BYTE_SIZE :: 8;
-                     identifier = .{ type = .IntLiteral, intLiteral = .{ bitSize = shouldHaveBeenType.runtime_size * BYTE_SIZE, unsigned = !tiiShouldHaveBeen.signed } };
-
-                     if (tii.signed) {
-                        if (tiiShouldHaveBeen.signed) {
-                           // s64 to s64
-                           identifier.intLiteral.value._s64 = cl._s64;
-                        } else {
-                           // s64 to u64
-                           identifier.intLiteral.value._u64 = xx cl._s64;
-                        }
-                     } else {
-                        if (tiiShouldHaveBeen.signed) {
-                           // u64 to s64
-                           identifier.intLiteral.value._s64 = xx cl._u64;
-                        } else {
-                           // u64 to u64
-                           identifier.intLiteral.value._u64 = cl._u64;
-                        }
-                     }
-                  } else if (additionalData.spirvShouldHaveBeenType.type == .FLOAT) {
-                     // integer to float
-
-                     value := ifx tii.signed then cast(float64) cl._s64 else cast(float64) cl._u64;
-                     identifier = FloatLiteralIdentifier(value, additionalData.spirvShouldHaveBeenType.runtime_size * 8);
-                  } else {
-                     assert(false, "an integer literal cant be of type %. loc: %", additionalData.spirvShouldHaveBeenType.*, GetLocationString(node));
-                  }
-
-                  if (identifierOut != null) identifierOut.* = identifier;
-                  RETURN(GetSSAId(data, identifier), additionalData.spirvShouldHaveBeenType);
-               } else {
-                  assert(false, "type: %, loc: %", type.type, GetLocationString(node));
-               }
-
-            // TODO
-            // if struct contains pointers and struct literal contains something like null
-            // it is not handled and will not work. fix that
-            //
-            // GetAutoCastAdditionalData prolly needs to take the whole member not just the type of it
-            //       - apila, 26/04/26
-            case .STRUCT;
-               type := GetNodeType(node);
-               assert(type.type == .STRUCT, "type: %, loc: %", type.*, GetLocationString(node));
-
-               tis := cast(*Type_Info_Struct) type;
-               memberExpressions := GetStructLiteralMemberExpressions(cl, tis);
-
-               isConstant := IsStructLiteralConstant(data, cl);
-               if (isConstant) {
-                  identifier: Identifier = .{ type = .CompositeLiteral, compositeLiteral = .{ type = type } };
-                  identifier.compositeLiteral.arguments = NewArray(memberExpressions.count, *Identifier);
-
-                  for memberExpressions {
-                     shouldHaveBeenType := ConvertJaiTypeIfNecessary(GetStructMembers(tis)[it_index].type, GetStructMembers(tis)[it_index].notes);
-                     argumentIdentifier: Identifier;
-
-                     if (it == null) {
-                        argumentIdentifier = GetDefaultValueIdentifier(data, general, function, currentFunction, shouldHaveBeenType);
-                     } else {
-                        argumentNodeType := GetNodeType(it);
-
-                        _ := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = shouldHaveBeenType }, identifierOut = *argumentIdentifier);
-                        assert(argumentIdentifier.type != .Invalid, "struct: %, index: %, loc: %:%", tis.name, it_index, node.c0, node.l0);
-                     }
-
-                     heapCopy := New(Identifier);
-                     heapCopy.* = argumentIdentifier;
-                     identifier.compositeLiteral.arguments[it_index] = heapCopy;
-                  }
-
-                  if (identifierOut != null) identifierOut.* = identifier;
-                  RETURN(GetSSAId(data, identifier), type);
-               } else {
-                  resultSSAId := GetNextSSAId(data);
-                  typeIdentifier: Identifier = .{ type = ._Type, _type = type };
-
-                  operands: [..] Any;
-                  array_add(*operands, GetSSAId(data, typeIdentifier));
-                  array_add(*operands, resultSSAId);
-
-                  for memberExpressions {
-                     shouldHaveBeenType := ConvertJaiTypeIfNecessary(GetStructMembers(tis)[it_index].type, GetStructMembers(tis)[it_index].notes);
-
-                     argumentSSAId: SSAId;
-                     if (it == null) {
-                        argumentSSAId = GetSSAId(data, GetDefaultValueIdentifier(data, general, function, currentFunction, shouldHaveBeenType));
-                     } else {
-                        argumentNodeType := GetNodeType(it);
-
-                        argumentSSAId = GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = shouldHaveBeenType });
-                     }
-
-                     array_add(*operands, ac(argumentSSAId));
-                  }
-
-                  WriteSingleInstructionIfReachable(
-                     function,
-                     *data.isBlockReachable,
-                     .CompositeConstruct,
-                     .. operands
-                  );
-
-                  RETURN(resultSSAId, type);
-               }
-
-            // s32.[1, 2, 3]. like struct literals it is a constant if all of the elements are constants
-            case .ARRAY; {
-               arrayType := type;
-               if (arrayType.type != .ARRAY && additionalData.spirvShouldHaveBeenType != null) arrayType = GetDecoratedType(additionalData.spirvShouldHaveBeenType);
-               assert(arrayType.type == .ARRAY && (cast(*Type_Info_Array) arrayType).array_type == .FIXED, "the type of the array literal is not known. loc: %", GetLocationString(node));
-
-               tia := cast(*Type_Info_Array) arrayType;
-               elements := cl.array_literal_info.array_members;
-               assert(elements.count == tia.array_count, "loc: %", GetLocationString(node));
-
-               isConstant := true;
-               for elements {
-                  if (it.kind == .LITERAL && (cast(*Code_Literal) it).value_type == .STRUCT) {
-                     if (!IsStructLiteralConstant(data, cast(*Code_Literal) it)) isConstant = false;
-                  } else {
-                     _, isConstantElement := EvaluateConstant(data, it);
-                     if (!isConstantElement) isConstant = false;
-                  }
-               }
-
-               if (isConstant) {
-                  identifier: Identifier = .{ type = .CompositeLiteral, compositeLiteral = .{ type = tia } };
-                  identifier.compositeLiteral.arguments = NewArray(elements.count, *Identifier);
-
-                  for elements {
-                     element := New(Identifier);
-                     _ := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = tia.element_type }, identifierOut = element);
-                     assert(element.type != .Invalid, "loc: %", GetLocationString(it));
-                     identifier.compositeLiteral.arguments[it_index] = element;
-                  }
-
-                  if (identifierOut != null) identifierOut.* = identifier;
-                  RETURN(GetSSAId(data, identifier), tia);
-               }
-
-               resultSSAId := GetNextSSAId(data);
-               operands: [..] Any;
-               array_add(*operands, GetSSAId(data, .{ type = ._Type, _type = tia }), resultSSAId);
-               for elements {
-                  elementSSAId := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = tia.element_type });
-                  array_add(*operands, ac(elementSSAId));
-               }
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .CompositeConstruct, .. operands);
-               RETURN(resultSSAId, tia);
-            }
-
-            case .BOOLEAN; {
-               identifier: Identifier = .{ type = .BoolLiteral };
-               identifier.boolLiteral = cl._u64 != 0;
-
-               if (identifierOut != null) identifierOut.* = identifier;
-               RETURN(GetSSAId(data, identifier), type);
-            }
-
-            // null. it is the address 0 converted to the pointer type that is wanted.
-            case .POINTER; {
-               pointerType := type;
-               if (additionalData.spirvShouldHaveBeenType != null && additionalData.spirvShouldHaveBeenType.type == TYPE_INFO_POINTER_TAG) pointerType = additionalData.spirvShouldHaveBeenType;
-               assert(pointerType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) pointerType).storageClass == .PhysicalStorageBuffer, "null can only be a PhysicalStorageBuffer pointer. loc: %", GetLocationString(node));
-
-               resultSSAId := GetNextSSAId(data);
-               zeroSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = 0, bitSize = 64 } });
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ConvertUToPtr, GetSSAId(data, .{ type = ._Type, _type = pointerType }), resultSSAId, zeroSSAId);
-               RETURN(resultSSAId, pointerType);
-            }
-
-            case .STRING;
-               assert(false, "spirv has no strings. a string can only be the format of % (a literal or a constant). loc: %", DEBUG_PRINT_FUNCTION_NAME, GetLocationString(node));
-
-            case; assert(false, "cl.value_type: %\n", cl.value_type);
-         }
+         return GenerateLiteral(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .IDENT;
-         ci := cast(*Code_Ident) node;
-
-         // a member reached through using
-         isUsingAccess, usingAccess := table_find(*data.usingAccesses, ci);
-         if (isUsingAccess) {
-            accessSpirvType: *Type_Info;
-            accessSSAId := GenerateInstructions(data, usingAccess, general, function, currentFunction, additionalData, lValueOut, *accessSpirvType, lValueOutSpirvType, identifierOut);
-            RETURN(accessSSAId, accessSpirvType);
-         }
-
-         // the it of a for * loop or a macro parameter that is a pointer to a payload or a workgroup variable, see PointerValue
-         isPointerValue, pointerValue := table_find(*data.pointerValues, ci.resolved_declaration);
-         if (isPointerValue) {
-            assert(!additionalData.isLValue, "% cant be assigned (it is the it of a for * loop, or a macro parameter that points to a payload or a workgroup variable which spirv doesnt allow to store). loc: %", ci.name, GetLocationString(node));
-            RETURN(pointerValue.ssaId, pointerValue.spirvType);
-         }
-
-         // the array a for loop iterates, see LoopBase
-         isLoopBase, loopBase := table_find(*data.loopBases, ci.resolved_declaration);
-         if (isLoopBase) {
-            baseType := GetNodeType(node);
-            pointerType := GetPointerType(baseType, loopBase.storageClass);
-            if (additionalData.isLValue) RETURN(loopBase.addressSSAId, pointerType);
-
-            valueSSAId := Load(data, function, .{ type = ._Type, _type = baseType }, loopBase.addressSSAId, loopBase.storageClass == .PhysicalStorageBuffer);
-            if (lValueOutSpirvType != null) lValueOutSpirvType.* = pointerType;
-            if (lValueOut != null)           lValueOut.* = loopBase.addressSSAId;
-            RETURN(valueSSAId, baseType);
-         }
-
-         // if it is constant global variable like PI then what do i do?
-         // i think i should evaluate its value and the identifier type would be either .IntLiteral or .FloatLiteral or .CompositeLiteral or .BoolLiteral.
-         // so constant variable doesnt exists at runtime.
-         // i guess that would work Clueless.oO(surely thats fine).
-         //             - apila, 08/06/26
-         declaration := ci.resolved_declaration;
-         if (declaration.flags & .IS_CONSTANT) {
-            // numbers are handled at the start of this function (see EvaluateConstant). this is for struct literals, which are OpConstantComposite if all of their members are constants,
-            // and for constants that this compiler cant evaluate (vector arithmetic for example), their instructions are generated where they are used.
-            identifier: Identifier;
-            identifierSSAId := GenerateInstructions(data, declaration.expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = declaration.type }, identifierOut = *identifier);
-
-            if (identifierOut != null) identifierOut.* = identifier;
-            RETURN(identifierSSAId, declaration.type);
-         }
-
-         variableIdentifier := GetVariableIdentifier(ci);
-         variableSSAId := GetSSAId(data, variableIdentifier);
-         variableName := GetVariableName(variableIdentifier);
-         variableStorageClass := GetVariableStorageClass(data, variableIdentifier);
-
-         found, variableType := table_find(*data.codeNodeTypes, node);
-         if (!found)  assert(false, "the identifier has no type. declaration: %, ident: %", GetLocationString(declaration), GetLocationString(ci));
-
-         builtinIndex := GetBuiltinVariableIndex(variableIdentifier);
-         if (builtinIndex != -1) {
-            if (additionalData.isLValue || lValueOut != null) {
-               assert(variableStorageClass != .Input, "% is an input of the shader, it cant be assigned. loc: %", ci.name, GetLocationString(node));
-            }
-
-            // the sample masks are arrays of one u32 in spirv
-            if (BUILTIN_VARIABLES[builtinIndex].builtIn == .SampleMask) {
-               zeroSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = 0, bitSize = 32 } });
-               variableSSAId = EmitAccessChain(data, function, GetPointerTypeIdentifier(variableType, variableStorageClass), variableSSAId, .[zeroSSAId]);
-            }
-         }
-
-         if (table_contains(*userFunctionArguments, declaration)) {
-            if (!IsSmallArgument(variableType)) {
-               assert(!additionalData.isLValue, "immutable function parameter cant be lvalue");
-
-               if (identifierOut != null) identifierOut.* = variableIdentifier;
-               RETURN(variableSSAId, variableType);
-            }
-         }
-
-         if (additionalData.isLValue) {
-            if (identifierOut != null) identifierOut.* = variableIdentifier;
-            RETURN(variableSSAId, GetPointerType(variableType, variableStorageClass));
-         }
-
-         variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
-         deferencedSSAId := Load(data, function, variableTypeIdentifier, variableSSAId, variableStorageClass == .PhysicalStorageBuffer);
-
-         if (lValueOutSpirvType != null)  lValueOutSpirvType.* = GetPointerType(variableType, variableStorageClass);
-         if (lValueOut != null)           lValueOut.* = variableSSAId;
-         RETURN(deferencedSSAId, variableType);
+         return GenerateIdent(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .UNARY_OPERATOR;
-         cuo := cast(*Code_Unary_Operator) node;
-         subexpressionType := GetNodeType(cuo.subexpression);
-         cuoType := GetNodeType(cuo);
-
-         resultSSAId := GetNextSSAId(data);
-         if cuo.operator_type == {
-            case .POINTER_DEREFERENCE; #through;
-            case .POSTFIX_DEREFERENCE; {
-               assert(subexpressionType.type == TYPE_INFO_POINTER_TAG, "can only derefence a pointer!");
-
-               tip := cast(*TypeInfoPointer) subexpressionType;
-
-               subexpressionSpirvType: *Type_Info;
-               subexpressionSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction, spirvType = *subexpressionSpirvType);
-               assert(subexpressionSpirvType != null, "loc: %", GetLocationString(node));
-
-               if (additionalData.isLValue) {
-                  RETURN(subexpressionSSAId, subexpressionSpirvType);
-               }
-
-               derefencedSSAId := Load(
-                  data,
-                  function,
-                  .{ type = ._Type, _type = cuoType },
-                  subexpressionSSAId,
-                  tip.storageClass == .PhysicalStorageBuffer,
-               );
-
-               if (lValueOutSpirvType != null) lValueOutSpirvType.* = subexpressionSpirvType;
-               if (lValueOut != null) lValueOut.* = subexpressionSSAId;
-               RETURN(derefencedSSAId, cuoType);
-            }
-
-            case #char "*"; {
-               assert(!additionalData.isLValue, "cant be lvalue");
-
-               // having a pointer to a pointer thats in Function storage class is illegal in spirv:
-               //    a: int;
-               //    p := *a;
-               // is illegal since the storage class of "a" is Function (assuming it is a local function variable). and i do not verify the usage of this. i probably should tho.
-               // man spirv sucks. as far as i know amd instruction set supports flat addressing which eliminates all this worry about storage class bullshit.
-               // if hardware can handle it what am i worrying about. we need new spirv extension "Flat Addressing Model". spirv is hiding a capability that hardware natively supports.
-               // this issue kinda related: https://github.com/KhronosGroup/Vulkan-Docs/issues/1963
-               //
-               //       - apila, 29/05/26
-               subexpressionLValueSpirvType: *Type_Info;
-               subexpressionLValueSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction, .{ isLValue = true }, spirvType = *subexpressionLValueSpirvType);
-               assert(subexpressionLValueSpirvType != null);
-               assert(subexpressionLValueSpirvType.type == TYPE_INFO_POINTER_TAG);
-
-               // RayPayloadKHR is allowed because TraceRay takes the address of the payload. it only uses it to know which payload variable to use.
-               // Workgroup is allowed for the atomics. (a workgroup pointer cant be stored or passed to a procedure, DoCast checks the storage classes)
-               storageClass := subexpressionLValueSpirvType.(*TypeInfoPointer).storageClass;
-               isRayQuery := storageClass == .Function && CompareType((cast(*TypeInfoPointer) subexpressionLValueSpirvType).pointerTo, cast(*Type_Info) RayQuery);
-               assert(storageClass == .PhysicalStorageBuffer || storageClass == .RayPayloadKHR || storageClass == .Workgroup || storageClass == .CallableDataKHR || isRayQuery, "taking the address of something in % storage class is not allowed in spirv (for example a local variable). only memory reached through a pointer (PhysicalStorageBuffer) can be addressed. loc: %", storageClass, GetLocationString(node));
-
-               RETURN(subexpressionLValueSSAId, subexpressionLValueSpirvType);
-            }
-
-            case #char "-"; {
-               subexpressionSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction);
-
-               info, isNumeric := GetNumericInfo(subexpressionType);
-
-               op: SpvOp;
-               #if false {
-               } else if (isNumeric && info.kind == .Float) {
-                  op = .FNegate;
-               } else if (isNumeric && info.kind == .Signed) {
-                  op = .SNegate;
-               } else {
-                  assert(false, "not yet implemented! type: %", subexpressionType.*);
-               }
-
-               WriteSingleInstructionIfReachable(
-                  function,
-                  *data.isBlockReachable,
-                  op,
-                  GetSSAId(data, .{ type = ._Type, _type = subexpressionType }),
-                  resultSSAId,
-                  subexpressionSSAId
-               );
-
-               RETURN(resultSSAId, subexpressionType);
-            }
-
-            // .A, a value of an enum whose type is inferred. the subexpression is the constant.
-            case #char "."; {
-               valueSpirvType: *Type_Info;
-               valueSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = subexpressionType }, spirvType = *valueSpirvType, identifierOut = identifierOut);
-               RETURN(valueSSAId, valueSpirvType);
-            }
-
-            case #char "!"; #through;
-            case #char "~"; {
-               subexpressionSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = subexpressionType });
-
-               info, isNumeric := GetNumericInfo(subexpressionType);
-
-               op: SpvOp;
-               #if false {
-               } else if (cuo.operator_type == #char "!" && isNumeric && info.kind == .Bool) {
-                  op = .LogicalNot;
-               } else if (cuo.operator_type == #char "~" && isNumeric && (info.kind == .Signed || info.kind == .Unsigned)) {
-                  op = .Not;
-               } else {
-                  assert(false, "not yet implemented! operator: %, type: %, loc: %", cuo.operator_type, subexpressionType.*, GetLocationString(node));
-               }
-
-               WriteSingleInstructionIfReachable(
-                  function,
-                  *data.isBlockReachable,
-                  op,
-                  GetSSAId(data, .{ type = ._Type, _type = subexpressionType }),
-                  resultSSAId,
-                  subexpressionSSAId
-               );
-
-               RETURN(resultSSAId, subexpressionType);
-            }
-
-            case; assert(false, "not yet implemented! type: %", cuo.operator_type);
-         }
+         return GenerateUnaryOperator(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .BINARY_OPERATOR;
-         cbo := cast(*Code_Binary_Operator) node;
+         return GenerateBinaryOperator(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
-         if cbo.operator_type == {
-            case #char "<";            #through;
-            case #char ">";            #through;
-            case .LESS_OR_EQUAL;       #through;
-            case .GREATER_OR_EQUAL;    #through;
-            case .IS_EQUAL;            #through;
-            case .IS_NOT_EQUAL; {
-               rightType := GetNodeType(cbo.right);
-               leftType := GetNodeType(cbo.left);
-
-               // pointers are compared by their addresses
-               if (leftType.type == TYPE_INFO_POINTER_TAG && rightType.type == TYPE_INFO_POINTER_TAG) {
-                  assert(cbo.operator_type == .IS_EQUAL || cbo.operator_type == .IS_NOT_EQUAL, "pointers can only be compared with == and !=. loc: %", GetLocationString(node));
-
-                  u64TypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) u64 });
-                  addresses: [2] SSAId;
-                  for operand, operandIndex: (*Code_Node).[cbo.left, cbo.right] {
-                     pointerSSAId := GenerateInstructions(data, operand, general, function, currentFunction, .{ spirvShouldHaveBeenType = ifx operandIndex == 0 then leftType else rightType });
-                     addresses[operandIndex] = GetNextSSAId(data);
-                     WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ConvertPtrToU, u64TypeSSAId, addresses[operandIndex], pointerSSAId);
-                  }
-
-                  boolType := cast(*Type_Info) bool;
-                  resultSSAId := GetNextSSAId(data);
-                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, ifx cbo.operator_type == .IS_EQUAL then SpvOp.IEqual else .INotEqual, GetSSAId(data, .{ type = ._Type, _type = boolType }), resultSSAId, addresses[0], addresses[1]);
-                  RETURN(resultSSAId, boolType);
-               }
-
-               assert(CompareType(leftType, rightType), "not yet implemented! comparing different types. left: %, right: %, loc: %", leftType.*, rightType.*, GetLocationString(node));
-               type := leftType;
-
-               resultSSAId := GetNextSSAId(data);
-
-               leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
-               rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightType });
-
-               info, isNumeric := GetNumericInfo(type);
-               AssertNotUserOperator(leftType, rightType, cbo);
-               assert(isNumeric, "not yet implemented! comparing type: %, loc: %", type.*, GetLocationString(node));
-
-               op := GetComparisonOp(cbo.operator_type, info.kind);
-               resultType := GetNumericType(.Bool, 0, info.components);
-
-               WriteSingleInstructionIfReachable(
-                  function,
-                  *data.isBlockReachable,
-                  op,
-                  GetSSAId(data, .{ type = ._Type, _type = resultType }),
-                  resultSSAId,
-                  leftSSAId,
-                  rightSSAId
-               );
-
-               RETURN(resultSSAId, resultType);
-            }
-
-            // jai short circuits && and ||, the right operand is evaluated only if needed. so these cant be a single OpLogicalAnd/OpLogicalOr.
-            //    result := left;
-            //    if  result  result = right;    // &&
-            //    if !result  result = right;    // ||
-            case .LOGICAL_AND; #through;
-            case .LOGICAL_OR; {
-               boolType := cast(*Type_Info) bool;
-               boolTypeIdentifier: Identifier = .{ type = ._Type, _type = boolType };
-
-               storageClass := SpvStorageClass.Function;
-               resultVariableSSAId := GetNextSSAId(data);
-               WriteSingleInstructionIfReachable(
-                  general,
-                  *data.isBlockReachable,
-                  .Variable,
-                  GetSSAId(data, .{ type = ._Type, _type = GetPointerType(boolType, storageClass) }),
-                  resultVariableSSAId,
-                  storageClass
-               );
-
-               leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = boolType });
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, resultVariableSSAId, leftSSAId);
-
-               rightLabelSSAId := GetNextSSAId(data);
-               mergeLabelSSAId := GetNextSSAId(data);
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .SelectionMerge, mergeLabelSSAId, SpvSelectionControlMask.MaskNone);
-               if (cbo.operator_type == .LOGICAL_AND) {
-                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, leftSSAId, rightLabelSSAId, mergeLabelSSAId);
-               } else {
-                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, leftSSAId, mergeLabelSSAId, rightLabelSSAId);
-               }
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, rightLabelSSAId);
-               rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = boolType });
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, resultVariableSSAId, rightSSAId);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, mergeLabelSSAId);
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
-               resultSSAId := Load(data, function, boolTypeIdentifier, resultVariableSSAId, false);
-
-               RETURN(resultSSAId, boolType);
-            }
-
-            case .ARRAY_SUBSCRIPT;
-               DESCRIPTOR_HEAP_BODY :: (elementType: *Type_Info, sourceVariable: Identifier) #expand {
-                  assert(`additionalData.isLValue == false, "i am kinda treating this as a intrinsic function call. maybe i should just have idk a function instead of an intrinsic array. idk.");
-
-                  indexSSAId := GenerateInstructions(`data, `cbo.right, `general, `function, `currentFunction, .{ spirvShouldHaveBeenType = type_info(s32) });
-                  tira := New(TypeInfoRuntimeArray);
-                  tira.elementType = GetDescriptorHeapArrayElementType(elementType);
-                  baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
-                  heapIdentifier := GetDescriptorHeapIdentifier(`data, sourceVariable);
-
-                  storageClass := SpvStorageClass.UniformConstant;
-                  returnTypeIdentifier := GetPointerTypeIdentifier(type_info(void), storageClass);
-
-                  lValueSSAId := GetNextSSAId(`data);
-
-                  WriteSingleInstructionIfReachable(
-                     `function,
-                     *`data.isBlockReachable,
-                     .UntypedAccessChainKHR,
-                     GetSSAId(`data, returnTypeIdentifier),
-                     lValueSSAId,
-                     GetSSAId(`data, baseTypeIdentifier),
-                     GetSSAId(`data, heapIdentifier),
-                     indexSSAId
-                  );
-
-                  dereferencedSSAId := Load(`data, `function, .{ type = ._Type, _type = elementType }, lValueSSAId, false);
-                  RETURN(dereferencedSSAId, elementType);
-               }
-
-               // checking if the variable is an intrinsic array.
-               if (cbo.left.kind == .IDENT) {
-                  ci := cast(*Code_Ident) cbo.left;
-                  variable := GetVariableIdentifier(ci);
-                  if false {
-                  } else if (IdentifierCompare(variable, meshVerticesVariableIdentifier) || IdentifierCompare(variable, meshPrimitivesVariableIdentifier)) {
-                     // do nothing. DoDotsAndArraySubscripts works for this.
-                  } else if (GetMeshPrimitiveIndicesIndex(variable) != -1) {
-                     // do nothing. DoDotsAndArraySubscripts works for this.
-                  } else if (IdentifierCompare(variable, imageHeapVariableIdentifier)) {
-                     assert(additionalData.accessChainBaseArrayElementTypeIfImageHeap != null, "% can only be used as the image argument of a texture or image function (the type of the image is decided by how it is used, so it cant be stored in a variable). loc: %", IMAGE_HEAP_VARIABLE_NAME, GetLocationString(node));
-                     DESCRIPTOR_HEAP_BODY(additionalData.accessChainBaseArrayElementTypeIfImageHeap, variable);
-                  } else if (IdentifierCompare(variable, tlasHeapVariableIdentifier)) {
-                     DESCRIPTOR_HEAP_BODY(type_info(__TLAS__), variable);
-                  } else if (IdentifierCompare(variable, samplerHeapVariableIdentifier)) {
-                     DESCRIPTOR_HEAP_BODY(type_info(__Sampler__), variable);
-                  }
-               }
-
-               #through;
-            case #char ".";
-               // E.A (a value of an enum) or Module.CONSTANT. the right side is the constant.
-               if (cbo.operator_type == #char "." && cbo.left.type != null && cbo.left.type.type == .TYPE && cbo.right.kind == .IDENT) {
-                  rightDeclaration := (cast(*Code_Ident) cbo.right).resolved_declaration;
-                  if (rightDeclaration != null && (rightDeclaration.flags & .IS_CONSTANT)) {
-                     valueSpirvType: *Type_Info;
-                     valueSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = GetNodeType(cbo.right) }, spirvType = *valueSpirvType, identifierOut = identifierOut);
-                     RETURN(valueSSAId, valueSpirvType);
-                  }
-               }
-
-               chainSpirvType: *Type_Info;
-               chainSSAId := DoDotsAndArraySubscripts(data, function, cbo, currentFunction, additionalData.isLValue, lValueOut, *chainSpirvType, lValueOutSpirvType);
-               RETURN(chainSSAId, chainSpirvType);
-
-            case #char "%";         #through;
-            case #char "&";         #through;
-            case #char "|";         #through;
-            case #char "^";         #through;
-            case .SHIFT_LEFT;       #through;
-            case .SHIFT_RIGHT;      #through;
-            case #char "/";         #through;
-            case #char "*";         #through;
-            case #char "-";         #through;
-            case #char "+"; {
-               leftType := GetNodeType(cbo.left);
-               rightType := GetNodeType(cbo.right);
-
-               //
-               // in some cases the jai compiler converts the type, sometimes it doesnt.
-               // in the following it does report the type of literal as float:
-               //    f: f32x4;
-               //    f.x = f.y + 4;
-               //
-               // but in the following it reports as s64:
-               //    f: f32x4;
-               //    f = .{ -1, -1, 0.5, 1 }
-               //
-               // so below i say the type of the node itself but i dont think thats always going to turn out to be true.
-               // the good thing is that the validator can spot this mistake, so as long as i validate the output im fine.
-               // if something doesnt work then i will inspect and fix it, not now.
-               //
-               //       - apila, 07/05/26
-               //
-
-               // pointer arithmetic: p + n, n + p, p - n (see OffsetPointer) and p - q (see PointerDifference). the operands are generated in order, the integer as u64.
-               leftIsPointer := leftType.type == TYPE_INFO_POINTER_TAG;
-               rightIsPointer := rightType.type == TYPE_INFO_POINTER_TAG;
-               if ((cbo.operator_type == #char "+" || cbo.operator_type == #char "-") && (leftIsPointer || rightIsPointer)) {
-                  u64Type := cast(*Type_Info) u64;
-                  leftSpirvType: *Type_Info;
-                  rightSpirvType: *Type_Info;
-                  leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = ifx leftIsPointer then null else u64Type }, spirvType = *leftSpirvType);
-                  rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = ifx rightIsPointer then null else u64Type }, spirvType = *rightSpirvType);
-                  assert(leftSpirvType != null && rightSpirvType != null, "loc: %", GetLocationString(node));
-
-                  if (leftIsPointer && rightIsPointer) {
-                     assert(cbo.operator_type == #char "-", "loc: %", GetLocationString(node));
-                     resultSSAId := PointerDifference(data, function, leftSSAId, cast(*TypeInfoPointer) leftSpirvType, rightSSAId, cast(*TypeInfoPointer) rightSpirvType, node);
-                     RETURN(resultSSAId, cast(*Type_Info) s64);
-                  }
-
-                  if (leftIsPointer) {
-                     resultSSAId := OffsetPointer(data, function, leftSSAId, cast(*TypeInfoPointer) leftSpirvType, rightSSAId, cbo.operator_type == #char "-", node);
-                     RETURN(resultSSAId, leftSpirvType);
-                  }
-
-                  assert(cbo.operator_type == #char "+", "loc: %", GetLocationString(node)); // n - p is not allowed by jai
-                  resultSSAId := OffsetPointer(data, function, rightSSAId, cast(*TypeInfoPointer) rightSpirvType, leftSSAId, false, node);
-                  RETURN(resultSSAId, rightSpirvType);
-               }
-
-               // not sure about literalShouldHaveBeenTypes here
-               AssertNotUserOperator(leftType, rightType, cbo);
-               leftType, rightType = GetArithmeticOperandTypes(leftType, rightType, cbo.operator_type);
-               leftId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
-               rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightType });
-
-               binaryArithmeticSpirvType: *Type_Info;
-               binaryArithmeticSSAId := DoBinaryArithmetic(data, function, leftType, leftId, rightType, rightId, cbo.operator_type, cbo, spirvType = *binaryArithmeticSpirvType);
-               assert(binaryArithmeticSpirvType != null);
-
-               RETURN(binaryArithmeticSSAId, binaryArithmeticSpirvType);
-            }
-
-            // c += x;
-            // c = c + x;
-            case .PLUS_ASSIGN;         #through;
-            case .MINUS_ASSIGN;        #through;
-            case .TIMES_ASSIGN;        #through;
-            case .DIV_ASSIGN;          #through;
-            case .MOD_ASSIGN;          #through;
-            case .BITWISE_AND_ASSIGN;  #through;
-            case .BITWISE_OR_ASSIGN;   #through;
-            case .BITWISE_XOR_ASSIGN;  #through;
-            case .SHIFT_LEFT_ASSIGN;   #through;
-            case .SHIFT_RIGHT_ASSIGN; {
-               assert(cbo.left.kind == .IDENT ||
-                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == #char ".") ||
-                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == .ARRAY_SUBSCRIPT) ||
-                     (cbo.left.kind == .UNARY_OPERATOR  && cbo.left.(*Code_Unary_Operator).operator_type == .POSTFIX_DEREFERENCE) ||
-                     (cbo.left.kind == .UNARY_OPERATOR  && cbo.left.(*Code_Unary_Operator).operator_type == .POINTER_DEREFERENCE),
-                     "cbo.left.kind: %", cbo.left.kind
-               );
-
-               leftType := GetNodeType(cbo.left);
-               rightType := GetNodeType(cbo.right);
-
-               // p += n, p -= n (see OffsetPointer)
-               if (leftType.type == TYPE_INFO_POINTER_TAG) {
-                  assert(cbo.operator_type == .PLUS_ASSIGN || cbo.operator_type == .MINUS_ASSIGN, "loc: %", GetLocationString(node));
-                  offsetSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) u64 });
-
-                  pointerLValueSSAId: SSAId = U32_MAX;
-                  pointerLValueSpirvType: *Type_Info;
-                  pointerSpirvType: *Type_Info;
-                  pointerSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, lValueOut = *pointerLValueSSAId, spirvType = *pointerSpirvType, lValueOutSpirvType = *pointerLValueSpirvType);
-                  assert(pointerSpirvType != null && pointerSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
-
-                  resultSSAId := OffsetPointer(data, function, pointerSSAId, cast(*TypeInfoPointer) pointerSpirvType, offsetSSAId, cbo.operator_type == .MINUS_ASSIGN, node);
-
-                  assert(pointerLValueSSAId != U32_MAX && pointerLValueSpirvType != null, "the pointer cant be assigned. loc: %", GetLocationString(node));
-                  Store(data, function, pointerLValueSSAId, resultSSAId, (cast(*TypeInfoPointer) pointerLValueSpirvType).storageClass == .PhysicalStorageBuffer, pointerSpirvType);
-                  RETURN(resultSSAId, null);
-               }
-
-               operatorType := GetOperatorFromCompoundAssignment(cbo.operator_type);
-
-               // the right side has the type of the left side, except "vector op= scalar" where it is the component type of the vector (it is broadcast)
-               _, broadcastRightType := GetArithmeticOperandTypes(leftType, rightType, operatorType);
-               rightShouldHaveBeenType := ifx broadcastRightType != rightType then broadcastRightType else leftType;
-               rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightShouldHaveBeenType });
-
-               leftLValueSSAId: SSAId = U32_MAX;
-               leftLValueSpirvType: *Type_Info;
-               leftRValueSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, lValueOut = *leftLValueSSAId, lValueOutSpirvType = *leftLValueSpirvType);
-               assert(leftLValueSSAId != U32_MAX, "lvalue was not set");
-               assert(leftLValueSpirvType != null);
-               assert(leftLValueSpirvType.type == TYPE_INFO_POINTER_TAG);
-
-               tipLeftLValue := cast(*TypeInfoPointer) leftLValueSpirvType;
-
-               binaryArithmeticSpirvType: *Type_Info;
-               binaryArithmeticSSAId := DoBinaryArithmetic(data, function, leftType, leftRValueSSAId, rightShouldHaveBeenType, rightId, operatorType, node, spirvType = *binaryArithmeticSpirvType);
-               assert(binaryArithmeticSpirvType != null);
-
-               Store(
-                  data,
-                  function,
-                  leftLValueSSAId,
-                  binaryArithmeticSSAId,
-                  tipLeftLValue.storageClass == .PhysicalStorageBuffer,
-                  binaryArithmeticSpirvType
-               );
-
-               RETURN(binaryArithmeticSSAId, null);
-            }
-
-            // there is a problem with this. i assume that this is assignment operator. but it is not always one. i mean a little different sometimes.
-            // for example consider this:
-            //       payload: RgenPayload = .{ visible = true };
-            // the right handside should generate a constant struct. it shouldnt emit a OpStore instruction. even if it were to emit OpStore instruction the lvalue calculations below needs to change.
-            //             - apila, 09/09/26
-            case #char "="; {
-               // either a variable or access chain or pointer deference
-               assert(cbo.left.kind == .IDENT ||
-                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == #char ".") ||
-                     (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == .ARRAY_SUBSCRIPT) ||
-                     (cbo.left.kind == .UNARY_OPERATOR  && cbo.left.(*Code_Unary_Operator).operator_type == .POSTFIX_DEREFERENCE) ||
-                     (cbo.left.kind == .UNARY_OPERATOR  && cbo.left.(*Code_Unary_Operator).operator_type == .POINTER_DEREFERENCE),
-                     "cbo.left.kind: %", cbo.left.kind
-               );
-
-               leftType := GetNodeType(cbo.left);
-
-               rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
-
-               leftIdSpirvType: *Type_Info;
-               leftId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ isLValue = true }, spirvType = *leftIdSpirvType);
-               assert(leftIdSpirvType != null, "loc: %:%", node.l0, node.c0);
-               assert(leftIdSpirvType.type == TYPE_INFO_POINTER_TAG);
-
-               tipLeftId := cast(*TypeInfoPointer) leftIdSpirvType;
-
-               Store(
-                  data,
-                  function,
-                  leftId,
-                  rightId,
-                  tipLeftId.storageClass == .PhysicalStorageBuffer,
-                  tipLeftId.pointerTo
-               );
-
-               RETURN(rightId, null);
-            }
-
-         }
       case .PROCEDURE_BODY;
       case .PROCEDURE_CALL;
-         cpc := cast(*Code_Procedure_Call) node;
-         procedureExpression := cpc.procedure_expression;
-         assert(procedureExpression.kind == .IDENT ||
-                procedureExpression.kind == .BINARY_OPERATOR,
-                "kind: %", procedureExpression.kind
-         );
-
-         header := GetHeaderFromCodeProcedureCall(cpc);
-
-         if (IsMacroProcedure(header)) {
-            expansion := cpc.macro_expansion_block;
-            assert(expansion != null, "macro call has no expansion: %", header.name);
-            array_add(*data.macroExpansionCalls, cpc);
-            defer data.macroExpansionCalls.count -= 1;
-
-            returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
-            returnsValue := returnTypeIdentifier.type != .Void;
-            returnType := ifx returnsValue then returnTypeIdentifier._type else null;
-
-            // the expansion is a scope. its defers run when it ends, the `defers when the scope the macro is called from ends.
-            array_add(*data.macroDeferBases, data.deferStack.count);
-            defer {
-               data.deferStack.count = data.macroDeferBases[data.macroDeferBases.count - 1];
-               data.macroDeferBases.count -= 1;
-            }
-
-            if (!MacroHasEarlyReturn(expansion)) {
-               // the only return (if any) is the last statement, so the expansion is just inlined.
-               for expansion.statements {
-                  if (GenerateMacroStatement(data, it, general, function, currentFunction)) continue;
-
-                  mr := cast(*Code_Return) it;
-                  if (!returnsValue) break;
-
-                  // the value is evaluated before the defers run
-                  assert(mr.arguments_unsorted.count == 1, "macro return count: %", mr.arguments_unsorted.count);
-                  returnSSAId := GenerateInstructions(data, mr.arguments_unsorted[0].expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = returnType });
-                  GenerateDefers(data, data.macroDeferBases[data.macroDeferBases.count - 1], general, function, currentFunction);
-                  RETURN(returnSSAId, returnType);
-               }
-
-               assert(!returnsValue, "macro % must return a value. loc: %", header.name, GetLocationString(node));
-               GenerateDefers(data, data.macroDeferBases[data.macroDeferBases.count - 1], general, function, currentFunction);
-               RETURN(0, null);
-            }
-
-            //
-            // the macro returns from inside of something (for example an if). spirv only allows branching out of a construct
-            // with break, so the expansion is put in a loop that runs once and return is a break out of it:
-            //    result: T;
-            //    do {
-            //       ...
-            //       result = x; break;    // return x;
-            //       ...
-            //    } while false;
-            //    result
-            //
-            resultVariableType := ifx returnsValue then GetFunctionStorageClassType(returnType) else null;
-            resultVariableSSAId: SSAId;
-            if (returnsValue) {
-               storageClass := SpvStorageClass.Function;
-               resultVariableSSAId = GetNextSSAId(data);
-               WriteSingleInstructionIfReachable(
-                  general,
-                  *data.isBlockReachable,
-                  .Variable,
-                  GetSSAId(data, .{ type = ._Type, _type = GetPointerType(resultVariableType, storageClass) }),
-                  resultVariableSSAId,
-                  storageClass
-               );
-            }
-
-            headerLabelSSAId := GetNextSSAId(data);
-            bodyLabelSSAId := GetNextSSAId(data);
-            continueLabelSSAId := GetNextSSAId(data);
-            mergeLabelSSAId := GetNextSSAId(data);
-
-            // break and continue inside the macro body (outside of its own loops) are not for this loop, they skip it. return is the only way to branch to its merge block.
-            loopData: LoopData = .{ mergeLabelSSAId = mergeLabelSSAId, continueLabelSSAId = continueLabelSSAId, deferBase = data.deferStack.count, isMacro = true };
-            array_add(*data.loopStack, *loopData);
-
-            array_add(*data.macroReturns, .{ resultVariableSSAId = resultVariableSSAId, resultType = resultVariableType, loopIndex = data.loopStack.count - 1 });
-            defer data.macroReturns.count -= 1;
-
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, headerLabelSSAId);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .LoopMerge, mergeLabelSSAId, continueLabelSSAId, SpvLoopControlMask.MaskNone);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, bodyLabelSSAId);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, bodyLabelSSAId);
-
-            for expansion.statements {
-               isReturn := !GenerateMacroStatement(data, it, general, function, currentFunction);
-               if (isReturn) GenerateInstructions(data, it, general, function, currentFunction); // see the .RETURN case
-            }
-
-            GenerateDefers(data, data.macroDeferBases[data.macroDeferBases.count - 1], general, function, currentFunction);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, continueLabelSSAId);
-            falseSSAId := GetSSAId(data, .{ type = .BoolLiteral, boolLiteral = false });
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, falseSSAId, headerLabelSSAId, mergeLabelSSAId);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
-            EndLoop(data, function);
-
-            if (!returnsValue) RETURN(0, null);
-
-            resultSSAId := Load(data, function, .{ type = ._Type, _type = resultVariableType }, resultVariableSSAId, false);
-            RETURN(resultSSAId, resultVariableType);
-         }
-
-         identifierExpression: *Code_Ident;
-         if (procedureExpression.kind == .IDENT) {
-            identifierExpression = cast(*Code_Ident) procedureExpression;
-         } else if (procedureExpression.kind == .BINARY_OPERATOR) {
-            // named module.
-            // or possibly it could be a function pointer inside a struct but in spirv function pointers is not allowed.
-            // maybe for that reason i should check if the left hand side is a struct.
-
-            cbo := cast(*Code_Binary_Operator) procedureExpression;
-
-            // named module
-            if (cbo.left.type.type == .TYPE) {
-               assert(cbo.right.kind == .IDENT, "kind: %", cbo.right.kind);
-
-               identifierExpression = xx cbo.right;
-            } else {
-               assert(false, "type: %", cbo.left.type.type);
-            }
-         }
-
-         identifierName := identifierExpression.name;
-         arguments := cpc.arguments_sorted; // in the order of the parameters, the compiler puts named arguments in their place
-
-         //
-         // for intrinsic functions i need to get the argument type from the function header, and DetermineCodeNodeTypes only operates on Code_Nodes that are child of the entry point function.
-         // the .DECLARATION case of DetermineCodeNodeTypes assumes this (for decorationless copy), so i cant use the same code for operating on Code_Nodes that are outside of the entry point function.
-         // this means i cant have weird parameter types to intrinsic functions, which i think is true for all intrinsic functions but i cant gurantee shit. how the type thingy works is very shady but idk.
-         // i need more information from compiler to idk. anyways thats why i use the Code_Node type directly of an argument of an intrinsic function, surely will never go wrong Clueless.
-         //
-         //                            - apila, 08/06/26
-         //
-         // the above thing about DetermineCodeNodeTypes no longer true. it can be used in any Code_Node (you need to get the context from the metaprogram beforehand tho).
-         // so i prolly need to update the code below. surely i will do it in a timely manner Clueless.oO(shirley)
-         //
-         //                            - apila, 10/06/26
-         //
-         // sin, cos, clamp, dot, mul... (see MATH_INTRINSICS)
-         if (header.notes.count > 0 && header.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) {
-            mathIntrinsic := GetMathIntrinsic(identifierName);
-            if (mathIntrinsic != null) {
-               resultSpirvType: *Type_Info;
-               resultSSAId := GenerateMathIntrinsic(data, mathIntrinsic, cpc, header, general, function, currentFunction, *resultSpirvType);
-               RETURN(resultSSAId, resultSpirvType);
-            }
-
-            // texture, texelfetch3d, ImageRead... (see RESOURCE_FUNCTIONS. ImageWrite and TraceRay are below)
-            resourceFunction := GetResourceFunction(identifierName);
-            if (resourceFunction != null && resourceFunction.operation == .RayQueryInitialize) {
-               resultSpirvType: *Type_Info;
-               GenerateRayQueryIntrinsic(data, .RayQueryInitializeKHR, .None, cpc, header, general, function, currentFunction, *resultSpirvType);
-               RETURN(0, null);
-            }
-
-            // RayQueryProceed, RayQueryGetIntersectionT... (see RAY_QUERY_INTRINSICS)
-            rayQueryIntrinsic := GetRayQueryIntrinsic(identifierName);
-            if (rayQueryIntrinsic != null) {
-               resultSpirvType: *Type_Info;
-               resultSSAId := GenerateRayQueryIntrinsic(data, rayQueryIntrinsic.op, rayQueryIntrinsic.intersection, cpc, header, general, function, currentFunction, *resultSpirvType);
-               RETURN(resultSSAId, resultSpirvType);
-            }
-
-            if (resourceFunction != null && resourceFunction.operation != .Write && resourceFunction.operation != .TraceRay) {
-               resultSpirvType: *Type_Info;
-               resultSSAId := GenerateTextureFunction(data, resourceFunction, cpc, header, general, function, currentFunction, *resultSpirvType);
-               RETURN(resultSSAId, resultSpirvType);
-            }
-
-            // SubgroupAdd, SubgroupBallot... (see SUBGROUP_INTRINSICS)
-            subgroupIntrinsic := GetSubgroupIntrinsic(identifierName);
-            if (subgroupIntrinsic != null) {
-               resultSpirvType: *Type_Info;
-               resultSSAId := GenerateSubgroupIntrinsic(data, subgroupIntrinsic, cpc, header, general, function, currentFunction, *resultSpirvType);
-               RETURN(resultSSAId, resultSpirvType);
-            }
-         }
-
-         if identifierName == {
-            case SET_MESH_OUTPUTS_NAME; {
-               vertexCountExpression := arguments[0];
-               primitiveCountExpression := arguments[1];
-
-               // literalShouldHaveBeenType is needed here. meanign that i cant use node.type as literalShouldHaveBeenType. because jai reports literals as s64.
-               // it doesnt do the conversion here. in direct assign it does tho.
-               //    - apila, 07/05/26
-               vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[0].type });
-               primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[1].type });
-
-               WriteSingleInstructionIfReachable(
-                  function,
-                  *data.isBlockReachable,
-                  .SetMeshOutputsEXT,
-                  vertexCountSSAId,
-                  primitiveCountSSAId
-               );
-
-               return 42000; // doesnt matter since OpSetMeshOutputsEXT doesnt return
-            }
-
-            case IMAGE_WRITE_FUNCTION_NAME; {
-               imageNode := arguments[0];
-
-               coordinateNode := arguments[1];
-               coordinateType := GetNodeType(header.arguments[1]);
-
-               texelNode := arguments[2];
-               texelType := GetNodeType(header.arguments[2]);
-
-               sampledType := GetScalarTypeOrVectorElementType(texelType);
-
-               imageType := New(TypeInfoImage);
-               imageType.* = .{
-                  sampledType       = sampledType,
-                  dimensionality    = ._2D,
-                  depth             = 0, // maybe use 2 idk. in texture functions i have seperate overloads for depth i think, but for this idk.    - apila, 11/09/26
-                  arrayed           = 0,
-                  ms                = 0,
-                  sampled           = 2,
-                  imageFormat       = .Unknown,
-               };
-
-               imageSSAId        := GenerateInstructions(data, imageNode,      general, function, currentFunction, .{ accessChainBaseArrayElementTypeIfImageHeap = imageType });
-               coordinateSSAId   := GenerateInstructions(data, coordinateNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = coordinateType });
-               texelSSAId        := GenerateInstructions(data, texelNode,      general, function, currentFunction, .{ spirvShouldHaveBeenType = texelType });
-
-               WriteSingleInstructionIfReachable(
-                  function,
-                  *data.isBlockReachable,
-                  .ImageWrite,
-                  imageSSAId,
-                  coordinateSSAId,
-                  texelSSAId
-               );
-
-               RETURN(0, null);
-            }
-
-            case DISCARD_FUNCTION_NAME; {
-               assert(data.shaderType == .Fragment, "% only exists in fragment shaders. loc: %", identifierName, GetLocationString(node));
-               data.usesDemote = true;
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .DemoteToHelperInvocation);
-               RETURN(0, null);
-            }
-
-            // OpControlBarrier Workgroup Workgroup AcquireRelease|WorkgroupMemory, like barrier() in glsl
-            case DEBUG_PRINT_FUNCTION_NAME; {
-               GenerateDebugPrint(data, cpc, general, function, currentFunction);
-               RETURN(0, null);
-            }
-
-            case IGNORE_INTERSECTION_FUNCTION_NAME; #through;
-            case TERMINATE_RAY_FUNCTION_NAME; {
-               assert(data.shaderType == .Rahit, "% only exists in rahit shaders. loc: %", identifierName, GetLocationString(node));
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, ifx identifierName == IGNORE_INTERSECTION_FUNCTION_NAME then SpvOp.IgnoreIntersectionKHR else .TerminateRayKHR);
-               RETURN(0, null);
-            }
-
-            case REPORT_INTERSECTION_FUNCTION_NAME; {
-               assert(data.shaderType == .Rint, "% only exists in rint shaders. loc: %", identifierName, GetLocationString(node));
-               hitTSSAId := GenerateInstructions(data, arguments[0], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[0].type });
-               hitKindSSAId := GenerateInstructions(data, arguments[1], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[1].type });
-
-               boolType := cast(*Type_Info) bool;
-               resultSSAId := GetNextSSAId(data);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ReportIntersectionKHR, GetSSAId(data, .{ type = ._Type, _type = boolType }), resultSSAId, hitTSSAId, hitKindSSAId);
-               RETURN(resultSSAId, boolType);
-            }
-
-            case EXECUTE_CALLABLE_FUNCTION_NAME; {
-               assert(data.shaderType == .Rgen || data.shaderType == .Rchit || data.shaderType == .Rmiss || data.shaderType == .Rcall, "% only exists in rgen, rchit, rmiss and rcall shaders. loc: %", identifierName, GetLocationString(node));
-               sbtIndexSSAId := GenerateInstructions(data, arguments[0], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[0].type });
-
-               dataSpirvType: *Type_Info;
-               dataSSAId := GenerateInstructions(data, arguments[1], general, function, currentFunction, spirvType = *dataSpirvType);
-               assert(dataSpirvType != null && dataSpirvType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) dataSpirvType).storageClass == .CallableDataKHR, "the data of % is the address of a @% variable. loc: %", identifierName, CALLABLE_DATA_QUALIFIER, GetLocationString(node));
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ExecuteCallableKHR, sbtIndexSSAId, dataSSAId);
-               RETURN(0, null);
-            }
-
-            // OpControlBarrier Subgroup Subgroup AcquireRelease|UniformMemory|WorkgroupMemory|ImageMemory, like subgroupBarrier() in glsl
-            case SUBGROUP_BARRIER_FUNCTION_NAME; {
-               RequireCapability(data, .GroupNonUniform);
-               scopeSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx SpvScope.Subgroup, bitSize = 32 } });
-               semantics := SpvMemorySemanticsMask.AcquireReleaseMask | .UniformMemoryMask | .WorkgroupMemoryMask | .ImageMemoryMask;
-               semanticsSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx semantics, bitSize = 32 } });
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ControlBarrier, scopeSSAId, scopeSSAId, semanticsSSAId);
-               RETURN(0, null);
-            }
-
-            case BARRIER_FUNCTION_NAME; {
-               assert(data.shaderType == .Compute || data.shaderType == .Mesh || data.shaderType == .Task, "% only exists in compute, mesh and task shaders. loc: %", identifierName, GetLocationString(node));
-
-               scopeSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx SpvScope.Workgroup, bitSize = 32 } });
-               semantics := SpvMemorySemanticsMask.AcquireReleaseMask | .WorkgroupMemoryMask;
-               semanticsSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx semantics, bitSize = 32 } });
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ControlBarrier, scopeSSAId, scopeSSAId, semanticsSSAId);
-               RETURN(0, null);
-            }
-
-            // the atomics are relaxed. the scope is the device for buffer memory and the workgroup for workgroup variables.
-            case ATOMIC_ADD_FUNCTION_NAME;      #through;
-            case ATOMIC_MIN_FUNCTION_NAME;      #through;
-            case ATOMIC_MAX_FUNCTION_NAME;      #through;
-            case ATOMIC_AND_FUNCTION_NAME;      #through;
-            case ATOMIC_OR_FUNCTION_NAME;       #through;
-            case ATOMIC_XOR_FUNCTION_NAME;      #through;
-            case ATOMIC_EXCHANGE_FUNCTION_NAME; #through;
-            case ATOMIC_COMPARE_EXCHANGE_FUNCTION_NAME; {
-               argumentNodes := cpc.arguments_sorted;
-
-               pointerSpirvType: *Type_Info;
-               pointerSSAId := GenerateInstructions(data, argumentNodes[0], general, function, currentFunction, spirvType = *pointerSpirvType);
-               assert(pointerSpirvType != null && pointerSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
-               tip := cast(*TypeInfoPointer) pointerSpirvType;
-               assert(tip.storageClass == .PhysicalStorageBuffer || tip.storageClass == .Workgroup, "atomics are on buffer memory or workgroup variables, not on % memory. loc: %", tip.storageClass, GetLocationString(node));
-
-               valueType := tip.pointerTo;
-               info, isNumeric := GetNumericInfo(valueType);
-               assert(isNumeric && info.components == 1 && (info.kind == .Signed || info.kind == .Unsigned) && (info.bitSize == 32 || info.bitSize == 64), "type: %, loc: %", TypeName(valueType), GetLocationString(node));
-               if (info.bitSize == 64) data.usesInt64Atomics = true;
-
-               scope := ifx tip.storageClass == .Workgroup then SpvScope.Workgroup else SpvScope.Device;
-               scopeSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx scope, bitSize = 32 } });
-               relaxedSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = 0, bitSize = 32 } });
-
-               signed := info.kind == .Signed;
-               op: SpvOp;
-               if identifierName == {
-                  case ATOMIC_ADD_FUNCTION_NAME;      op = .AtomicIAdd;
-                  case ATOMIC_MIN_FUNCTION_NAME;      op = ifx signed then SpvOp.AtomicSMin else .AtomicUMin;
-                  case ATOMIC_MAX_FUNCTION_NAME;      op = ifx signed then SpvOp.AtomicSMax else .AtomicUMax;
-                  case ATOMIC_AND_FUNCTION_NAME;      op = .AtomicAnd;
-                  case ATOMIC_OR_FUNCTION_NAME;       op = .AtomicOr;
-                  case ATOMIC_XOR_FUNCTION_NAME;      op = .AtomicXor;
-                  case ATOMIC_EXCHANGE_FUNCTION_NAME; op = .AtomicExchange;
-                  case ATOMIC_COMPARE_EXCHANGE_FUNCTION_NAME; op = .AtomicCompareExchange;
-               }
-
-               valueTypeSSAId := GetSSAId(data, .{ type = ._Type, _type = valueType });
-               resultSSAId := GetNextSSAId(data);
-
-               if (op == .AtomicCompareExchange) {
-                  // AtomicCompareExchange(pointer, comparator, value)
-                  comparatorSSAId := GenerateInstructions(data, argumentNodes[1], general, function, currentFunction, .{ spirvShouldHaveBeenType = valueType });
-                  valueSSAId := GenerateInstructions(data, argumentNodes[2], general, function, currentFunction, .{ spirvShouldHaveBeenType = valueType });
-                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, op, valueTypeSSAId, resultSSAId, pointerSSAId, scopeSSAId, relaxedSSAId, relaxedSSAId, valueSSAId, comparatorSSAId);
-               } else {
-                  valueSSAId := GenerateInstructions(data, argumentNodes[1], general, function, currentFunction, .{ spirvShouldHaveBeenType = valueType });
-                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, op, valueTypeSSAId, resultSSAId, pointerSSAId, scopeSSAId, relaxedSSAId, valueSSAId);
-               }
-
-               RETURN(resultSSAId, valueType);
-            }
-
-            case TRACE_RAY_FUNCTION_NAME; {
-               assert(data.shaderType == .Rgen || data.shaderType == .Rchit || data.shaderType == .Rmiss, "% only exists in rgen, rchit and rmiss shaders. loc: %", identifierName, GetLocationString(node));
-
-               // OpTraceRayKHR, its operands are the arguments
-               operands: [..] Any;
-               operands.allocator = temp;
-               for arguments {
-                  // the payload is the address of the payload variable. its type is a pointer to RayPayloadKHR memory, not the type in the header (see IsTraceRayFunction)
-                  isPayload := it_index == arguments.count - 1;
-                  argumentType := ifx isPayload then GetNodeType(header.arguments[it_index]) else header.arguments[it_index].type;
-                  argumentSSAId := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = argumentType });
-                  array_add(*operands, ac(argumentSSAId));
-               }
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .TraceRayKHR, .. operands);
-               RETURN(0, null);
-            }
-         }
-
-         if (header.notes.count > 0) {
-            assert(header.notes[0].text != INTRINSIC_FUNCTION_NOTE_NAME, "intrinsic function not yet implemetned! name: %", identifierName);
-         }
-
-         // if code reached here then it means this is a user defined function.
-         AddFunctionDependency(*functionDependencyTable, currentFunction, header);
-         CreateFunctionDependencyEntryIfNotExists(*functionDependencyTable, header);
-
-         returnType := GetNodeType(node);
-
-         returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
-         resultSSAId := GetNextSSAId(data);
-
-         operands: [..] Any;
-         array_add(*operands, GetSSAId(data, returnTypeIdentifier));
-         array_add(*operands, resultSSAId);
-         array_add(*operands, GetSSAId(data, .{ type = .Function, function = header }));
-
-         // the arguments in the order of the parameters, the compiler puts named arguments in their place and fills in the default values
-         assert(cpc.arguments_sorted.count == header.arguments.count, "varargs are not supported. loc: %", GetLocationString(node));
-         for argumentNode: cpc.arguments_sorted {
-            argumentType := GetNodeType(header.arguments[it_index]);
-            argumentSSAId := GenerateInstructions(data, argumentNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = argumentType });
-
-            if (IsSmallArgument(argumentType)) {
-               // need to copy
-
-               storageClass := SpvStorageClass.Function;
-               spirvType := GetPointerType(argumentType, storageClass);
-
-               parameterVariableSSAId := GetNextSSAId(data);
-               WriteSingleInstructionIfReachable(
-                  general,
-                  *data.isBlockReachable,
-                  .Variable,
-                  GetSSAId(data, .{ type = ._Type, _type = spirvType }),
-                  parameterVariableSSAId,
-                  storageClass
-               );
-
-               WriteSingleInstructionIfReachable(
-                  function,
-                  *data.isBlockReachable,
-                  .Store,
-                  parameterVariableSSAId,
-                  argumentSSAId
-               );
-
-               argumentSSAId = parameterVariableSSAId;
-            }
-
-            array_add(*operands, ac(argumentSSAId));
-         }
-
-         WriteSingleInstructionIfReachable(
-            function,
-            *data.isBlockReachable,
-            .FunctionCall,
-            .. operands
-         );
-
-         if (returnTypeIdentifier.type == .Void) RETURN(resultSSAId, returnType);
-
-         // a procedure with more than one return value returns a struct of them (see GetMultipleReturnType). the values are taken out of it by Code_Extracts.
-         // when the call is used as an expression its value is the first value.
-         procedureType := cast(*Type_Info_Procedure) header.type;
-         if (procedureType.return_types.count > 1) {
-            table_set(*data.multipleReturnValues, cpc, resultSSAId);
-
-            firstType := GetMultipleReturnValueType(procedureType, 0);
-            firstSSAId := EmitCompositeExtract(data, function, .{ type = ._Type, _type = firstType }, resultSSAId, .[0]);
-            RETURN(firstSSAId, firstType);
-         }
-
-         RETURN(resultSSAId, returnTypeIdentifier._type);
+         return GenerateProcedureCall(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .LOOP_CONTROL;
-         clc := cast(*Code_Loop_Control) node;
-
-         if #complete clc.control_type == {
-            case .BREAK; #through;
-            case .CONTINUE; {
-               // the innermost loop, or the loop whose iterator is named (break i;)
-               targetIndex := -1;
-               for < data.loopStack {
-                  if (it.isMacro) continue;
-                  if (clc.target_ident == null || it.iteratorDeclaration == clc.target_ident.resolved_declaration) {
-                     targetIndex = it_index;
-                     break;
-                  }
-               }
-               assert(targetIndex != -1, "% is not inside a loop. loc: %", clc.control_type, GetLocationString(node));
-
-               // the scopes inside the loop are exited
-               GenerateDefers(data, data.loopStack[targetIndex].deferBase, general, function, currentFunction);
-               GenerateLoopExit(data, targetIndex, clc.control_type == .CONTINUE, general, function);
-               return 0;
-            }
-
-            case .REMOVE; {
-               assert(false, "not yet implemented! please dont use this :)");
-            }
-
-            case; assert(false, "not yet implemented! type: %", clc.control_type);
-         }
+         return GenerateLoopControl(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .WHILE;
-         cw := cast(*Code_While) node;
-
-         conditionType := GetNodeType(cw.condition);
-
-         headerLabelSSAId := GetNextSSAId(data);
-         conditionLabelSSAId := GetNextSSAId(data);
-         bodyLabelSSAId := GetNextSSAId(data);
-         continueLabelSSAId := GetNextSSAId(data);
-         mergeLabelSSAId := GetNextSSAId(data);
-
-         // break and continue refer to the innermost loop
-         loopData: LoopData = .{
-            headerLabelSSAId     = headerLabelSSAId,
-            conditionLabelSSAId  = conditionLabelSSAId,
-            bodyLabelSSAId       = bodyLabelSSAId,
-            continueLabelSSAId   = continueLabelSSAId,
-            mergeLabelSSAId      = mergeLabelSSAId,
-            deferBase            = data.deferStack.count,
-         };
-         array_add(*data.loopStack, *loopData);
-
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, headerLabelSSAId);
-
-         WriteSingleInstructionIfReachable(
-            function,
-            *data.isBlockReachable,
-            .LoopMerge,
-            mergeLabelSSAId,
-            continueLabelSSAId,
-            SpvLoopControlMask.MaskNone
-         );
-
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, conditionLabelSSAId);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, conditionLabelSSAId);
-
-         conditionSSAId := GenerateInstructions(data, cw.condition, general, function, currentFunction, .{ spirvShouldHaveBeenType = conditionType });
-         WriteSingleInstructionIfReachable(
-            function,
-            *data.isBlockReachable,
-            .BranchConditional,
-            conditionSSAId,
-            bodyLabelSSAId,
-            mergeLabelSSAId
-         );
-
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, bodyLabelSSAId);
-
-         GenerateInstructions(data, cw.block, general, function, currentFunction);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, continueLabelSSAId);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
-         EndLoop(data, function);
-
-         return 999999;
+         return GenerateWhile(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .IF;
-         ci := cast(*Code_If) node;
-
-         if (ci.if_flags & .IS_STATIC) {
-            // #if doesnt create a scope, so the defers in it are for the enclosing scope
-            takenBlock := GetStaticIfTakenBlock(ci);
-            if (takenBlock != null) {
-               for takenBlock.statements  GenerateInstructions(data, it, general, function, currentFunction);
-            }
-            return 0;
-         }
-
-         if (ci.if_flags & .IS_SWITCH_STATEMENT) {
-            GenerateSwitch(data, ci, general, function, currentFunction);
-            return 0;
-         }
-
-         // only the chosen branch is evaluated:
-         //    result: T;
-         //    if condition  result = then; else result = else;
-         if (ci.if_flags & .IS_IFX) {
-            resultType := GetNodeType(node);
-            assert(ci.then_block.statements.count == 1 && ci.else_block.statements.count == 1, "loc: %", GetLocationString(node));
-
-            variableType := GetFunctionStorageClassType(resultType);
-            storageClass := SpvStorageClass.Function;
-            resultVariableSSAId := GetNextSSAId(data);
-            WriteSingleInstructionIfReachable(
-               general,
-               *data.isBlockReachable,
-               .Variable,
-               GetSSAId(data, .{ type = ._Type, _type = GetPointerType(variableType, storageClass) }),
-               resultVariableSSAId,
-               storageClass
-            );
-
-            conditionSSAId := GenerateInstructions(data, ci.condition, general, function, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) bool });
-
-            thenLabelSSAId := GetNextSSAId(data);
-            elseLabelSSAId := GetNextSSAId(data);
-            endLabelSSAId := GetNextSSAId(data);
-
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .SelectionMerge, endLabelSSAId, SpvSelectionControlMask.MaskNone);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, conditionSSAId, thenLabelSSAId, elseLabelSSAId);
-
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, thenLabelSSAId);
-            thenSSAId := GenerateInstructions(data, ci.then_block.statements[0], general, function, currentFunction, .{ spirvShouldHaveBeenType = variableType });
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, resultVariableSSAId, thenSSAId);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, endLabelSSAId);
-
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, elseLabelSSAId);
-            elseSSAId := GenerateInstructions(data, ci.else_block.statements[0], general, function, currentFunction, .{ spirvShouldHaveBeenType = variableType });
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, resultVariableSSAId, elseSSAId);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, endLabelSSAId);
-
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, endLabelSSAId);
-            resultSSAId := Load(data, function, .{ type = ._Type, _type = variableType }, resultVariableSSAId, false);
-
-            RETURN(resultSSAId, variableType);
-         }
-
-         assert(ci.condition != null);
-         assert(ci.then_block != null);
-
-         conditionSSAId := GenerateInstructions(data, ci.condition, general, function, currentFunction);
-
-         thenLabelSSAId := GetNextSSAId(data);
-         endLabelSSAId := GetNextSSAId(data);
-         elseLabelSSAId := ifx ci.else_block == null then endLabelSSAId else GetNextSSAId(data);
-
-         WriteSingleInstructionIfReachable(
-            function,
-            *data.isBlockReachable,
-            .SelectionMerge,
-            endLabelSSAId,
-            SpvSelectionControlMask.MaskNone
-         );
-
-         WriteSingleInstructionIfReachable(
-            function,
-            *data.isBlockReachable,
-            .BranchConditional,
-            conditionSSAId,
-            thenLabelSSAId,
-            elseLabelSSAId
-         );
-
-         WriteSingleInstructionIfReachable(
-            function,
-            *data.isBlockReachable,
-            .Label,
-            thenLabelSSAId
-         );
-         GenerateInstructions(data, ci.then_block, general, function, currentFunction);
-         WriteSingleInstructionIfReachable(
-            function,
-            *data.isBlockReachable,
-            .Branch,
-            endLabelSSAId
-         );
-
-         if (ci.else_block != null) {
-            WriteSingleInstructionIfReachable(
-               function,
-               *data.isBlockReachable,
-               .Label,
-               elseLabelSSAId
-            );
-            GenerateInstructions(data, ci.else_block, general, function, currentFunction);
-            WriteSingleInstructionIfReachable(
-               function,
-               *data.isBlockReachable,
-               .Branch,
-               endLabelSSAId
-            );
-         }
-
-         WriteSingleInstructionIfReachable(
-            function,
-            *data.isBlockReachable,
-            .Label,
-            endLabelSSAId
-         );
-
-         return 321321; // doesnt matter since if doesnt return. need to update this when i implement ifx.
+         return GenerateIf(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .CASE;
 
       case .RETURN;
-         cr := cast(*Code_Return) node;
-
-         // return from a macro that has an early return. see the macro case of .PROCEDURE_CALL
-         if (data.macroReturns.count > 0) {
-            macroReturn := data.macroReturns[data.macroReturns.count - 1];
-
-            if (macroReturn.resultVariableSSAId != 0) {
-               assert(cr.arguments_unsorted.count == 1, "loc: %", GetLocationString(node));
-               valueSSAId := GenerateInstructions(data, cr.arguments_unsorted[0].expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = macroReturn.resultType });
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, macroReturn.resultVariableSSAId, valueSSAId);
-            }
-
-            // the defers of the macro run after the value is evaluated
-            GenerateDefers(data, data.macroDeferBases[data.macroDeferBases.count - 1], general, function, currentFunction);
-            GenerateLoopExit(data, macroReturn.loopIndex, false, general, function);
-            return 543543;
-         }
-
-         if (currentFunction == data.entryFunction) {
-            // the return values are evaluated before the defers run
-            if data.shaderType == {
-               case .Mesh; #through;
-               case .Compute; #through;
-               case .Rgen; #through;
-               case .Rchit; #through;
-               case .Rmiss; #through;
-               case .Rahit; #through;
-               case .Rint; #through;
-               case .Rcall;
-                  assert(cr.arguments_unsorted.count == 0, "% shader cant return a value. loc: %", data.shaderType, GetLocationString(node));
-                  GenerateDefers(data, 0, general, function, currentFunction);
-                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
-
-               case .Fragment;
-                  assert(cr.arguments_unsorted.count == data.fragmentOutputIdentifiers.count, "cr.arguments_unsorted.count: %, data.fragmentOutputIdentifiers.count: %", cr.arguments_unsorted.count, data.fragmentOutputIdentifiers.count);
-
-                  for cr.arguments_unsorted {
-                     ssaId := GenerateInstructions(data, it.expression, general, function, currentFunction);
-                     WriteSingleInstructionIfReachable(
-                        function,
-                        *data.isBlockReachable,
-                        .Store,
-                        GetSSAId(data, data.fragmentOutputIdentifiers[it_index]),
-                        ssaId
-                     );
-                  }
-
-                  GenerateDefers(data, 0, general, function, currentFunction);
-                  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
-
-               case; assert(false, "not yet implemented! type: %", data.shaderType);
-            }
-         } else {
-            returnTypeIdentifier := GetReturnTypeIdentifier(xx currentFunction.type);
-
-            // related to the comment in GetReturnTypeIdentifier
-            // assert(returnTypeIdentifier.type == ._Type);
-
-            // if (CompareType(returnTypeIdentifier._type, cast(*Type_Info) void)) {
-            if (returnTypeIdentifier.type == .Void) {
-               GenerateDefers(data, 0, general, function, currentFunction);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
-            } else if ((cast(*Type_Info_Procedure) currentFunction.type).return_types.count > 1) {
-               // the values are put in a struct, see GetMultipleReturnType
-               procedureType := cast(*Type_Info_Procedure) currentFunction.type;
-               assert(cr.arguments_sorted.count == procedureType.return_types.count, "count: %, loc: %", cr.arguments_sorted.count, GetLocationString(node));
-
-               resultSSAId := GetNextSSAId(data);
-               operands: [..] Any;
-               array_add(*operands, GetSSAId(data, returnTypeIdentifier), resultSSAId);
-
-               for cr.arguments_sorted {
-                  valueSSAId := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = GetMultipleReturnValueType(procedureType, it_index) });
-                  array_add(*operands, ac(valueSSAId));
-               }
-
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .CompositeConstruct, .. operands);
-               GenerateDefers(data, 0, general, function, currentFunction);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ReturnValue, resultSSAId);
-            } else {
-               assert(cr.arguments_unsorted.count == 1, "count: %", cr.arguments_unsorted.count);
-
-               returnArgumentNode := cr.arguments_unsorted[0].expression;
-               returnType := returnTypeIdentifier._type;
-
-               // the value is evaluated before the defers run
-               returnArgumentSSAId := GenerateInstructions(data, returnArgumentNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = returnType });
-               GenerateDefers(data, 0, general, function, currentFunction);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ReturnValue, returnArgumentSSAId);
-            }
-         }
-
-         return 543543; // return doesnt return any ssa id
+         return GenerateReturn(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       //
       // ranges (inclusive):
@@ -9793,178 +8244,7 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
       //    }
       //
       case .FOR;
-         cf := cast(*Code_For) node;
-
-         // a for_expansion, a macro
-         if (cf.macro_expansion_procedure_call != null) {
-            GenerateInstructions(data, cf.macro_expansion_procedure_call, general, function, currentFunction);
-            return 0;
-         }
-
-         nodes := GetForLoopNodes(data, cf);
-         isRange := cf.iteration_expression_right != null;
-         reverse := (cf.for_flags & .REVERSE) != 0;
-
-         itType := GetNodeType(cf.ident_decl);
-         isPointerLoop := (cf.for_flags & .POINTER) != 0;
-         itSSAId: SSAId;
-         if (!isPointerLoop) itSSAId = GenerateInstructions(data, cf.ident_decl, general, function, currentFunction);
-         boolTypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) bool });
-
-         // only for arrays
-         indexType: *Type_Info;
-         indexSSAId, indexOne, indexZero, indexTypeSSAId: SSAId;
-         indexInfo: NumericInfo;
-         if (!isRange) {
-            indexType = GetNodeType(nodes.indexDeclaration);
-            indexSSAId = GenerateInstructions(data, nodes.indexDeclaration, general, function, currentFunction);
-
-            indexIsNumeric: bool;
-            indexInfo, indexIsNumeric = GetNumericInfo(indexType);
-            assert(indexIsNumeric && (indexInfo.kind == .Signed || indexInfo.kind == .Unsigned), "type: %, loc: %", indexType.*, GetLocationString(node));
-            indexOne = GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = indexInfo.kind == .Unsigned, value._s64 = 1, bitSize = indexInfo.bitSize } });
-            indexZero = GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = indexInfo.kind == .Unsigned, value._s64 = 0, bitSize = indexInfo.bitSize } });
-            indexTypeSSAId = GetSSAId(data, .{ type = ._Type, _type = indexType });
-         }
-
-         //
-         // like the cpu backend of jai:
-         //    - the bound a range ends at (the end, or the start for "for <") is read in every iteration if it is a local variable, otherwise it is evaluated once.
-         //      the other bound is the first value of it, it is evaluated once.
-         //    - the array is evaluated once (see LoopBase). the count of an array view is read in every iteration (for "for <" it is read once, for the first index)
-         //
-         startSSAId, endSSAId, countSSAId: SSAId;
-         itInfo: NumericInfo;
-         rereadBound := false;
-         if (isRange) {
-            itIsNumeric: bool;
-            itInfo, itIsNumeric = GetNumericInfo(itType);
-            assert(itIsNumeric && (itInfo.kind == .Signed || itInfo.kind == .Unsigned), "range must be of integers. type: %, loc: %", itType.*, GetLocationString(node));
-
-            startSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
-            endSSAId = GenerateInstructions(data, cf.iteration_expression_right, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
-            rereadBound = IsRereadRangeBound(data, ifx reverse then cf.iteration_expression else cf.iteration_expression_right);
-
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, itSSAId, ifx reverse then endSSAId else startSSAId);
-         } else {
-            loopBase := table_find_pointer(*data.loopBases, nodes.baseDeclaration);
-            assert(loopBase != null);
-
-            if (loopBase.isLValue) {
-               addressSpirvType: *Type_Info;
-               loopBase.addressSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ isLValue = true }, spirvType = *addressSpirvType);
-               assert(addressSpirvType != null && addressSpirvType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) addressSpirvType).storageClass == loopBase.storageClass, "loc: %", GetLocationString(cf.iteration_expression));
-            } else {
-               loopBase.addressSSAId = MaterializeValue(data, function, cf.iteration_expression, currentFunction);
-            }
-
-            tia := cast(*Type_Info_Array) GetNodeType(cf.iteration_expression);
-            if (tia.array_type == .FIXED) {
-               countSSAId = GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = indexInfo.kind == .Unsigned, value._s64 = tia.array_count, bitSize = indexInfo.bitSize } });
-            } else if (reverse) {
-               countSSAId = GenerateInstructions(data, nodes.count, general, function, currentFunction, .{ spirvShouldHaveBeenType = indexType });
-            }
-
-            if (reverse) {
-               lastSSAId := GetNextSSAId(data);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ISub, indexTypeSSAId, lastSSAId, countSSAId, indexOne);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, indexSSAId, lastSSAId);
-            } else {
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, indexSSAId, indexZero);
-            }
-         }
-
-         headerLabelSSAId := GetNextSSAId(data);
-         conditionLabelSSAId := GetNextSSAId(data);
-         bodyLabelSSAId := GetNextSSAId(data);
-         continueLabelSSAId := GetNextSSAId(data);
-         mergeLabelSSAId := GetNextSSAId(data);
-
-         loopData: LoopData = .{
-            headerLabelSSAId     = headerLabelSSAId,
-            conditionLabelSSAId  = conditionLabelSSAId,
-            bodyLabelSSAId       = bodyLabelSSAId,
-            continueLabelSSAId   = continueLabelSSAId,
-            mergeLabelSSAId      = mergeLabelSSAId,
-            deferBase            = data.deferStack.count,
-            iteratorDeclaration  = cf.ident_decl,
-         };
-         array_add(*data.loopStack, *loopData);
-
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, headerLabelSSAId);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .LoopMerge, mergeLabelSSAId, continueLabelSSAId, SpvLoopControlMask.MaskNone);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, conditionLabelSSAId);
-
-         // condition
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, conditionLabelSSAId);
-         conditionSSAId := GetNextSSAId(data);
-         if (isRange) {
-            // a local variable is read again
-            if (rereadBound) {
-               if (reverse) startSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
-               else         endSSAId = GenerateInstructions(data, cf.iteration_expression_right, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
-            }
-
-            itValueSSAId := Load(data, function, .{ type = ._Type, _type = itType }, itSSAId, false);
-            if (reverse) {
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.GREATER_OR_EQUAL, itInfo.kind), boolTypeSSAId, conditionSSAId, itValueSSAId, startSSAId);
-            } else {
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.LESS_OR_EQUAL, itInfo.kind), boolTypeSSAId, conditionSSAId, itValueSSAId, endSSAId);
-            }
-         } else {
-            // the count of an array view is read in every iteration
-            if (!reverse && nodes.count != null) countSSAId = GenerateInstructions(data, nodes.count, general, function, currentFunction, .{ spirvShouldHaveBeenType = indexType });
-
-            indexValueSSAId := Load(data, function, .{ type = ._Type, _type = indexType }, indexSSAId, false);
-            if (reverse) {
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.GREATER_OR_EQUAL, indexInfo.kind), boolTypeSSAId, conditionSSAId, indexValueSSAId, indexZero);
-            } else {
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(#char "<", indexInfo.kind), boolTypeSSAId, conditionSSAId, indexValueSSAId, countSSAId);
-            }
-         }
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, conditionSSAId, bodyLabelSSAId, mergeLabelSSAId);
-
-         // body
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, bodyLabelSSAId);
-         if (!isRange && !isPointerLoop) {
-            elementSSAId := GenerateInstructions(data, nodes.element, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, itSSAId, elementSSAId);
-         }
-
-         // it of a for * loop is the address of the element, computed once in each iteration (changing it_index in the loop doesnt change it)
-         if (isPointerLoop) {
-            address: PointerValue;
-            address.ssaId = GenerateInstructions(data, nodes.element, general, function, currentFunction, .{ isLValue = true }, spirvType = *address.spirvType);
-            assert(address.spirvType != null && address.spirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(cf));
-            table_set(*data.pointerValues, cf.ident_decl, address);
-         }
-         GenerateInstructions(data, cf.block, general, function, currentFunction);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
-
-         // continue
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, continueLabelSSAId);
-         {
-            step := ifx reverse then SpvOp.ISub else SpvOp.IAdd;
-
-            if (!isRange) {
-               indexValueSSAId := Load(data, function, .{ type = ._Type, _type = indexType }, indexSSAId, false);
-               nextIndexSSAId := GetNextSSAId(data);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, step, indexTypeSSAId, nextIndexSSAId, indexValueSSAId, indexOne);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, indexSSAId, nextIndexSSAId);
-            } else {
-               itOne := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = itInfo.kind == .Unsigned, value._s64 = 1, bitSize = itInfo.bitSize } });
-               itValueSSAId := Load(data, function, .{ type = ._Type, _type = itType }, itSSAId, false);
-               nextItSSAId := GetNextSSAId(data);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, step, GetSSAId(data, .{ type = ._Type, _type = itType }), nextItSSAId, itValueSSAId, itOne);
-               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, itSSAId, nextItSSAId);
-            }
-         }
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
-
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
-         EndLoop(data, function);
-         return 0;
+         return GenerateFor(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .TYPE_DEFINITION;
       case .TYPE_INSTANTIATION;
@@ -9972,108 +8252,10 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
       case .STRUCT;
       case .COMMA_SEPARATED_ARGUMENTS;
       case .DECLARATION;
-         cd := cast(*Code_Declaration) node;
+         return GenerateDeclaration(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
-         // a local constant (X :: 5, or a macro parameter whose argument is constant) doesnt need a variable.
-         // identifiers that refer to it use its value directly. see the .IDENT case
-         if (cd.flags & .IS_CONSTANT) return 0;
-
-         // a macro parameter that is a pointer. the argument is generated with its own type: if it points to a payload or a workgroup variable
-         // spirv doesnt allow storing it so the parameter is the pointer itself (see PointerValue). a pointer to buffer memory is an ordinary variable.
-         macroPointerArgumentSSAId: SSAId;
-         if (cd.type.type == .POINTER && cd.expression != null && cd.expression.kind == .EXTRACT && (cast(*Code_Extract) cd.expression).from == null) {
-            argumentSpirvType: *Type_Info;
-            argumentSSAId := GenerateInstructions(data, cd.expression, general, function, currentFunction, spirvType = *argumentSpirvType);
-            assert(argumentSpirvType != null && argumentSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
-
-            if ((cast(*TypeInfoPointer) argumentSpirvType).storageClass != .PhysicalStorageBuffer) {
-               table_set(*data.pointerValues, cd, .{ ssaId = argumentSSAId, spirvType = argumentSpirvType });
-               return 0;
-            }
-
-            macroPointerArgumentSSAId = ConvertValue(data, function, argumentSSAId, argumentSpirvType, GetNodeType(cd), node);
-         }
-
-         variableIdentifier: Identifier = .{ type = .Variable, variable.declaration = cd };
-         variableSSAId := GetSSAId(data, variableIdentifier);
-
-         isWorkgroup := IsWorkgroupVariable(cd);
-
-         variableType := GetNodeType(node);
-
-         storageClass := GetVariableStorageClass(data, variableIdentifier);
-         variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
-         pointerTypeIdentifier := GetPointerTypeIdentifier(variableType, storageClass);
-
-         // the value is stored where the declaration is, not given as the initializer of OpVariable.
-         // the initializer is applied once when the function starts but a declaration inside a loop must be initialized in every iteration.
-         assert(cd.expression == null || !CompareType(variableType, cast(*Type_Info) RayQuery), "a % cant be copied, declare it and give its address to RayQueryInitialize. loc: %", "RayQuery", GetLocationString(node));
-         if (cd.expression != null) {
-            expressionType := GetNodeType(cd.expression);
-
-            // in the declaration apperantly i dont need to explicitly say the literalShouldHaveBeenType because jai does convert in this case.
-            // but since i cant rely on it because it looks unstable and unfinished im gonna pass the literalShouldHaveBeenType
-            //    - apila, 07/05/26
-            expressionSSAId := macroPointerArgumentSSAId;
-            if (expressionSSAId == 0)  expressionSSAId = GenerateInstructions(data, cd.expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = variableType });
-
-            // if you just declared something you cant be storing into PhysicalStorageBuffer therefore i dont need to use the dedicated Store function
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, variableSSAId, expressionSSAId);
-         } else if (!(cd.flags & .IS_UNINITIALIZED) && !IsNotedInputVariable(cd) && !isWorkgroup && !CompareType(variableType, cast(*Type_Info) RayQuery)) {
-            // like jai, a declaration without a value gets the default values of the struct, or zero.
-            // (IS_UNINITIALIZED is "---" and also the iterators of for loops. the incoming payload is the input of the shader.
-            // a workgroup variable is shared by all the invocations of the workgroup, they would all initialize it.)
-            defaultSSAId := GenerateDefaultValue(data, general, function, currentFunction, variableType);
-            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, variableSSAId, defaultSSAId);
-         }
-
-         // a declaration can be generated more than once (if it is in a deferred block), it is declared once
-         if (table_contains(*data.declaredVariables, cd)) {
-         } else if (DeclareNotedVariable(data, cd, variableIdentifier)) {
-            // it gets written to "Types, variables and constants" section.
-         } else if (data.isBlockReachable) {
-            TableAdd(*data.declaredVariables, cd, .{});
-
-            // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
-            operands: [..] Any;
-            array_add(*operands, GetSSAId(data, pointerTypeIdentifier));
-            array_add(*operands, variableSSAId);
-            array_add(*operands, storageClass);
-
-            #if SPIRV_BUILDER_TYPE == .String {
-               print_to_builder(general, "; %\n", GetVariableName(variableIdentifier));
-            }
-
-            WriteSingleInstructionIfReachable(
-               general,
-               *data.isBlockReachable,
-               .Variable,
-               .. operands
-            );
-         }
-
-         if (identifierOut != null) identifierOut.* = variableIdentifier;
-         RETURN(variableSSAId, pointerTypeIdentifier._type);
       case .CAST;
-         cc := cast(*Code_Cast) node;
-
-         // cast(T) *x is x. see IsCastOfAddressToPointee
-         if (IsCastOfAddressToPointee(cc)) {
-            valueSpirvType: *Type_Info;
-            valueSSAId := GenerateInstructions(data, (cast(*Code_Unary_Operator) cc.expression).subexpression, general, function, currentFunction, additionalData, lValueOut, *valueSpirvType, lValueOutSpirvType, identifierOut);
-            RETURN(valueSSAId, valueSpirvType);
-         }
-
-         castTo := GetNodeType(node);
-         castFrom := GetNodeType(cc.expression);
-
-         expressionSSAId := GenerateInstructions(data, cc.expression, general, function, currentFunction);
-
-         resultSpirvType: *Type_Info;
-         resultSSAId := DoCast(data, function, castTo, castFrom, expressionSSAId, node, spirvType = *resultSpirvType);
-         assert(resultSpirvType != null);
-
-         RETURN(resultSSAId, resultSpirvType);
+         return GenerateCast(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
       case .DIRECTIVE_THROUGH;
 
@@ -10083,65 +8265,1993 @@ GenerateInstructions :: (data: *CompilationData, node: *Code_Node, general_: *Bu
       //    a, b = b, a;      all the values are generated before they are stored
       //
       case .COMPOUND_DECLARATION;
-         ccd := cast(*Code_Compound_Declaration) node;
-         source := ccd.declaration_properties.expression;
-         targets := ccd.comma_separated_assignment.arguments;
+         return GenerateCompoundDeclaration(data, node, general, function, currentFunction, additionalData, lValueOut, spirvType, lValueOutSpirvType, identifierOut);
 
-         if (ccd.operator_type == 0) {
-            if (source != null && source.kind == .PROCEDURE_CALL) GenerateInstructions(data, source, general, function, currentFunction);
-
-            for targets {
-               assert(it.node.kind == .IDENT, "kind: %, loc: %", it.node.kind, GetLocationString(it.node));
-               GenerateInstructions(data, (cast(*Code_Ident) it.node).resolved_declaration, general, function, currentFunction);
-            }
-
-            return 0;
-         }
-
-         assert(ccd.operator_type == #char "=", "% on more than one value is not supported. loc: %", ccd.operator_type, GetLocationString(node));
-         assert(source != null);
-
-         values := NewArray(targets.count, SSAId,, temp);
-         valueTypes := NewArray(targets.count, *Type_Info,, temp);
-
-         if (source.kind == .PROCEDURE_CALL) {
-            header := GetHeaderFromCodeProcedureCall(cast(*Code_Procedure_Call) source);
-            procedureType := cast(*Type_Info_Procedure) header.type;
-            assert(procedureType.return_types.count >= targets.count, "loc: %", GetLocationString(node));
-
-            GenerateInstructions(data, source, general, function, currentFunction);
-            found, structSSAId := table_find(*data.multipleReturnValues, cast(*Code_Procedure_Call) source);
-            assert(found);
-
-            for targets {
-               valueTypes[it_index] = GetMultipleReturnValueType(procedureType, it_index);
-               values[it_index] = EmitCompositeExtract(data, function, .{ type = ._Type, _type = valueTypes[it_index] }, structSSAId, .[it_index]);
-            }
-         } else {
-            assert(source.kind == .COMMA_SEPARATED_ARGUMENTS, "kind: %, loc: %", source.kind, GetLocationString(source));
-            csa := cast(*Code_Comma_Separated_Arguments) source;
-            assert(csa.arguments.count == targets.count, "loc: %", GetLocationString(node));
-
-            for csa.arguments {
-               values[it_index] = GenerateInstructions(data, it.node, general, function, currentFunction, .{ spirvShouldHaveBeenType = GetNodeType(targets[it_index].node) }, spirvType = *valueTypes[it_index]);
-            }
-         }
-
-         for targets {
-            targetSpirvType: *Type_Info;
-            targetSSAId := GenerateInstructions(data, it.node, general, function, currentFunction, .{ isLValue = true }, spirvType = *targetSpirvType);
-            assert(targetSpirvType != null && targetSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(it.node));
-            tip := cast(*TypeInfoPointer) targetSpirvType;
-
-            valueSSAId := ConvertValue(data, function, values[it_index], valueTypes[it_index], tip.pointerTo, it.node);
-            Store(data, function, targetSSAId, valueSSAId, tip.storageClass == .PhysicalStorageBuffer, tip.pointerTo);
-         }
-
-         return 0;
    }
 
    assert(false, "didnt return!, node.kind: %, loc: %", node.kind, node.location);
    return 696969;
+}
+
+GenerateExtract :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   ce := cast(*Code_Extract) node;
+
+   // a value of a compound declaration: a, b := F();  or  a, b := x, y;
+   if (ce.from != null) {
+      if (ce.from.kind == .COMMA_SEPARATED_ARGUMENTS) {
+         valueNode := (cast(*Code_Comma_Separated_Arguments) ce.from).arguments[ce.index].node;
+         valueSpirvType: *Type_Info;
+         valueSSAId := GenerateInstructions(data, valueNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = GetNodeType(node) }, spirvType = *valueSpirvType);
+         RETURN(valueSSAId, valueSpirvType);
+      }
+
+      assert(ce.from.kind == .PROCEDURE_CALL, "kind: %, loc: %", ce.from.kind, GetLocationString(node));
+      found, structSSAId := table_find(*data.multipleReturnValues, cast(*Code_Procedure_Call) ce.from);
+      assert(found, "the call is not generated before its values are used. loc: %", GetLocationString(node));
+
+      valueType := GetNodeType(node);
+      valueSSAId := EmitCompositeExtract(data, function, .{ type = ._Type, _type = valueType }, structSSAId, .[ce.index]);
+      RETURN(valueSSAId, valueType);
+   }
+
+   argument := GetMacroExpansionArgument(data, ce.index);
+   // An Extract is the compiler's placeholder for a macro argument.
+   // Generate the original call argument with its own type first; the
+   // expansion site applies its conversion after substitution.
+   argumentSpirvType: *Type_Info;
+   argumentSSAId := GenerateInstructions(data, argument, general, function, currentFunction, .{ isMacroPointerArgument = additionalData.isMacroPointerArgument }, spirvType = *argumentSpirvType);
+   assert(argumentSpirvType != null, "macro argument has no SPIR-V type");
+   RETURN(argumentSSAId, argumentSpirvType);
+}
+
+GenerateDirectiveInsert :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cdi := cast(*Code_Directive_Insert) node;
+   assert(cdi.expansion != null, "the compiler didnt give the expansion of #insert. loc: %", GetLocationString(node));
+
+   // the break and continue in the inserted code are generated as they are, as a break or continue of the loop they are in.
+   // a replacement that is something else is not supported. (the expansion has the break, not the replacement)
+   IsPlainLoopControl :: (replacement: *Code_Node, controlType: type_of(Code_Loop_Control.control_type)) -> bool {
+      if (replacement == null) return true;
+      if (replacement.kind != .LOOP_CONTROL) return false;
+      clc := cast(*Code_Loop_Control) replacement;
+      return clc.control_type == controlType && clc.target_ident == null;
+   }
+   assert(IsPlainLoopControl(cdi.break_replacement, .BREAK) && IsPlainLoopControl(cdi.continue_replacement, .CONTINUE) && cdi.remove_replacement == null,
+          "#insert with break, continue or remove replaced by something other than break or continue is not supported. loc: %", GetLocationString(node));
+
+   if (cdi.expansion.kind == .BLOCK) {
+      for (cast(*Code_Block) cdi.expansion).statements  GenerateInstructions(data, it, general, function, currentFunction);
+      return 0;
+   }
+
+   // an expression
+   insertSpirvType: *Type_Info;
+   insertSSAId := GenerateInstructions(data, cdi.expansion, general, function, currentFunction, additionalData, lValueOut, *insertSpirvType, lValueOutSpirvType, identifierOut);
+   RETURN(insertSSAId, insertSpirvType);
+}
+
+GenerateBlock :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cb := cast(*Code_Block)node;
+   deferBase := data.deferStack.count;
+
+   for cb.statements {
+      GenerateInstructions(data, it, general, function, currentFunction);
+   }
+
+   GenerateDefers(data, deferBase, general, function, currentFunction);
+   data.deferStack.count = deferBase;
+   return 0;
+}
+
+GenerateLiteral :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cl := cast(*Code_Literal) node;
+
+   type := GetNodeType(node);
+
+   if cl.value_type == {
+      case .NUMBER;
+         assert(additionalData.spirvShouldHaveBeenType != null, "loc: %", GetLocationString(node));
+
+         // the values of enums are integer literals of the type of the enum
+         type = UnwindEnum(type);
+         shouldHaveBeenType := UnwindEnum(additionalData.spirvShouldHaveBeenType);
+
+         // number literals inside untyped struct literals have no type (void). the value is stored as float64 or s64 depending on the flags.
+         if (type.type != .INTEGER && type.type != .FLOAT) {
+            type = ifx cl.value_flags & .FLOAT then cast(*Type_Info) float64 else cast(*Type_Info) s64;
+         }
+
+         if (type.type == .FLOAT) {
+            // jai doesnt allow casting from float to int so shouldHaveBeenType must also be float
+            assert(shouldHaveBeenType.type == .FLOAT, "type: %, loc: %", shouldHaveBeenType.*, GetLocationString(node));
+
+            identifier := FloatLiteralIdentifier(cl._float64, shouldHaveBeenType.runtime_size * 8);
+            if (identifierOut != null) identifierOut.* = identifier;
+            RETURN(GetSSAId(data, identifier), shouldHaveBeenType);
+         } else if (type.type == .INTEGER) {
+            assert(type.runtime_size == 1 || type.runtime_size == 2 || type.runtime_size == 4 || type.runtime_size == 8, "type.runtime_size: %, not implemented yet!", type.runtime_size);
+            tii := cast(*Type_Info_Integer) type;
+            identifier: Identifier;
+
+            if (shouldHaveBeenType.type == .INTEGER) {
+               // integer to integer
+
+               tiiShouldHaveBeen := cast(*Type_Info_Integer) shouldHaveBeenType;
+               BYTE_SIZE :: 8;
+               identifier = .{ type = .IntLiteral, intLiteral = .{ bitSize = shouldHaveBeenType.runtime_size * BYTE_SIZE, unsigned = !tiiShouldHaveBeen.signed } };
+
+               if (tii.signed) {
+                  if (tiiShouldHaveBeen.signed) {
+                     // s64 to s64
+                     identifier.intLiteral.value._s64 = cl._s64;
+                  } else {
+                     // s64 to u64
+                     identifier.intLiteral.value._u64 = xx cl._s64;
+                  }
+               } else {
+                  if (tiiShouldHaveBeen.signed) {
+                     // u64 to s64
+                     identifier.intLiteral.value._s64 = xx cl._u64;
+                  } else {
+                     // u64 to u64
+                     identifier.intLiteral.value._u64 = cl._u64;
+                  }
+               }
+            } else if (additionalData.spirvShouldHaveBeenType.type == .FLOAT) {
+               // integer to float
+
+               value := ifx tii.signed then cast(float64) cl._s64 else cast(float64) cl._u64;
+               identifier = FloatLiteralIdentifier(value, additionalData.spirvShouldHaveBeenType.runtime_size * 8);
+            } else {
+               assert(false, "an integer literal cant be of type %. loc: %", additionalData.spirvShouldHaveBeenType.*, GetLocationString(node));
+            }
+
+            if (identifierOut != null) identifierOut.* = identifier;
+            RETURN(GetSSAId(data, identifier), additionalData.spirvShouldHaveBeenType);
+         } else {
+            assert(false, "type: %, loc: %", type.type, GetLocationString(node));
+         }
+
+      // TODO
+      // if struct contains pointers and struct literal contains something like null
+      // it is not handled and will not work. fix that
+      //
+      // GetAutoCastAdditionalData prolly needs to take the whole member not just the type of it
+      //       - apila, 26/04/26
+      case .STRUCT;
+         type := GetNodeType(node);
+         assert(type.type == .STRUCT, "type: %, loc: %", type.*, GetLocationString(node));
+
+         tis := cast(*Type_Info_Struct) type;
+         memberExpressions := GetStructLiteralMemberExpressions(cl, tis);
+
+         isConstant := IsStructLiteralConstant(data, cl);
+         if (isConstant) {
+            identifier: Identifier = .{ type = .CompositeLiteral, compositeLiteral = .{ type = type } };
+            identifier.compositeLiteral.arguments = NewArray(memberExpressions.count, *Identifier);
+
+            for memberExpressions {
+               shouldHaveBeenType := ConvertJaiTypeIfNecessary(GetStructMembers(tis)[it_index].type, GetStructMembers(tis)[it_index].notes);
+               argumentIdentifier: Identifier;
+
+               if (it == null) {
+                  argumentIdentifier = GetDefaultValueIdentifier(data, general, function, currentFunction, shouldHaveBeenType);
+               } else {
+                  argumentNodeType := GetNodeType(it);
+
+                  _ := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = shouldHaveBeenType }, identifierOut = *argumentIdentifier);
+                  assert(argumentIdentifier.type != .Invalid, "struct: %, index: %, loc: %:%", tis.name, it_index, node.c0, node.l0);
+               }
+
+               heapCopy := New(Identifier);
+               heapCopy.* = argumentIdentifier;
+               identifier.compositeLiteral.arguments[it_index] = heapCopy;
+            }
+
+            if (identifierOut != null) identifierOut.* = identifier;
+            RETURN(GetSSAId(data, identifier), type);
+         } else {
+            resultSSAId := GetNextSSAId(data);
+            typeIdentifier: Identifier = .{ type = ._Type, _type = type };
+
+            operands: [..] Any;
+            array_add(*operands, GetSSAId(data, typeIdentifier));
+            array_add(*operands, resultSSAId);
+
+            for memberExpressions {
+               shouldHaveBeenType := ConvertJaiTypeIfNecessary(GetStructMembers(tis)[it_index].type, GetStructMembers(tis)[it_index].notes);
+
+               argumentSSAId: SSAId;
+               if (it == null) {
+                  argumentSSAId = GetSSAId(data, GetDefaultValueIdentifier(data, general, function, currentFunction, shouldHaveBeenType));
+               } else {
+                  argumentNodeType := GetNodeType(it);
+
+                  argumentSSAId = GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = shouldHaveBeenType });
+               }
+
+               array_add(*operands, ac(argumentSSAId));
+            }
+
+            WriteSingleInstructionIfReachable(
+               function,
+               *data.isBlockReachable,
+               .CompositeConstruct,
+               .. operands
+            );
+
+            RETURN(resultSSAId, type);
+         }
+
+      // s32.[1, 2, 3]. like struct literals it is a constant if all of the elements are constants
+      case .ARRAY; {
+         arrayType := type;
+         if (arrayType.type != .ARRAY && additionalData.spirvShouldHaveBeenType != null) arrayType = GetDecoratedType(additionalData.spirvShouldHaveBeenType);
+         assert(arrayType.type == .ARRAY && (cast(*Type_Info_Array) arrayType).array_type == .FIXED, "the type of the array literal is not known. loc: %", GetLocationString(node));
+
+         tia := cast(*Type_Info_Array) arrayType;
+         elements := cl.array_literal_info.array_members;
+         assert(elements.count == tia.array_count, "loc: %", GetLocationString(node));
+
+         isConstant := true;
+         for elements {
+            if (it.kind == .LITERAL && (cast(*Code_Literal) it).value_type == .STRUCT) {
+               if (!IsStructLiteralConstant(data, cast(*Code_Literal) it)) isConstant = false;
+            } else {
+               _, isConstantElement := EvaluateConstant(data, it);
+               if (!isConstantElement) isConstant = false;
+            }
+         }
+
+         if (isConstant) {
+            identifier: Identifier = .{ type = .CompositeLiteral, compositeLiteral = .{ type = tia } };
+            identifier.compositeLiteral.arguments = NewArray(elements.count, *Identifier);
+
+            for elements {
+               element := New(Identifier);
+               _ := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = tia.element_type }, identifierOut = element);
+               assert(element.type != .Invalid, "loc: %", GetLocationString(it));
+               identifier.compositeLiteral.arguments[it_index] = element;
+            }
+
+            if (identifierOut != null) identifierOut.* = identifier;
+            RETURN(GetSSAId(data, identifier), tia);
+         }
+
+         resultSSAId := GetNextSSAId(data);
+         operands: [..] Any;
+         array_add(*operands, GetSSAId(data, .{ type = ._Type, _type = tia }), resultSSAId);
+         for elements {
+            elementSSAId := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = tia.element_type });
+            array_add(*operands, ac(elementSSAId));
+         }
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .CompositeConstruct, .. operands);
+         RETURN(resultSSAId, tia);
+      }
+
+      case .BOOLEAN; {
+         identifier: Identifier = .{ type = .BoolLiteral };
+         identifier.boolLiteral = cl._u64 != 0;
+
+         if (identifierOut != null) identifierOut.* = identifier;
+         RETURN(GetSSAId(data, identifier), type);
+      }
+
+      // null. it is the address 0 converted to the pointer type that is wanted.
+      case .POINTER; {
+         pointerType := type;
+         if (additionalData.spirvShouldHaveBeenType != null && additionalData.spirvShouldHaveBeenType.type == TYPE_INFO_POINTER_TAG) pointerType = additionalData.spirvShouldHaveBeenType;
+         assert(pointerType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) pointerType).storageClass == .PhysicalStorageBuffer, "null can only be a PhysicalStorageBuffer pointer. loc: %", GetLocationString(node));
+
+         resultSSAId := GetNextSSAId(data);
+         zeroSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = 0, bitSize = 64 } });
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ConvertUToPtr, GetSSAId(data, .{ type = ._Type, _type = pointerType }), resultSSAId, zeroSSAId);
+         RETURN(resultSSAId, pointerType);
+      }
+
+      case .STRING;
+         assert(false, "spirv has no strings. a string can only be the format of % (a literal or a constant). loc: %", DEBUG_PRINT_FUNCTION_NAME, GetLocationString(node));
+
+      case; assert(false, "cl.value_type: %\n", cl.value_type);
+   }
+
+   assert(false, "didnt return!, node.kind: %, loc: %", node.kind, node.location);
+   return 696969;
+}
+
+GenerateIdent :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   ci := cast(*Code_Ident) node;
+
+   // a member reached through using
+   isUsingAccess, usingAccess := table_find(*data.usingAccesses, ci);
+   if (isUsingAccess) {
+      accessSpirvType: *Type_Info;
+      accessSSAId := GenerateInstructions(data, usingAccess, general, function, currentFunction, additionalData, lValueOut, *accessSpirvType, lValueOutSpirvType, identifierOut);
+      RETURN(accessSSAId, accessSpirvType);
+   }
+
+   // the it of a for * loop or a macro parameter that is a pointer to a payload or a workgroup variable, see PointerValue
+   isPointerValue, pointerValue := table_find(*data.pointerValues, ci.resolved_declaration);
+   if (isPointerValue) {
+      assert(!additionalData.isLValue, "% cant be assigned (it is the it of a for * loop, or a macro parameter that points to a payload or a workgroup variable which spirv doesnt allow to store). loc: %", ci.name, GetLocationString(node));
+      RETURN(pointerValue.ssaId, pointerValue.spirvType);
+   }
+
+   // the array a for loop iterates, see LoopBase
+   isLoopBase, loopBase := table_find(*data.loopBases, ci.resolved_declaration);
+   if (isLoopBase) {
+      baseType := GetNodeType(node);
+      pointerType := GetPointerType(baseType, loopBase.storageClass);
+      if (additionalData.isLValue) RETURN(loopBase.addressSSAId, pointerType);
+
+      valueSSAId := Load(data, function, .{ type = ._Type, _type = baseType }, loopBase.addressSSAId, loopBase.storageClass == .PhysicalStorageBuffer);
+      if (lValueOutSpirvType != null) lValueOutSpirvType.* = pointerType;
+      if (lValueOut != null)           lValueOut.* = loopBase.addressSSAId;
+      RETURN(valueSSAId, baseType);
+   }
+
+   // if it is constant global variable like PI then what do i do?
+   // i think i should evaluate its value and the identifier type would be either .IntLiteral or .FloatLiteral or .CompositeLiteral or .BoolLiteral.
+   // so constant variable doesnt exists at runtime.
+   // i guess that would work Clueless.oO(surely thats fine).
+   //             - apila, 08/06/26
+   declaration := ci.resolved_declaration;
+   if (declaration.flags & .IS_CONSTANT) {
+      // numbers are handled at the start of this function (see EvaluateConstant). this is for struct literals, which are OpConstantComposite if all of their members are constants,
+      // and for constants that this compiler cant evaluate (vector arithmetic for example), their instructions are generated where they are used.
+      identifier: Identifier;
+      identifierSSAId := GenerateInstructions(data, declaration.expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = declaration.type }, identifierOut = *identifier);
+
+      if (identifierOut != null) identifierOut.* = identifier;
+      RETURN(identifierSSAId, declaration.type);
+   }
+
+   variableIdentifier := GetVariableIdentifier(ci);
+   variableSSAId := GetSSAId(data, variableIdentifier);
+   variableName := GetVariableName(variableIdentifier);
+   variableStorageClass := GetVariableStorageClass(data, variableIdentifier);
+
+   found, variableType := table_find(*data.codeNodeTypes, node);
+   if (!found)  assert(false, "the identifier has no type. declaration: %, ident: %", GetLocationString(declaration), GetLocationString(ci));
+
+   builtinIndex := GetBuiltinVariableIndex(variableIdentifier);
+   if (builtinIndex != -1) {
+      if (additionalData.isLValue || lValueOut != null) {
+         assert(variableStorageClass != .Input, "% is an input of the shader, it cant be assigned. loc: %", ci.name, GetLocationString(node));
+      }
+
+      // the sample masks are arrays of one u32 in spirv
+      if (BUILTIN_VARIABLES[builtinIndex].builtIn == .SampleMask) {
+         zeroSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = 0, bitSize = 32 } });
+         variableSSAId = EmitAccessChain(data, function, GetPointerTypeIdentifier(variableType, variableStorageClass), variableSSAId, .[zeroSSAId]);
+      }
+   }
+
+   if (table_contains(*userFunctionArguments, declaration)) {
+      if (!IsSmallArgument(variableType)) {
+         assert(!additionalData.isLValue, "immutable function parameter cant be lvalue");
+
+         if (identifierOut != null) identifierOut.* = variableIdentifier;
+         RETURN(variableSSAId, variableType);
+      }
+   }
+
+   if (additionalData.isLValue) {
+      if (identifierOut != null) identifierOut.* = variableIdentifier;
+      RETURN(variableSSAId, GetPointerType(variableType, variableStorageClass));
+   }
+
+   variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
+   deferencedSSAId := Load(data, function, variableTypeIdentifier, variableSSAId, variableStorageClass == .PhysicalStorageBuffer);
+
+   if (lValueOutSpirvType != null)  lValueOutSpirvType.* = GetPointerType(variableType, variableStorageClass);
+   if (lValueOut != null)           lValueOut.* = variableSSAId;
+   RETURN(deferencedSSAId, variableType);
+}
+
+GenerateUnaryOperator :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cuo := cast(*Code_Unary_Operator) node;
+   subexpressionType := GetNodeType(cuo.subexpression);
+   cuoType := GetNodeType(cuo);
+
+   resultSSAId := GetNextSSAId(data);
+   if cuo.operator_type == {
+      case .POINTER_DEREFERENCE; #through;
+      case .POSTFIX_DEREFERENCE; {
+         assert(subexpressionType.type == TYPE_INFO_POINTER_TAG, "can only derefence a pointer!");
+
+         tip := cast(*TypeInfoPointer) subexpressionType;
+
+         subexpressionSpirvType: *Type_Info;
+         subexpressionSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction, spirvType = *subexpressionSpirvType);
+         assert(subexpressionSpirvType != null, "loc: %", GetLocationString(node));
+
+         if (additionalData.isLValue) {
+            RETURN(subexpressionSSAId, subexpressionSpirvType);
+         }
+
+         derefencedSSAId := Load(
+            data,
+            function,
+            .{ type = ._Type, _type = cuoType },
+            subexpressionSSAId,
+            tip.storageClass == .PhysicalStorageBuffer,
+         );
+
+         if (lValueOutSpirvType != null) lValueOutSpirvType.* = subexpressionSpirvType;
+         if (lValueOut != null) lValueOut.* = subexpressionSSAId;
+         RETURN(derefencedSSAId, cuoType);
+      }
+
+      case #char "*"; {
+         assert(!additionalData.isLValue, "cant be lvalue");
+
+         // having a pointer to a pointer thats in Function storage class is illegal in spirv:
+         //    a: int;
+         //    p := *a;
+         // is illegal since the storage class of "a" is Function (assuming it is a local function variable). and i do not verify the usage of this. i probably should tho.
+         // man spirv sucks. as far as i know amd instruction set supports flat addressing which eliminates all this worry about storage class bullshit.
+         // if hardware can handle it what am i worrying about. we need new spirv extension "Flat Addressing Model". spirv is hiding a capability that hardware natively supports.
+         // this issue kinda related: https://github.com/KhronosGroup/Vulkan-Docs/issues/1963
+         //
+         //       - apila, 29/05/26
+         subexpressionLValueSpirvType: *Type_Info;
+         subexpressionLValueSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction, .{ isLValue = true }, spirvType = *subexpressionLValueSpirvType);
+         assert(subexpressionLValueSpirvType != null);
+         assert(subexpressionLValueSpirvType.type == TYPE_INFO_POINTER_TAG);
+
+         // RayPayloadKHR is allowed because TraceRay takes the address of the payload. it only uses it to know which payload variable to use.
+         // Workgroup is allowed for the atomics. (a workgroup pointer cant be stored or passed to a procedure, DoCast checks the storage classes)
+         // Function (a local variable) is allowed as the argument of a pointer parameter of a macro: the macro uses the pointer directly, it is never stored (see PointerValue).
+         storageClass := subexpressionLValueSpirvType.(*TypeInfoPointer).storageClass;
+         isRayQuery := storageClass == .Function && CompareType((cast(*TypeInfoPointer) subexpressionLValueSpirvType).pointerTo, cast(*Type_Info) RayQuery);
+         isLocalForMacro := storageClass == .Function && additionalData.isMacroPointerArgument;
+         assert(storageClass == .PhysicalStorageBuffer || storageClass == .RayPayloadKHR || storageClass == .Workgroup || storageClass == .CallableDataKHR || isRayQuery || isLocalForMacro, "taking the address of something in % storage class is not allowed in spirv (for example a local variable). only memory reached through a pointer (PhysicalStorageBuffer) can be addressed, and a local variable can only be passed to a pointer parameter of a macro. loc: %", storageClass, GetLocationString(node));
+
+         RETURN(subexpressionLValueSSAId, subexpressionLValueSpirvType);
+      }
+
+      case #char "-"; {
+         subexpressionSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction);
+
+         info, isNumeric := GetNumericInfo(subexpressionType);
+
+         op: SpvOp;
+         #if false {
+         } else if (isNumeric && info.kind == .Float) {
+            op = .FNegate;
+         } else if (isNumeric && info.kind == .Signed) {
+            op = .SNegate;
+         } else {
+            assert(false, "not yet implemented! type: %", subexpressionType.*);
+         }
+
+         WriteSingleInstructionIfReachable(
+            function,
+            *data.isBlockReachable,
+            op,
+            GetSSAId(data, .{ type = ._Type, _type = subexpressionType }),
+            resultSSAId,
+            subexpressionSSAId
+         );
+
+         RETURN(resultSSAId, subexpressionType);
+      }
+
+      // .A, a value of an enum whose type is inferred. the subexpression is the constant.
+      case #char "."; {
+         valueSpirvType: *Type_Info;
+         valueSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = subexpressionType }, spirvType = *valueSpirvType, identifierOut = identifierOut);
+         RETURN(valueSSAId, valueSpirvType);
+      }
+
+      case #char "!"; #through;
+      case #char "~"; {
+         subexpressionSSAId := GenerateInstructions(data, cuo.subexpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = subexpressionType });
+
+         info, isNumeric := GetNumericInfo(subexpressionType);
+
+         op: SpvOp;
+         #if false {
+         } else if (cuo.operator_type == #char "!" && isNumeric && info.kind == .Bool) {
+            op = .LogicalNot;
+         } else if (cuo.operator_type == #char "~" && isNumeric && (info.kind == .Signed || info.kind == .Unsigned)) {
+            op = .Not;
+         } else {
+            assert(false, "not yet implemented! operator: %, type: %, loc: %", cuo.operator_type, subexpressionType.*, GetLocationString(node));
+         }
+
+         WriteSingleInstructionIfReachable(
+            function,
+            *data.isBlockReachable,
+            op,
+            GetSSAId(data, .{ type = ._Type, _type = subexpressionType }),
+            resultSSAId,
+            subexpressionSSAId
+         );
+
+         RETURN(resultSSAId, subexpressionType);
+      }
+
+      case; assert(false, "not yet implemented! type: %", cuo.operator_type);
+   }
+
+   assert(false, "didnt return!, node.kind: %, loc: %", node.kind, node.location);
+   return 696969;
+}
+
+GenerateBinaryOperator :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cbo := cast(*Code_Binary_Operator) node;
+
+   if cbo.operator_type == {
+      case #char "<";            #through;
+      case #char ">";            #through;
+      case .LESS_OR_EQUAL;       #through;
+      case .GREATER_OR_EQUAL;    #through;
+      case .IS_EQUAL;            #through;
+      case .IS_NOT_EQUAL; {
+         rightType := GetNodeType(cbo.right);
+         leftType := GetNodeType(cbo.left);
+
+         // pointers are compared by their addresses
+         if (leftType.type == TYPE_INFO_POINTER_TAG && rightType.type == TYPE_INFO_POINTER_TAG) {
+            assert(cbo.operator_type == .IS_EQUAL || cbo.operator_type == .IS_NOT_EQUAL, "pointers can only be compared with == and !=. loc: %", GetLocationString(node));
+
+            u64TypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) u64 });
+            addresses: [2] SSAId;
+            for operand, operandIndex: (*Code_Node).[cbo.left, cbo.right] {
+               pointerSSAId := GenerateInstructions(data, operand, general, function, currentFunction, .{ spirvShouldHaveBeenType = ifx operandIndex == 0 then leftType else rightType });
+               addresses[operandIndex] = GetNextSSAId(data);
+               WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ConvertPtrToU, u64TypeSSAId, addresses[operandIndex], pointerSSAId);
+            }
+
+            boolType := cast(*Type_Info) bool;
+            resultSSAId := GetNextSSAId(data);
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, ifx cbo.operator_type == .IS_EQUAL then SpvOp.IEqual else .INotEqual, GetSSAId(data, .{ type = ._Type, _type = boolType }), resultSSAId, addresses[0], addresses[1]);
+            RETURN(resultSSAId, boolType);
+         }
+
+         assert(CompareType(leftType, rightType), "not yet implemented! comparing different types. left: %, right: %, loc: %", leftType.*, rightType.*, GetLocationString(node));
+         type := leftType;
+
+         resultSSAId := GetNextSSAId(data);
+
+         leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
+         rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightType });
+
+         info, isNumeric := GetNumericInfo(type);
+         AssertNotUserOperator(leftType, rightType, cbo);
+         assert(isNumeric, "not yet implemented! comparing type: %, loc: %", type.*, GetLocationString(node));
+
+         op := GetComparisonOp(cbo.operator_type, info.kind);
+         resultType := GetNumericType(.Bool, 0, info.components);
+
+         WriteSingleInstructionIfReachable(
+            function,
+            *data.isBlockReachable,
+            op,
+            GetSSAId(data, .{ type = ._Type, _type = resultType }),
+            resultSSAId,
+            leftSSAId,
+            rightSSAId
+         );
+
+         RETURN(resultSSAId, resultType);
+      }
+
+      // jai short circuits && and ||, the right operand is evaluated only if needed. so these cant be a single OpLogicalAnd/OpLogicalOr.
+      //    result := left;
+      //    if  result  result = right;    // &&
+      //    if !result  result = right;    // ||
+      case .LOGICAL_AND; #through;
+      case .LOGICAL_OR; {
+         boolType := cast(*Type_Info) bool;
+         boolTypeIdentifier: Identifier = .{ type = ._Type, _type = boolType };
+
+         storageClass := SpvStorageClass.Function;
+         resultVariableSSAId := GetNextSSAId(data);
+         WriteSingleInstructionIfReachable(
+            general,
+            *data.isBlockReachable,
+            .Variable,
+            GetSSAId(data, .{ type = ._Type, _type = GetPointerType(boolType, storageClass) }),
+            resultVariableSSAId,
+            storageClass
+         );
+
+         leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = boolType });
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, resultVariableSSAId, leftSSAId);
+
+         rightLabelSSAId := GetNextSSAId(data);
+         mergeLabelSSAId := GetNextSSAId(data);
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .SelectionMerge, mergeLabelSSAId, SpvSelectionControlMask.MaskNone);
+         if (cbo.operator_type == .LOGICAL_AND) {
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, leftSSAId, rightLabelSSAId, mergeLabelSSAId);
+         } else {
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, leftSSAId, mergeLabelSSAId, rightLabelSSAId);
+         }
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, rightLabelSSAId);
+         rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = boolType });
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, resultVariableSSAId, rightSSAId);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, mergeLabelSSAId);
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
+         resultSSAId := Load(data, function, boolTypeIdentifier, resultVariableSSAId, false);
+
+         RETURN(resultSSAId, boolType);
+      }
+
+      case .ARRAY_SUBSCRIPT;
+         DESCRIPTOR_HEAP_BODY :: (elementType: *Type_Info, sourceVariable: Identifier) #expand {
+            assert(`additionalData.isLValue == false, "i am kinda treating this as a intrinsic function call. maybe i should just have idk a function instead of an intrinsic array. idk.");
+
+            indexSSAId := GenerateInstructions(`data, `cbo.right, `general, `function, `currentFunction, .{ spirvShouldHaveBeenType = type_info(s32) });
+            tira := New(TypeInfoRuntimeArray);
+            tira.elementType = GetDescriptorHeapArrayElementType(elementType);
+            baseTypeIdentifier: Identifier = .{ type = ._Type, _type = tira };
+            heapIdentifier := GetDescriptorHeapIdentifier(`data, sourceVariable);
+
+            storageClass := SpvStorageClass.UniformConstant;
+            returnTypeIdentifier := GetPointerTypeIdentifier(type_info(void), storageClass);
+
+            lValueSSAId := GetNextSSAId(`data);
+
+            WriteSingleInstructionIfReachable(
+               `function,
+               *`data.isBlockReachable,
+               .UntypedAccessChainKHR,
+               GetSSAId(`data, returnTypeIdentifier),
+               lValueSSAId,
+               GetSSAId(`data, baseTypeIdentifier),
+               GetSSAId(`data, heapIdentifier),
+               indexSSAId
+            );
+
+            dereferencedSSAId := Load(`data, `function, .{ type = ._Type, _type = elementType }, lValueSSAId, false);
+            RETURN(dereferencedSSAId, elementType);
+         }
+
+         // checking if the variable is an intrinsic array.
+         if (cbo.left.kind == .IDENT) {
+            ci := cast(*Code_Ident) cbo.left;
+            variable := GetVariableIdentifier(ci);
+            if false {
+            } else if (IdentifierCompare(variable, meshVerticesVariableIdentifier) || IdentifierCompare(variable, meshPrimitivesVariableIdentifier)) {
+               // do nothing. DoDotsAndArraySubscripts works for this.
+            } else if (GetMeshPrimitiveIndicesIndex(variable) != -1) {
+               // do nothing. DoDotsAndArraySubscripts works for this.
+            } else if (IdentifierCompare(variable, imageHeapVariableIdentifier)) {
+               assert(additionalData.accessChainBaseArrayElementTypeIfImageHeap != null, "% can only be used as the image argument of a texture or image function (the type of the image is decided by how it is used, so it cant be stored in a variable). loc: %", IMAGE_HEAP_VARIABLE_NAME, GetLocationString(node));
+               DESCRIPTOR_HEAP_BODY(additionalData.accessChainBaseArrayElementTypeIfImageHeap, variable);
+            } else if (IdentifierCompare(variable, tlasHeapVariableIdentifier)) {
+               DESCRIPTOR_HEAP_BODY(type_info(__TLAS__), variable);
+            } else if (IdentifierCompare(variable, samplerHeapVariableIdentifier)) {
+               DESCRIPTOR_HEAP_BODY(type_info(__Sampler__), variable);
+            }
+         }
+
+         #through;
+      case #char ".";
+         // E.A (a value of an enum) or Module.CONSTANT. the right side is the constant.
+         if (cbo.operator_type == #char "." && cbo.left.type != null && cbo.left.type.type == .TYPE && cbo.right.kind == .IDENT) {
+            rightDeclaration := (cast(*Code_Ident) cbo.right).resolved_declaration;
+            if (rightDeclaration != null && (rightDeclaration.flags & .IS_CONSTANT)) {
+               valueSpirvType: *Type_Info;
+               valueSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = GetNodeType(cbo.right) }, spirvType = *valueSpirvType, identifierOut = identifierOut);
+               RETURN(valueSSAId, valueSpirvType);
+            }
+         }
+
+         chainSpirvType: *Type_Info;
+         chainSSAId := DoDotsAndArraySubscripts(data, function, cbo, currentFunction, additionalData.isLValue, lValueOut, *chainSpirvType, lValueOutSpirvType);
+         RETURN(chainSSAId, chainSpirvType);
+
+      case #char "%";         #through;
+      case #char "&";         #through;
+      case #char "|";         #through;
+      case #char "^";         #through;
+      case .SHIFT_LEFT;       #through;
+      case .SHIFT_RIGHT;      #through;
+      case #char "/";         #through;
+      case #char "*";         #through;
+      case #char "-";         #through;
+      case #char "+"; {
+         leftType := GetNodeType(cbo.left);
+         rightType := GetNodeType(cbo.right);
+
+         //
+         // in some cases the jai compiler converts the type, sometimes it doesnt.
+         // in the following it does report the type of literal as float:
+         //    f: f32x4;
+         //    f.x = f.y + 4;
+         //
+         // but in the following it reports as s64:
+         //    f: f32x4;
+         //    f = .{ -1, -1, 0.5, 1 }
+         //
+         // so below i say the type of the node itself but i dont think thats always going to turn out to be true.
+         // the good thing is that the validator can spot this mistake, so as long as i validate the output im fine.
+         // if something doesnt work then i will inspect and fix it, not now.
+         //
+         //       - apila, 07/05/26
+         //
+
+         // pointer arithmetic: p + n, n + p, p - n (see OffsetPointer) and p - q (see PointerDifference). the operands are generated in order, the integer as u64.
+         leftIsPointer := leftType.type == TYPE_INFO_POINTER_TAG;
+         rightIsPointer := rightType.type == TYPE_INFO_POINTER_TAG;
+         if ((cbo.operator_type == #char "+" || cbo.operator_type == #char "-") && (leftIsPointer || rightIsPointer)) {
+            u64Type := cast(*Type_Info) u64;
+            leftSpirvType: *Type_Info;
+            rightSpirvType: *Type_Info;
+            leftSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = ifx leftIsPointer then null else u64Type }, spirvType = *leftSpirvType);
+            rightSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = ifx rightIsPointer then null else u64Type }, spirvType = *rightSpirvType);
+            assert(leftSpirvType != null && rightSpirvType != null, "loc: %", GetLocationString(node));
+
+            if (leftIsPointer && rightIsPointer) {
+               assert(cbo.operator_type == #char "-", "loc: %", GetLocationString(node));
+               resultSSAId := PointerDifference(data, function, leftSSAId, cast(*TypeInfoPointer) leftSpirvType, rightSSAId, cast(*TypeInfoPointer) rightSpirvType, node);
+               RETURN(resultSSAId, cast(*Type_Info) s64);
+            }
+
+            if (leftIsPointer) {
+               resultSSAId := OffsetPointer(data, function, leftSSAId, cast(*TypeInfoPointer) leftSpirvType, rightSSAId, cbo.operator_type == #char "-", node);
+               RETURN(resultSSAId, leftSpirvType);
+            }
+
+            assert(cbo.operator_type == #char "+", "loc: %", GetLocationString(node)); // n - p is not allowed by jai
+            resultSSAId := OffsetPointer(data, function, rightSSAId, cast(*TypeInfoPointer) rightSpirvType, leftSSAId, false, node);
+            RETURN(resultSSAId, rightSpirvType);
+         }
+
+         // not sure about literalShouldHaveBeenTypes here
+         AssertNotUserOperator(leftType, rightType, cbo);
+         leftType, rightType = GetArithmeticOperandTypes(leftType, rightType, cbo.operator_type);
+         leftId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
+         rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightType });
+
+         binaryArithmeticSpirvType: *Type_Info;
+         binaryArithmeticSSAId := DoBinaryArithmetic(data, function, leftType, leftId, rightType, rightId, cbo.operator_type, cbo, spirvType = *binaryArithmeticSpirvType);
+         assert(binaryArithmeticSpirvType != null);
+
+         RETURN(binaryArithmeticSSAId, binaryArithmeticSpirvType);
+      }
+
+      // c += x;
+      // c = c + x;
+      case .PLUS_ASSIGN;         #through;
+      case .MINUS_ASSIGN;        #through;
+      case .TIMES_ASSIGN;        #through;
+      case .DIV_ASSIGN;          #through;
+      case .MOD_ASSIGN;          #through;
+      case .BITWISE_AND_ASSIGN;  #through;
+      case .BITWISE_OR_ASSIGN;   #through;
+      case .BITWISE_XOR_ASSIGN;  #through;
+      case .SHIFT_LEFT_ASSIGN;   #through;
+      case .SHIFT_RIGHT_ASSIGN; {
+         assert(cbo.left.kind == .IDENT ||
+               (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == #char ".") ||
+               (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == .ARRAY_SUBSCRIPT) ||
+               (cbo.left.kind == .UNARY_OPERATOR  && cbo.left.(*Code_Unary_Operator).operator_type == .POSTFIX_DEREFERENCE) ||
+               (cbo.left.kind == .UNARY_OPERATOR  && cbo.left.(*Code_Unary_Operator).operator_type == .POINTER_DEREFERENCE),
+               "cbo.left.kind: %", cbo.left.kind
+         );
+
+         leftType := GetNodeType(cbo.left);
+         rightType := GetNodeType(cbo.right);
+
+         // p += n, p -= n (see OffsetPointer)
+         if (leftType.type == TYPE_INFO_POINTER_TAG) {
+            assert(cbo.operator_type == .PLUS_ASSIGN || cbo.operator_type == .MINUS_ASSIGN, "loc: %", GetLocationString(node));
+            offsetSSAId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) u64 });
+
+            pointerLValueSSAId: SSAId = U32_MAX;
+            pointerLValueSpirvType: *Type_Info;
+            pointerSpirvType: *Type_Info;
+            pointerSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, lValueOut = *pointerLValueSSAId, spirvType = *pointerSpirvType, lValueOutSpirvType = *pointerLValueSpirvType);
+            assert(pointerSpirvType != null && pointerSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
+
+            resultSSAId := OffsetPointer(data, function, pointerSSAId, cast(*TypeInfoPointer) pointerSpirvType, offsetSSAId, cbo.operator_type == .MINUS_ASSIGN, node);
+
+            assert(pointerLValueSSAId != U32_MAX && pointerLValueSpirvType != null, "the pointer cant be assigned. loc: %", GetLocationString(node));
+            Store(data, function, pointerLValueSSAId, resultSSAId, (cast(*TypeInfoPointer) pointerLValueSpirvType).storageClass == .PhysicalStorageBuffer, pointerSpirvType);
+            RETURN(resultSSAId, null);
+         }
+
+         operatorType := GetOperatorFromCompoundAssignment(cbo.operator_type);
+
+         // the right side has the type of the left side, except "vector op= scalar" where it is the component type of the vector (it is broadcast)
+         _, broadcastRightType := GetArithmeticOperandTypes(leftType, rightType, operatorType);
+         rightShouldHaveBeenType := ifx broadcastRightType != rightType then broadcastRightType else leftType;
+         rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = rightShouldHaveBeenType });
+
+         leftLValueSSAId: SSAId = U32_MAX;
+         leftLValueSpirvType: *Type_Info;
+         leftRValueSSAId := GenerateInstructions(data, cbo.left, general, function, currentFunction, lValueOut = *leftLValueSSAId, lValueOutSpirvType = *leftLValueSpirvType);
+         assert(leftLValueSSAId != U32_MAX, "lvalue was not set");
+         assert(leftLValueSpirvType != null);
+         assert(leftLValueSpirvType.type == TYPE_INFO_POINTER_TAG);
+
+         tipLeftLValue := cast(*TypeInfoPointer) leftLValueSpirvType;
+
+         binaryArithmeticSpirvType: *Type_Info;
+         binaryArithmeticSSAId := DoBinaryArithmetic(data, function, leftType, leftRValueSSAId, rightShouldHaveBeenType, rightId, operatorType, node, spirvType = *binaryArithmeticSpirvType);
+         assert(binaryArithmeticSpirvType != null);
+
+         Store(
+            data,
+            function,
+            leftLValueSSAId,
+            binaryArithmeticSSAId,
+            tipLeftLValue.storageClass == .PhysicalStorageBuffer,
+            binaryArithmeticSpirvType
+         );
+
+         RETURN(binaryArithmeticSSAId, null);
+      }
+
+      // there is a problem with this. i assume that this is assignment operator. but it is not always one. i mean a little different sometimes.
+      // for example consider this:
+      //       payload: RgenPayload = .{ visible = true };
+      // the right handside should generate a constant struct. it shouldnt emit a OpStore instruction. even if it were to emit OpStore instruction the lvalue calculations below needs to change.
+      //             - apila, 09/09/26
+      case #char "="; {
+         // either a variable or access chain or pointer deference
+         assert(cbo.left.kind == .IDENT ||
+               (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == #char ".") ||
+               (cbo.left.kind == .BINARY_OPERATOR && cbo.left.(*Code_Binary_Operator).operator_type == .ARRAY_SUBSCRIPT) ||
+               (cbo.left.kind == .UNARY_OPERATOR  && cbo.left.(*Code_Unary_Operator).operator_type == .POSTFIX_DEREFERENCE) ||
+               (cbo.left.kind == .UNARY_OPERATOR  && cbo.left.(*Code_Unary_Operator).operator_type == .POINTER_DEREFERENCE),
+               "cbo.left.kind: %", cbo.left.kind
+         );
+
+         leftType := GetNodeType(cbo.left);
+
+         rightId := GenerateInstructions(data, cbo.right, general, function, currentFunction, .{ spirvShouldHaveBeenType = leftType });
+
+         leftIdSpirvType: *Type_Info;
+         leftId := GenerateInstructions(data, cbo.left, general, function, currentFunction, .{ isLValue = true }, spirvType = *leftIdSpirvType);
+         assert(leftIdSpirvType != null, "loc: %:%", node.l0, node.c0);
+         assert(leftIdSpirvType.type == TYPE_INFO_POINTER_TAG);
+
+         tipLeftId := cast(*TypeInfoPointer) leftIdSpirvType;
+
+         Store(
+            data,
+            function,
+            leftId,
+            rightId,
+            tipLeftId.storageClass == .PhysicalStorageBuffer,
+            tipLeftId.pointerTo
+         );
+
+         RETURN(rightId, null);
+      }
+
+   }
+
+   assert(false, "didnt return!, node.kind: %, loc: %", node.kind, node.location);
+   return 696969;
+}
+
+GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cpc := cast(*Code_Procedure_Call) node;
+   procedureExpression := cpc.procedure_expression;
+   assert(procedureExpression.kind == .IDENT ||
+          procedureExpression.kind == .BINARY_OPERATOR,
+          "kind: %", procedureExpression.kind
+   );
+
+   header := GetHeaderFromCodeProcedureCall(cpc);
+
+   if (IsMacroProcedure(header)) {
+      expansion := cpc.macro_expansion_block;
+      assert(expansion != null, "macro call has no expansion: %", header.name);
+      array_add(*data.macroExpansionCalls, cpc);
+      defer data.macroExpansionCalls.count -= 1;
+
+      returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
+      returnsValue := returnTypeIdentifier.type != .Void;
+      returnType := ifx returnsValue then returnTypeIdentifier._type else null;
+
+      // the expansion is a scope. its defers run when it ends, the `defers when the scope the macro is called from ends.
+      array_add(*data.macroDeferBases, data.deferStack.count);
+      defer {
+         data.deferStack.count = data.macroDeferBases[data.macroDeferBases.count - 1];
+         data.macroDeferBases.count -= 1;
+      }
+
+      if (!MacroHasEarlyReturn(expansion)) {
+         // the only return (if any) is the last statement, so the expansion is just inlined.
+         for expansion.statements {
+            if (GenerateMacroStatement(data, it, general, function, currentFunction)) continue;
+
+            mr := cast(*Code_Return) it;
+            if (!returnsValue) break;
+
+            // the value is evaluated before the defers run
+            assert(mr.arguments_unsorted.count == 1, "macro return count: %", mr.arguments_unsorted.count);
+            returnSSAId := GenerateInstructions(data, mr.arguments_unsorted[0].expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = returnType });
+            GenerateDefers(data, data.macroDeferBases[data.macroDeferBases.count - 1], general, function, currentFunction);
+            RETURN(returnSSAId, returnType);
+         }
+
+         assert(!returnsValue, "macro % must return a value. loc: %", header.name, GetLocationString(node));
+         GenerateDefers(data, data.macroDeferBases[data.macroDeferBases.count - 1], general, function, currentFunction);
+         RETURN(0, null);
+      }
+
+      //
+      // the macro returns from inside of something (for example an if). spirv only allows branching out of a construct
+      // with break, so the expansion is put in a loop that runs once and return is a break out of it:
+      //    result: T;
+      //    do {
+      //       ...
+      //       result = x; break;    // return x;
+      //       ...
+      //    } while false;
+      //    result
+      //
+      resultVariableType := ifx returnsValue then GetFunctionStorageClassType(returnType) else null;
+      resultVariableSSAId: SSAId;
+      if (returnsValue) {
+         storageClass := SpvStorageClass.Function;
+         resultVariableSSAId = GetNextSSAId(data);
+         WriteSingleInstructionIfReachable(
+            general,
+            *data.isBlockReachable,
+            .Variable,
+            GetSSAId(data, .{ type = ._Type, _type = GetPointerType(resultVariableType, storageClass) }),
+            resultVariableSSAId,
+            storageClass
+         );
+      }
+
+      headerLabelSSAId := GetNextSSAId(data);
+      bodyLabelSSAId := GetNextSSAId(data);
+      continueLabelSSAId := GetNextSSAId(data);
+      mergeLabelSSAId := GetNextSSAId(data);
+
+      // break and continue inside the macro body (outside of its own loops) are not for this loop, they skip it. return is the only way to branch to its merge block.
+      loopData: LoopData = .{ mergeLabelSSAId = mergeLabelSSAId, continueLabelSSAId = continueLabelSSAId, deferBase = data.deferStack.count, isMacro = true };
+      array_add(*data.loopStack, *loopData);
+
+      array_add(*data.macroReturns, .{ resultVariableSSAId = resultVariableSSAId, resultType = resultVariableType, loopIndex = data.loopStack.count - 1 });
+      defer data.macroReturns.count -= 1;
+
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, headerLabelSSAId);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .LoopMerge, mergeLabelSSAId, continueLabelSSAId, SpvLoopControlMask.MaskNone);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, bodyLabelSSAId);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, bodyLabelSSAId);
+
+      for expansion.statements {
+         isReturn := !GenerateMacroStatement(data, it, general, function, currentFunction);
+         if (isReturn) GenerateInstructions(data, it, general, function, currentFunction); // see the .RETURN case
+      }
+
+      GenerateDefers(data, data.macroDeferBases[data.macroDeferBases.count - 1], general, function, currentFunction);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, continueLabelSSAId);
+      falseSSAId := GetSSAId(data, .{ type = .BoolLiteral, boolLiteral = false });
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, falseSSAId, headerLabelSSAId, mergeLabelSSAId);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
+      EndLoop(data, function);
+
+      if (!returnsValue) RETURN(0, null);
+
+      resultSSAId := Load(data, function, .{ type = ._Type, _type = resultVariableType }, resultVariableSSAId, false);
+      RETURN(resultSSAId, resultVariableType);
+   }
+
+   identifierExpression: *Code_Ident;
+   if (procedureExpression.kind == .IDENT) {
+      identifierExpression = cast(*Code_Ident) procedureExpression;
+   } else if (procedureExpression.kind == .BINARY_OPERATOR) {
+      // named module.
+      // or possibly it could be a function pointer inside a struct but in spirv function pointers is not allowed.
+      // maybe for that reason i should check if the left hand side is a struct.
+
+      cbo := cast(*Code_Binary_Operator) procedureExpression;
+
+      // named module
+      if (cbo.left.type.type == .TYPE) {
+         assert(cbo.right.kind == .IDENT, "kind: %", cbo.right.kind);
+
+         identifierExpression = xx cbo.right;
+      } else {
+         assert(false, "type: %", cbo.left.type.type);
+      }
+   }
+
+   identifierName := identifierExpression.name;
+   arguments := cpc.arguments_sorted; // in the order of the parameters, the compiler puts named arguments in their place
+
+   //
+   // for intrinsic functions i need to get the argument type from the function header, and DetermineCodeNodeTypes only operates on Code_Nodes that are child of the entry point function.
+   // the .DECLARATION case of DetermineCodeNodeTypes assumes this (for decorationless copy), so i cant use the same code for operating on Code_Nodes that are outside of the entry point function.
+   // this means i cant have weird parameter types to intrinsic functions, which i think is true for all intrinsic functions but i cant gurantee shit. how the type thingy works is very shady but idk.
+   // i need more information from compiler to idk. anyways thats why i use the Code_Node type directly of an argument of an intrinsic function, surely will never go wrong Clueless.
+   //
+   //                            - apila, 08/06/26
+   //
+   // the above thing about DetermineCodeNodeTypes no longer true. it can be used in any Code_Node (you need to get the context from the metaprogram beforehand tho).
+   // so i prolly need to update the code below. surely i will do it in a timely manner Clueless.oO(shirley)
+   //
+   //                            - apila, 10/06/26
+   //
+   // sin, cos, clamp, dot, mul... (see MATH_INTRINSICS)
+   if (header.notes.count > 0 && header.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) {
+      mathIntrinsic := GetMathIntrinsic(identifierName);
+      if (mathIntrinsic != null) {
+         resultSpirvType: *Type_Info;
+         resultSSAId := GenerateMathIntrinsic(data, mathIntrinsic, cpc, header, general, function, currentFunction, *resultSpirvType);
+         RETURN(resultSSAId, resultSpirvType);
+      }
+
+      // texture, texelfetch3d, ImageRead... (see RESOURCE_FUNCTIONS. ImageWrite and TraceRay are below)
+      resourceFunction := GetResourceFunction(identifierName);
+      if (resourceFunction != null && resourceFunction.operation == .RayQueryInitialize) {
+         resultSpirvType: *Type_Info;
+         GenerateRayQueryIntrinsic(data, .RayQueryInitializeKHR, .None, cpc, header, general, function, currentFunction, *resultSpirvType);
+         RETURN(0, null);
+      }
+
+      // RayQueryProceed, RayQueryGetIntersectionT... (see RAY_QUERY_INTRINSICS)
+      rayQueryIntrinsic := GetRayQueryIntrinsic(identifierName);
+      if (rayQueryIntrinsic != null) {
+         resultSpirvType: *Type_Info;
+         resultSSAId := GenerateRayQueryIntrinsic(data, rayQueryIntrinsic.op, rayQueryIntrinsic.intersection, cpc, header, general, function, currentFunction, *resultSpirvType);
+         RETURN(resultSSAId, resultSpirvType);
+      }
+
+      if (resourceFunction != null && resourceFunction.operation != .Write && resourceFunction.operation != .TraceRay) {
+         resultSpirvType: *Type_Info;
+         resultSSAId := GenerateTextureFunction(data, resourceFunction, cpc, header, general, function, currentFunction, *resultSpirvType);
+         RETURN(resultSSAId, resultSpirvType);
+      }
+
+      // SubgroupAdd, SubgroupBallot... (see SUBGROUP_INTRINSICS)
+      subgroupIntrinsic := GetSubgroupIntrinsic(identifierName);
+      if (subgroupIntrinsic != null) {
+         resultSpirvType: *Type_Info;
+         resultSSAId := GenerateSubgroupIntrinsic(data, subgroupIntrinsic, cpc, header, general, function, currentFunction, *resultSpirvType);
+         RETURN(resultSSAId, resultSpirvType);
+      }
+   }
+
+   if identifierName == {
+      case SET_MESH_OUTPUTS_NAME; {
+         vertexCountExpression := arguments[0];
+         primitiveCountExpression := arguments[1];
+
+         // literalShouldHaveBeenType is needed here. meanign that i cant use node.type as literalShouldHaveBeenType. because jai reports literals as s64.
+         // it doesnt do the conversion here. in direct assign it does tho.
+         //    - apila, 07/05/26
+         vertexCountSSAId := GenerateInstructions(data, vertexCountExpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[0].type });
+         primitiveCountSSAId := GenerateInstructions(data, primitiveCountExpression, general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[1].type });
+
+         WriteSingleInstructionIfReachable(
+            function,
+            *data.isBlockReachable,
+            .SetMeshOutputsEXT,
+            vertexCountSSAId,
+            primitiveCountSSAId
+         );
+
+         return 42000; // doesnt matter since OpSetMeshOutputsEXT doesnt return
+      }
+
+      case IMAGE_WRITE_FUNCTION_NAME; {
+         imageNode := arguments[0];
+
+         coordinateNode := arguments[1];
+         coordinateType := GetNodeType(header.arguments[1]);
+
+         texelNode := arguments[2];
+         texelType := GetNodeType(header.arguments[2]);
+
+         sampledType := GetScalarTypeOrVectorElementType(texelType);
+
+         imageType := New(TypeInfoImage);
+         imageType.* = .{
+            sampledType       = sampledType,
+            dimensionality    = ._2D,
+            depth             = 0, // maybe use 2 idk. in texture functions i have seperate overloads for depth i think, but for this idk.    - apila, 11/09/26
+            arrayed           = 0,
+            ms                = 0,
+            sampled           = 2,
+            imageFormat       = .Unknown,
+         };
+
+         imageSSAId        := GenerateInstructions(data, imageNode,      general, function, currentFunction, .{ accessChainBaseArrayElementTypeIfImageHeap = imageType });
+         coordinateSSAId   := GenerateInstructions(data, coordinateNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = coordinateType });
+         texelSSAId        := GenerateInstructions(data, texelNode,      general, function, currentFunction, .{ spirvShouldHaveBeenType = texelType });
+
+         WriteSingleInstructionIfReachable(
+            function,
+            *data.isBlockReachable,
+            .ImageWrite,
+            imageSSAId,
+            coordinateSSAId,
+            texelSSAId
+         );
+
+         RETURN(0, null);
+      }
+
+      case DISCARD_FUNCTION_NAME; {
+         assert(data.shaderType == .Fragment, "% only exists in fragment shaders. loc: %", identifierName, GetLocationString(node));
+         data.usesDemote = true;
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .DemoteToHelperInvocation);
+         RETURN(0, null);
+      }
+
+      // OpControlBarrier Workgroup Workgroup AcquireRelease|WorkgroupMemory, like barrier() in glsl
+      case DEBUG_PRINT_FUNCTION_NAME; {
+         GenerateDebugPrint(data, cpc, general, function, currentFunction);
+         RETURN(0, null);
+      }
+
+      case IGNORE_INTERSECTION_FUNCTION_NAME; #through;
+      case TERMINATE_RAY_FUNCTION_NAME; {
+         assert(data.shaderType == .Rahit, "% only exists in rahit shaders. loc: %", identifierName, GetLocationString(node));
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, ifx identifierName == IGNORE_INTERSECTION_FUNCTION_NAME then SpvOp.IgnoreIntersectionKHR else .TerminateRayKHR);
+         RETURN(0, null);
+      }
+
+      case REPORT_INTERSECTION_FUNCTION_NAME; {
+         assert(data.shaderType == .Rint, "% only exists in rint shaders. loc: %", identifierName, GetLocationString(node));
+         hitTSSAId := GenerateInstructions(data, arguments[0], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[0].type });
+         hitKindSSAId := GenerateInstructions(data, arguments[1], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[1].type });
+
+         boolType := cast(*Type_Info) bool;
+         resultSSAId := GetNextSSAId(data);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ReportIntersectionKHR, GetSSAId(data, .{ type = ._Type, _type = boolType }), resultSSAId, hitTSSAId, hitKindSSAId);
+         RETURN(resultSSAId, boolType);
+      }
+
+      case EXECUTE_CALLABLE_FUNCTION_NAME; {
+         assert(data.shaderType == .Rgen || data.shaderType == .Rchit || data.shaderType == .Rmiss || data.shaderType == .Rcall, "% only exists in rgen, rchit, rmiss and rcall shaders. loc: %", identifierName, GetLocationString(node));
+         sbtIndexSSAId := GenerateInstructions(data, arguments[0], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[0].type });
+
+         dataSpirvType: *Type_Info;
+         dataSSAId := GenerateInstructions(data, arguments[1], general, function, currentFunction, spirvType = *dataSpirvType);
+         assert(dataSpirvType != null && dataSpirvType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) dataSpirvType).storageClass == .CallableDataKHR, "the data of % is the address of a @% variable. loc: %", identifierName, CALLABLE_DATA_QUALIFIER, GetLocationString(node));
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ExecuteCallableKHR, sbtIndexSSAId, dataSSAId);
+         RETURN(0, null);
+      }
+
+      // OpControlBarrier Subgroup Subgroup AcquireRelease|UniformMemory|WorkgroupMemory|ImageMemory, like subgroupBarrier() in glsl
+      case SUBGROUP_BARRIER_FUNCTION_NAME; {
+         RequireCapability(data, .GroupNonUniform);
+         scopeSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx SpvScope.Subgroup, bitSize = 32 } });
+         semantics := SpvMemorySemanticsMask.AcquireReleaseMask | .UniformMemoryMask | .WorkgroupMemoryMask | .ImageMemoryMask;
+         semanticsSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx semantics, bitSize = 32 } });
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ControlBarrier, scopeSSAId, scopeSSAId, semanticsSSAId);
+         RETURN(0, null);
+      }
+
+      case BARRIER_FUNCTION_NAME; {
+         assert(data.shaderType == .Compute || data.shaderType == .Mesh || data.shaderType == .Task, "% only exists in compute, mesh and task shaders. loc: %", identifierName, GetLocationString(node));
+
+         scopeSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx SpvScope.Workgroup, bitSize = 32 } });
+         semantics := SpvMemorySemanticsMask.AcquireReleaseMask | .WorkgroupMemoryMask;
+         semanticsSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx semantics, bitSize = 32 } });
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ControlBarrier, scopeSSAId, scopeSSAId, semanticsSSAId);
+         RETURN(0, null);
+      }
+
+      // the atomics are relaxed. the scope is the device for buffer memory and the workgroup for workgroup variables.
+      case ATOMIC_ADD_FUNCTION_NAME;      #through;
+      case ATOMIC_MIN_FUNCTION_NAME;      #through;
+      case ATOMIC_MAX_FUNCTION_NAME;      #through;
+      case ATOMIC_AND_FUNCTION_NAME;      #through;
+      case ATOMIC_OR_FUNCTION_NAME;       #through;
+      case ATOMIC_XOR_FUNCTION_NAME;      #through;
+      case ATOMIC_EXCHANGE_FUNCTION_NAME; #through;
+      case ATOMIC_COMPARE_EXCHANGE_FUNCTION_NAME; {
+         argumentNodes := cpc.arguments_sorted;
+
+         pointerSpirvType: *Type_Info;
+         pointerSSAId := GenerateInstructions(data, argumentNodes[0], general, function, currentFunction, spirvType = *pointerSpirvType);
+         assert(pointerSpirvType != null && pointerSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
+         tip := cast(*TypeInfoPointer) pointerSpirvType;
+         assert(tip.storageClass == .PhysicalStorageBuffer || tip.storageClass == .Workgroup, "atomics are on buffer memory or workgroup variables, not on % memory. loc: %", tip.storageClass, GetLocationString(node));
+
+         valueType := tip.pointerTo;
+         info, isNumeric := GetNumericInfo(valueType);
+         assert(isNumeric && info.components == 1 && (info.kind == .Signed || info.kind == .Unsigned) && (info.bitSize == 32 || info.bitSize == 64), "type: %, loc: %", TypeName(valueType), GetLocationString(node));
+         if (info.bitSize == 64) data.usesInt64Atomics = true;
+
+         scope := ifx tip.storageClass == .Workgroup then SpvScope.Workgroup else SpvScope.Device;
+         scopeSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx scope, bitSize = 32 } });
+         relaxedSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = 0, bitSize = 32 } });
+
+         signed := info.kind == .Signed;
+         op: SpvOp;
+         if identifierName == {
+            case ATOMIC_ADD_FUNCTION_NAME;      op = .AtomicIAdd;
+            case ATOMIC_MIN_FUNCTION_NAME;      op = ifx signed then SpvOp.AtomicSMin else .AtomicUMin;
+            case ATOMIC_MAX_FUNCTION_NAME;      op = ifx signed then SpvOp.AtomicSMax else .AtomicUMax;
+            case ATOMIC_AND_FUNCTION_NAME;      op = .AtomicAnd;
+            case ATOMIC_OR_FUNCTION_NAME;       op = .AtomicOr;
+            case ATOMIC_XOR_FUNCTION_NAME;      op = .AtomicXor;
+            case ATOMIC_EXCHANGE_FUNCTION_NAME; op = .AtomicExchange;
+            case ATOMIC_COMPARE_EXCHANGE_FUNCTION_NAME; op = .AtomicCompareExchange;
+         }
+
+         valueTypeSSAId := GetSSAId(data, .{ type = ._Type, _type = valueType });
+         resultSSAId := GetNextSSAId(data);
+
+         if (op == .AtomicCompareExchange) {
+            // AtomicCompareExchange(pointer, comparator, value)
+            comparatorSSAId := GenerateInstructions(data, argumentNodes[1], general, function, currentFunction, .{ spirvShouldHaveBeenType = valueType });
+            valueSSAId := GenerateInstructions(data, argumentNodes[2], general, function, currentFunction, .{ spirvShouldHaveBeenType = valueType });
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, op, valueTypeSSAId, resultSSAId, pointerSSAId, scopeSSAId, relaxedSSAId, relaxedSSAId, valueSSAId, comparatorSSAId);
+         } else {
+            valueSSAId := GenerateInstructions(data, argumentNodes[1], general, function, currentFunction, .{ spirvShouldHaveBeenType = valueType });
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, op, valueTypeSSAId, resultSSAId, pointerSSAId, scopeSSAId, relaxedSSAId, valueSSAId);
+         }
+
+         RETURN(resultSSAId, valueType);
+      }
+
+      case TRACE_RAY_FUNCTION_NAME; {
+         assert(data.shaderType == .Rgen || data.shaderType == .Rchit || data.shaderType == .Rmiss, "% only exists in rgen, rchit and rmiss shaders. loc: %", identifierName, GetLocationString(node));
+
+         // OpTraceRayKHR, its operands are the arguments
+         operands: [..] Any;
+         operands.allocator = temp;
+         for arguments {
+            // the payload is the address of the payload variable. its type is a pointer to RayPayloadKHR memory, not the type in the header (see IsTraceRayFunction)
+            isPayload := it_index == arguments.count - 1;
+            argumentType := ifx isPayload then GetNodeType(header.arguments[it_index]) else header.arguments[it_index].type;
+            argumentSSAId := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = argumentType });
+            array_add(*operands, ac(argumentSSAId));
+         }
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .TraceRayKHR, .. operands);
+         RETURN(0, null);
+      }
+   }
+
+   if (header.notes.count > 0) {
+      assert(header.notes[0].text != INTRINSIC_FUNCTION_NOTE_NAME, "intrinsic function not yet implemetned! name: %", identifierName);
+   }
+
+   // if code reached here then it means this is a user defined function.
+   AddFunctionDependency(*functionDependencyTable, currentFunction, header);
+   CreateFunctionDependencyEntryIfNotExists(*functionDependencyTable, header);
+
+   returnType := GetNodeType(node);
+
+   returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
+   resultSSAId := GetNextSSAId(data);
+
+   operands: [..] Any;
+   array_add(*operands, GetSSAId(data, returnTypeIdentifier));
+   array_add(*operands, resultSSAId);
+   array_add(*operands, GetSSAId(data, .{ type = .Function, function = header }));
+
+   // the arguments in the order of the parameters, the compiler puts named arguments in their place and fills in the default values
+   assert(cpc.arguments_sorted.count == header.arguments.count, "varargs are not supported. loc: %", GetLocationString(node));
+   for argumentNode: cpc.arguments_sorted {
+      argumentType := GetNodeType(header.arguments[it_index]);
+      argumentSSAId := GenerateInstructions(data, argumentNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = argumentType });
+
+      if (IsSmallArgument(argumentType)) {
+         // need to copy
+
+         storageClass := SpvStorageClass.Function;
+         spirvType := GetPointerType(argumentType, storageClass);
+
+         parameterVariableSSAId := GetNextSSAId(data);
+         WriteSingleInstructionIfReachable(
+            general,
+            *data.isBlockReachable,
+            .Variable,
+            GetSSAId(data, .{ type = ._Type, _type = spirvType }),
+            parameterVariableSSAId,
+            storageClass
+         );
+
+         WriteSingleInstructionIfReachable(
+            function,
+            *data.isBlockReachable,
+            .Store,
+            parameterVariableSSAId,
+            argumentSSAId
+         );
+
+         argumentSSAId = parameterVariableSSAId;
+      }
+
+      array_add(*operands, ac(argumentSSAId));
+   }
+
+   WriteSingleInstructionIfReachable(
+      function,
+      *data.isBlockReachable,
+      .FunctionCall,
+      .. operands
+   );
+
+   if (returnTypeIdentifier.type == .Void) RETURN(resultSSAId, returnType);
+
+   // a procedure with more than one return value returns a struct of them (see GetMultipleReturnType). the values are taken out of it by Code_Extracts.
+   // when the call is used as an expression its value is the first value.
+   procedureType := cast(*Type_Info_Procedure) header.type;
+   if (procedureType.return_types.count > 1) {
+      table_set(*data.multipleReturnValues, cpc, resultSSAId);
+
+      firstType := GetMultipleReturnValueType(procedureType, 0);
+      firstSSAId := EmitCompositeExtract(data, function, .{ type = ._Type, _type = firstType }, resultSSAId, .[0]);
+      RETURN(firstSSAId, firstType);
+   }
+
+   RETURN(resultSSAId, returnTypeIdentifier._type);
+}
+
+GenerateLoopControl :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   clc := cast(*Code_Loop_Control) node;
+
+   if #complete clc.control_type == {
+      case .BREAK; #through;
+      case .CONTINUE; {
+         // the innermost loop, or the loop whose iterator is named (break i;)
+         targetIndex := -1;
+         for < data.loopStack {
+            if (it.isMacro) continue;
+            if (clc.target_ident == null || it.iteratorDeclaration == clc.target_ident.resolved_declaration) {
+               targetIndex = it_index;
+               break;
+            }
+         }
+         assert(targetIndex != -1, "% is not inside a loop. loc: %", clc.control_type, GetLocationString(node));
+
+         // the scopes inside the loop are exited
+         GenerateDefers(data, data.loopStack[targetIndex].deferBase, general, function, currentFunction);
+         GenerateLoopExit(data, targetIndex, clc.control_type == .CONTINUE, general, function);
+         return 0;
+      }
+
+      case .REMOVE; {
+         assert(false, "not yet implemented! please dont use this :)");
+      }
+
+      case; assert(false, "not yet implemented! type: %", clc.control_type);
+   }
+
+   assert(false, "didnt return!, node.kind: %, loc: %", node.kind, node.location);
+   return 696969;
+}
+
+GenerateWhile :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cw := cast(*Code_While) node;
+
+   conditionType := GetNodeType(cw.condition);
+
+   headerLabelSSAId := GetNextSSAId(data);
+   conditionLabelSSAId := GetNextSSAId(data);
+   bodyLabelSSAId := GetNextSSAId(data);
+   continueLabelSSAId := GetNextSSAId(data);
+   mergeLabelSSAId := GetNextSSAId(data);
+
+   // break and continue refer to the innermost loop
+   loopData: LoopData = .{
+      headerLabelSSAId     = headerLabelSSAId,
+      conditionLabelSSAId  = conditionLabelSSAId,
+      bodyLabelSSAId       = bodyLabelSSAId,
+      continueLabelSSAId   = continueLabelSSAId,
+      mergeLabelSSAId      = mergeLabelSSAId,
+      deferBase            = data.deferStack.count,
+   };
+   array_add(*data.loopStack, *loopData);
+
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, headerLabelSSAId);
+
+   WriteSingleInstructionIfReachable(
+      function,
+      *data.isBlockReachable,
+      .LoopMerge,
+      mergeLabelSSAId,
+      continueLabelSSAId,
+      SpvLoopControlMask.MaskNone
+   );
+
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, conditionLabelSSAId);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, conditionLabelSSAId);
+
+   conditionSSAId := GenerateInstructions(data, cw.condition, general, function, currentFunction, .{ spirvShouldHaveBeenType = conditionType });
+   WriteSingleInstructionIfReachable(
+      function,
+      *data.isBlockReachable,
+      .BranchConditional,
+      conditionSSAId,
+      bodyLabelSSAId,
+      mergeLabelSSAId
+   );
+
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, bodyLabelSSAId);
+
+   GenerateInstructions(data, cw.block, general, function, currentFunction);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, continueLabelSSAId);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
+   EndLoop(data, function);
+
+   return 999999;
+}
+
+GenerateIf :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   ci := cast(*Code_If) node;
+
+   if (ci.if_flags & .IS_STATIC) {
+      // #if doesnt create a scope, so the defers in it are for the enclosing scope
+      takenBlock := GetStaticIfTakenBlock(ci);
+      if (takenBlock != null) {
+         for takenBlock.statements  GenerateInstructions(data, it, general, function, currentFunction);
+      }
+      return 0;
+   }
+
+   if (ci.if_flags & .IS_SWITCH_STATEMENT) {
+      GenerateSwitch(data, ci, general, function, currentFunction);
+      return 0;
+   }
+
+   // only the chosen branch is evaluated:
+   //    result: T;
+   //    if condition  result = then; else result = else;
+   if (ci.if_flags & .IS_IFX) {
+      resultType := GetNodeType(node);
+      assert(ci.then_block.statements.count == 1 && ci.else_block.statements.count == 1, "loc: %", GetLocationString(node));
+
+      variableType := GetFunctionStorageClassType(resultType);
+      storageClass := SpvStorageClass.Function;
+      resultVariableSSAId := GetNextSSAId(data);
+      WriteSingleInstructionIfReachable(
+         general,
+         *data.isBlockReachable,
+         .Variable,
+         GetSSAId(data, .{ type = ._Type, _type = GetPointerType(variableType, storageClass) }),
+         resultVariableSSAId,
+         storageClass
+      );
+
+      conditionSSAId := GenerateInstructions(data, ci.condition, general, function, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) bool });
+
+      thenLabelSSAId := GetNextSSAId(data);
+      elseLabelSSAId := GetNextSSAId(data);
+      endLabelSSAId := GetNextSSAId(data);
+
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .SelectionMerge, endLabelSSAId, SpvSelectionControlMask.MaskNone);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, conditionSSAId, thenLabelSSAId, elseLabelSSAId);
+
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, thenLabelSSAId);
+      thenSSAId := GenerateInstructions(data, ci.then_block.statements[0], general, function, currentFunction, .{ spirvShouldHaveBeenType = variableType });
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, resultVariableSSAId, thenSSAId);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, endLabelSSAId);
+
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, elseLabelSSAId);
+      elseSSAId := GenerateInstructions(data, ci.else_block.statements[0], general, function, currentFunction, .{ spirvShouldHaveBeenType = variableType });
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, resultVariableSSAId, elseSSAId);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, endLabelSSAId);
+
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, endLabelSSAId);
+      resultSSAId := Load(data, function, .{ type = ._Type, _type = variableType }, resultVariableSSAId, false);
+
+      RETURN(resultSSAId, variableType);
+   }
+
+   assert(ci.condition != null);
+   assert(ci.then_block != null);
+
+   conditionSSAId := GenerateInstructions(data, ci.condition, general, function, currentFunction);
+
+   thenLabelSSAId := GetNextSSAId(data);
+   endLabelSSAId := GetNextSSAId(data);
+   elseLabelSSAId := ifx ci.else_block == null then endLabelSSAId else GetNextSSAId(data);
+
+   WriteSingleInstructionIfReachable(
+      function,
+      *data.isBlockReachable,
+      .SelectionMerge,
+      endLabelSSAId,
+      SpvSelectionControlMask.MaskNone
+   );
+
+   WriteSingleInstructionIfReachable(
+      function,
+      *data.isBlockReachable,
+      .BranchConditional,
+      conditionSSAId,
+      thenLabelSSAId,
+      elseLabelSSAId
+   );
+
+   WriteSingleInstructionIfReachable(
+      function,
+      *data.isBlockReachable,
+      .Label,
+      thenLabelSSAId
+   );
+   GenerateInstructions(data, ci.then_block, general, function, currentFunction);
+   WriteSingleInstructionIfReachable(
+      function,
+      *data.isBlockReachable,
+      .Branch,
+      endLabelSSAId
+   );
+
+   if (ci.else_block != null) {
+      WriteSingleInstructionIfReachable(
+         function,
+         *data.isBlockReachable,
+         .Label,
+         elseLabelSSAId
+      );
+      GenerateInstructions(data, ci.else_block, general, function, currentFunction);
+      WriteSingleInstructionIfReachable(
+         function,
+         *data.isBlockReachable,
+         .Branch,
+         endLabelSSAId
+      );
+   }
+
+   WriteSingleInstructionIfReachable(
+      function,
+      *data.isBlockReachable,
+      .Label,
+      endLabelSSAId
+   );
+
+   return 321321; // doesnt matter since if doesnt return. need to update this when i implement ifx.
+}
+
+GenerateReturn :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cr := cast(*Code_Return) node;
+
+   // return from a macro that has an early return. see the macro case of .PROCEDURE_CALL
+   if (data.macroReturns.count > 0) {
+      macroReturn := data.macroReturns[data.macroReturns.count - 1];
+
+      if (macroReturn.resultVariableSSAId != 0) {
+         assert(cr.arguments_unsorted.count == 1, "loc: %", GetLocationString(node));
+         valueSSAId := GenerateInstructions(data, cr.arguments_unsorted[0].expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = macroReturn.resultType });
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, macroReturn.resultVariableSSAId, valueSSAId);
+      }
+
+      // the defers of the macro run after the value is evaluated
+      GenerateDefers(data, data.macroDeferBases[data.macroDeferBases.count - 1], general, function, currentFunction);
+      GenerateLoopExit(data, macroReturn.loopIndex, false, general, function);
+      return 543543;
+   }
+
+   if (currentFunction == data.entryFunction) {
+      // the return values are evaluated before the defers run
+      if data.shaderType == {
+         case .Mesh; #through;
+         case .Compute; #through;
+         case .Rgen; #through;
+         case .Rchit; #through;
+         case .Rmiss; #through;
+         case .Rahit; #through;
+         case .Rint; #through;
+         case .Rcall;
+            assert(cr.arguments_unsorted.count == 0, "% shader cant return a value. loc: %", data.shaderType, GetLocationString(node));
+            GenerateDefers(data, 0, general, function, currentFunction);
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
+
+         case .Fragment;
+            assert(cr.arguments_unsorted.count == data.fragmentOutputIdentifiers.count, "cr.arguments_unsorted.count: %, data.fragmentOutputIdentifiers.count: %", cr.arguments_unsorted.count, data.fragmentOutputIdentifiers.count);
+
+            for cr.arguments_unsorted {
+               ssaId := GenerateInstructions(data, it.expression, general, function, currentFunction);
+               WriteSingleInstructionIfReachable(
+                  function,
+                  *data.isBlockReachable,
+                  .Store,
+                  GetSSAId(data, data.fragmentOutputIdentifiers[it_index]),
+                  ssaId
+               );
+            }
+
+            GenerateDefers(data, 0, general, function, currentFunction);
+            WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
+
+         case; assert(false, "not yet implemented! type: %", data.shaderType);
+      }
+   } else {
+      returnTypeIdentifier := GetReturnTypeIdentifier(xx currentFunction.type);
+
+      // related to the comment in GetReturnTypeIdentifier
+      // assert(returnTypeIdentifier.type == ._Type);
+
+      // if (CompareType(returnTypeIdentifier._type, cast(*Type_Info) void)) {
+      if (returnTypeIdentifier.type == .Void) {
+         GenerateDefers(data, 0, general, function, currentFunction);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
+      } else if ((cast(*Type_Info_Procedure) currentFunction.type).return_types.count > 1) {
+         // the values are put in a struct, see GetMultipleReturnType
+         procedureType := cast(*Type_Info_Procedure) currentFunction.type;
+         assert(cr.arguments_sorted.count == procedureType.return_types.count, "count: %, loc: %", cr.arguments_sorted.count, GetLocationString(node));
+
+         resultSSAId := GetNextSSAId(data);
+         operands: [..] Any;
+         array_add(*operands, GetSSAId(data, returnTypeIdentifier), resultSSAId);
+
+         for cr.arguments_sorted {
+            valueSSAId := GenerateInstructions(data, it, general, function, currentFunction, .{ spirvShouldHaveBeenType = GetMultipleReturnValueType(procedureType, it_index) });
+            array_add(*operands, ac(valueSSAId));
+         }
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .CompositeConstruct, .. operands);
+         GenerateDefers(data, 0, general, function, currentFunction);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ReturnValue, resultSSAId);
+      } else {
+         assert(cr.arguments_unsorted.count == 1, "count: %", cr.arguments_unsorted.count);
+
+         returnArgumentNode := cr.arguments_unsorted[0].expression;
+         returnType := returnTypeIdentifier._type;
+
+         // the value is evaluated before the defers run
+         returnArgumentSSAId := GenerateInstructions(data, returnArgumentNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = returnType });
+         GenerateDefers(data, 0, general, function, currentFunction);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ReturnValue, returnArgumentSSAId);
+      }
+   }
+
+   return 543543; // return doesnt return any ssa id
+}
+
+GenerateFor :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cf := cast(*Code_For) node;
+
+   // a for_expansion, a macro
+   if (cf.macro_expansion_procedure_call != null) {
+      GenerateInstructions(data, cf.macro_expansion_procedure_call, general, function, currentFunction);
+      return 0;
+   }
+
+   nodes := GetForLoopNodes(data, cf);
+   isRange := cf.iteration_expression_right != null;
+   reverse := (cf.for_flags & .REVERSE) != 0;
+
+   itType := GetNodeType(cf.ident_decl);
+   isPointerLoop := (cf.for_flags & .POINTER) != 0;
+   itSSAId: SSAId;
+   if (!isPointerLoop) itSSAId = GenerateInstructions(data, cf.ident_decl, general, function, currentFunction);
+   boolTypeSSAId := GetSSAId(data, .{ type = ._Type, _type = cast(*Type_Info) bool });
+
+   // only for arrays
+   indexType: *Type_Info;
+   indexSSAId, indexOne, indexZero, indexTypeSSAId: SSAId;
+   indexInfo: NumericInfo;
+   if (!isRange) {
+      indexType = GetNodeType(nodes.indexDeclaration);
+      indexSSAId = GenerateInstructions(data, nodes.indexDeclaration, general, function, currentFunction);
+
+      indexIsNumeric: bool;
+      indexInfo, indexIsNumeric = GetNumericInfo(indexType);
+      assert(indexIsNumeric && (indexInfo.kind == .Signed || indexInfo.kind == .Unsigned), "type: %, loc: %", indexType.*, GetLocationString(node));
+      indexOne = GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = indexInfo.kind == .Unsigned, value._s64 = 1, bitSize = indexInfo.bitSize } });
+      indexZero = GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = indexInfo.kind == .Unsigned, value._s64 = 0, bitSize = indexInfo.bitSize } });
+      indexTypeSSAId = GetSSAId(data, .{ type = ._Type, _type = indexType });
+   }
+
+   //
+   // like the cpu backend of jai:
+   //    - the bound a range ends at (the end, or the start for "for <") is read in every iteration if it is a local variable, otherwise it is evaluated once.
+   //      the other bound is the first value of it, it is evaluated once.
+   //    - the array is evaluated once (see LoopBase). the count of an array view is read in every iteration (for "for <" it is read once, for the first index)
+   //
+   startSSAId, endSSAId, countSSAId: SSAId;
+   itInfo: NumericInfo;
+   rereadBound := false;
+   if (isRange) {
+      itIsNumeric: bool;
+      itInfo, itIsNumeric = GetNumericInfo(itType);
+      assert(itIsNumeric && (itInfo.kind == .Signed || itInfo.kind == .Unsigned), "range must be of integers. type: %, loc: %", itType.*, GetLocationString(node));
+
+      startSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
+      endSSAId = GenerateInstructions(data, cf.iteration_expression_right, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
+      rereadBound = IsRereadRangeBound(data, ifx reverse then cf.iteration_expression else cf.iteration_expression_right);
+
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, itSSAId, ifx reverse then endSSAId else startSSAId);
+   } else {
+      loopBase := table_find_pointer(*data.loopBases, nodes.baseDeclaration);
+      assert(loopBase != null);
+
+      if (loopBase.isLValue) {
+         addressSpirvType: *Type_Info;
+         loopBase.addressSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ isLValue = true }, spirvType = *addressSpirvType);
+         assert(addressSpirvType != null && addressSpirvType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) addressSpirvType).storageClass == loopBase.storageClass, "loc: %", GetLocationString(cf.iteration_expression));
+      } else {
+         loopBase.addressSSAId = MaterializeValue(data, function, cf.iteration_expression, currentFunction);
+      }
+
+      tia := cast(*Type_Info_Array) GetNodeType(cf.iteration_expression);
+      if (tia.array_type == .FIXED) {
+         countSSAId = GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = indexInfo.kind == .Unsigned, value._s64 = tia.array_count, bitSize = indexInfo.bitSize } });
+      } else if (reverse) {
+         countSSAId = GenerateInstructions(data, nodes.count, general, function, currentFunction, .{ spirvShouldHaveBeenType = indexType });
+      }
+
+      if (reverse) {
+         lastSSAId := GetNextSSAId(data);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ISub, indexTypeSSAId, lastSSAId, countSSAId, indexOne);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, indexSSAId, lastSSAId);
+      } else {
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, indexSSAId, indexZero);
+      }
+   }
+
+   headerLabelSSAId := GetNextSSAId(data);
+   conditionLabelSSAId := GetNextSSAId(data);
+   bodyLabelSSAId := GetNextSSAId(data);
+   continueLabelSSAId := GetNextSSAId(data);
+   mergeLabelSSAId := GetNextSSAId(data);
+
+   loopData: LoopData = .{
+      headerLabelSSAId     = headerLabelSSAId,
+      conditionLabelSSAId  = conditionLabelSSAId,
+      bodyLabelSSAId       = bodyLabelSSAId,
+      continueLabelSSAId   = continueLabelSSAId,
+      mergeLabelSSAId      = mergeLabelSSAId,
+      deferBase            = data.deferStack.count,
+      iteratorDeclaration  = cf.ident_decl,
+   };
+   array_add(*data.loopStack, *loopData);
+
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, headerLabelSSAId);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .LoopMerge, mergeLabelSSAId, continueLabelSSAId, SpvLoopControlMask.MaskNone);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, conditionLabelSSAId);
+
+   // condition
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, conditionLabelSSAId);
+   conditionSSAId := GetNextSSAId(data);
+   if (isRange) {
+      // a local variable is read again
+      if (rereadBound) {
+         if (reverse) startSSAId = GenerateInstructions(data, cf.iteration_expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
+         else         endSSAId = GenerateInstructions(data, cf.iteration_expression_right, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
+      }
+
+      itValueSSAId := Load(data, function, .{ type = ._Type, _type = itType }, itSSAId, false);
+      if (reverse) {
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.GREATER_OR_EQUAL, itInfo.kind), boolTypeSSAId, conditionSSAId, itValueSSAId, startSSAId);
+      } else {
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.LESS_OR_EQUAL, itInfo.kind), boolTypeSSAId, conditionSSAId, itValueSSAId, endSSAId);
+      }
+   } else {
+      // the count of an array view is read in every iteration
+      if (!reverse && nodes.count != null) countSSAId = GenerateInstructions(data, nodes.count, general, function, currentFunction, .{ spirvShouldHaveBeenType = indexType });
+
+      indexValueSSAId := Load(data, function, .{ type = ._Type, _type = indexType }, indexSSAId, false);
+      if (reverse) {
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(.GREATER_OR_EQUAL, indexInfo.kind), boolTypeSSAId, conditionSSAId, indexValueSSAId, indexZero);
+      } else {
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, GetComparisonOp(#char "<", indexInfo.kind), boolTypeSSAId, conditionSSAId, indexValueSSAId, countSSAId);
+      }
+   }
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .BranchConditional, conditionSSAId, bodyLabelSSAId, mergeLabelSSAId);
+
+   // body
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, bodyLabelSSAId);
+   if (!isRange && !isPointerLoop) {
+      elementSSAId := GenerateInstructions(data, nodes.element, general, function, currentFunction, .{ spirvShouldHaveBeenType = itType });
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, itSSAId, elementSSAId);
+   }
+
+   // it of a for * loop is the address of the element, computed once in each iteration (changing it_index in the loop doesnt change it)
+   if (isPointerLoop) {
+      address: PointerValue;
+      address.ssaId = GenerateInstructions(data, nodes.element, general, function, currentFunction, .{ isLValue = true }, spirvType = *address.spirvType);
+      assert(address.spirvType != null && address.spirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(cf));
+      table_set(*data.pointerValues, cf.ident_decl, address);
+   }
+   GenerateInstructions(data, cf.block, general, function, currentFunction);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, continueLabelSSAId);
+
+   // continue
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, continueLabelSSAId);
+   {
+      step := ifx reverse then SpvOp.ISub else SpvOp.IAdd;
+
+      if (!isRange) {
+         indexValueSSAId := Load(data, function, .{ type = ._Type, _type = indexType }, indexSSAId, false);
+         nextIndexSSAId := GetNextSSAId(data);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, step, indexTypeSSAId, nextIndexSSAId, indexValueSSAId, indexOne);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, indexSSAId, nextIndexSSAId);
+      } else {
+         itOne := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = itInfo.kind == .Unsigned, value._s64 = 1, bitSize = itInfo.bitSize } });
+         itValueSSAId := Load(data, function, .{ type = ._Type, _type = itType }, itSSAId, false);
+         nextItSSAId := GetNextSSAId(data);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, step, GetSSAId(data, .{ type = ._Type, _type = itType }), nextItSSAId, itValueSSAId, itOne);
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, itSSAId, nextItSSAId);
+      }
+   }
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Branch, headerLabelSSAId);
+
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, mergeLabelSSAId);
+   EndLoop(data, function);
+   return 0;
+}
+
+GenerateDeclaration :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cd := cast(*Code_Declaration) node;
+
+   // a local constant (X :: 5, or a macro parameter whose argument is constant) doesnt need a variable.
+   // identifiers that refer to it use its value directly. see the .IDENT case
+   if (cd.flags & .IS_CONSTANT) return 0;
+
+   // a macro parameter that is a pointer. the argument is generated with its own type: if it points to a payload, a workgroup or a local variable
+   // spirv doesnt allow storing it so the parameter is the pointer itself (see PointerValue). a pointer to buffer memory is an ordinary variable.
+   macroPointerArgumentSSAId: SSAId;
+   if (cd.type.type == .POINTER && cd.expression != null && cd.expression.kind == .EXTRACT && (cast(*Code_Extract) cd.expression).from == null) {
+      argumentSpirvType: *Type_Info;
+      argumentSSAId := GenerateInstructions(data, cd.expression, general, function, currentFunction, .{ isMacroPointerArgument = true }, spirvType = *argumentSpirvType);
+      assert(argumentSpirvType != null && argumentSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
+
+      if ((cast(*TypeInfoPointer) argumentSpirvType).storageClass != .PhysicalStorageBuffer) {
+         table_set(*data.pointerValues, cd, .{ ssaId = argumentSSAId, spirvType = argumentSpirvType });
+         return 0;
+      }
+
+      macroPointerArgumentSSAId = ConvertValue(data, function, argumentSSAId, argumentSpirvType, GetNodeType(cd), node);
+   }
+
+   variableIdentifier: Identifier = .{ type = .Variable, variable.declaration = cd };
+   variableSSAId := GetSSAId(data, variableIdentifier);
+
+   isWorkgroup := IsWorkgroupVariable(cd);
+
+   variableType := GetNodeType(node);
+
+   storageClass := GetVariableStorageClass(data, variableIdentifier);
+   variableTypeIdentifier: Identifier = .{ type = ._Type, _type = variableType };
+   pointerTypeIdentifier := GetPointerTypeIdentifier(variableType, storageClass);
+
+   // the value is stored where the declaration is, not given as the initializer of OpVariable.
+   // the initializer is applied once when the function starts but a declaration inside a loop must be initialized in every iteration.
+   assert(cd.expression == null || !CompareType(variableType, cast(*Type_Info) RayQuery), "a % cant be copied, declare it and give its address to RayQueryInitialize. loc: %", "RayQuery", GetLocationString(node));
+   if (cd.expression != null) {
+      expressionType := GetNodeType(cd.expression);
+
+      // in the declaration apperantly i dont need to explicitly say the literalShouldHaveBeenType because jai does convert in this case.
+      // but since i cant rely on it because it looks unstable and unfinished im gonna pass the literalShouldHaveBeenType
+      //    - apila, 07/05/26
+      expressionSSAId := macroPointerArgumentSSAId;
+      if (expressionSSAId == 0)  expressionSSAId = GenerateInstructions(data, cd.expression, general, function, currentFunction, .{ spirvShouldHaveBeenType = variableType });
+
+      // if you just declared something you cant be storing into PhysicalStorageBuffer therefore i dont need to use the dedicated Store function
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, variableSSAId, expressionSSAId);
+   } else if (!(cd.flags & .IS_UNINITIALIZED) && !IsNotedInputVariable(cd) && !isWorkgroup && !CompareType(variableType, cast(*Type_Info) RayQuery)) {
+      // like jai, a declaration without a value gets the default values of the struct, or zero.
+      // (IS_UNINITIALIZED is "---" and also the iterators of for loops. the incoming payload is the input of the shader.
+      // a workgroup variable is shared by all the invocations of the workgroup, they would all initialize it.)
+      defaultSSAId := GenerateDefaultValue(data, general, function, currentFunction, variableType);
+      WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, variableSSAId, defaultSSAId);
+   }
+
+   // a declaration can be generated more than once (if it is in a deferred block), it is declared once
+   if (table_contains(*data.declaredVariables, cd)) {
+   } else if (DeclareNotedVariable(data, cd, variableIdentifier)) {
+      // it gets written to "Types, variables and constants" section.
+   } else if (data.isBlockReachable) {
+      TableAdd(*data.declaredVariables, cd, .{});
+
+      // cant be untyped (VUID-StandaloneSpirv-OpTypeUntypedPointerKHR-11417)
+      operands: [..] Any;
+      array_add(*operands, GetSSAId(data, pointerTypeIdentifier));
+      array_add(*operands, variableSSAId);
+      array_add(*operands, storageClass);
+
+      #if SPIRV_BUILDER_TYPE == .String {
+         print_to_builder(general, "; %\n", GetVariableName(variableIdentifier));
+      }
+
+      WriteSingleInstructionIfReachable(
+         general,
+         *data.isBlockReachable,
+         .Variable,
+         .. operands
+      );
+   }
+
+   if (identifierOut != null) identifierOut.* = variableIdentifier;
+   RETURN(variableSSAId, pointerTypeIdentifier._type);
+}
+
+GenerateCast :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   cc := cast(*Code_Cast) node;
+
+   // cast(T) *x is x. see IsCastOfAddressToPointee
+   if (IsCastOfAddressToPointee(cc)) {
+      valueSpirvType: *Type_Info;
+      valueSSAId := GenerateInstructions(data, (cast(*Code_Unary_Operator) cc.expression).subexpression, general, function, currentFunction, additionalData, lValueOut, *valueSpirvType, lValueOutSpirvType, identifierOut);
+      RETURN(valueSSAId, valueSpirvType);
+   }
+
+   castTo := GetNodeType(node);
+   castFrom := GetNodeType(cc.expression);
+
+   expressionSSAId := GenerateInstructions(data, cc.expression, general, function, currentFunction);
+
+   resultSpirvType: *Type_Info;
+   resultSSAId := DoCast(data, function, castTo, castFrom, expressionSSAId, node, spirvType = *resultSpirvType);
+   assert(resultSpirvType != null);
+
+   RETURN(resultSSAId, resultSpirvType);
+}
+
+GenerateCompoundDeclaration :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
+   ccd := cast(*Code_Compound_Declaration) node;
+   source := ccd.declaration_properties.expression;
+   targets := ccd.comma_separated_assignment.arguments;
+
+   if (ccd.operator_type == 0) {
+      if (source != null && source.kind == .PROCEDURE_CALL) GenerateInstructions(data, source, general, function, currentFunction);
+
+      for targets {
+         assert(it.node.kind == .IDENT, "kind: %, loc: %", it.node.kind, GetLocationString(it.node));
+         GenerateInstructions(data, (cast(*Code_Ident) it.node).resolved_declaration, general, function, currentFunction);
+      }
+
+      return 0;
+   }
+
+   assert(ccd.operator_type == #char "=", "% on more than one value is not supported. loc: %", ccd.operator_type, GetLocationString(node));
+   assert(source != null);
+
+   values := NewArray(targets.count, SSAId,, temp);
+   valueTypes := NewArray(targets.count, *Type_Info,, temp);
+
+   if (source.kind == .PROCEDURE_CALL) {
+      header := GetHeaderFromCodeProcedureCall(cast(*Code_Procedure_Call) source);
+      procedureType := cast(*Type_Info_Procedure) header.type;
+      assert(procedureType.return_types.count >= targets.count, "loc: %", GetLocationString(node));
+
+      GenerateInstructions(data, source, general, function, currentFunction);
+      found, structSSAId := table_find(*data.multipleReturnValues, cast(*Code_Procedure_Call) source);
+      assert(found);
+
+      for targets {
+         valueTypes[it_index] = GetMultipleReturnValueType(procedureType, it_index);
+         values[it_index] = EmitCompositeExtract(data, function, .{ type = ._Type, _type = valueTypes[it_index] }, structSSAId, .[it_index]);
+      }
+   } else {
+      assert(source.kind == .COMMA_SEPARATED_ARGUMENTS, "kind: %, loc: %", source.kind, GetLocationString(source));
+      csa := cast(*Code_Comma_Separated_Arguments) source;
+      assert(csa.arguments.count == targets.count, "loc: %", GetLocationString(node));
+
+      for csa.arguments {
+         values[it_index] = GenerateInstructions(data, it.node, general, function, currentFunction, .{ spirvShouldHaveBeenType = GetNodeType(targets[it_index].node) }, spirvType = *valueTypes[it_index]);
+      }
+   }
+
+   for targets {
+      targetSpirvType: *Type_Info;
+      targetSSAId := GenerateInstructions(data, it.node, general, function, currentFunction, .{ isLValue = true }, spirvType = *targetSpirvType);
+      assert(targetSpirvType != null && targetSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(it.node));
+      tip := cast(*TypeInfoPointer) targetSpirvType;
+
+      valueSSAId := ConvertValue(data, function, values[it_index], valueTypes[it_index], tip.pointerTo, it.node);
+      Store(data, function, targetSSAId, valueSSAId, tip.storageClass == .PhysicalStorageBuffer, tip.pointerTo);
+   }
+
+   return 0;
 }
 
 IsPayloadVariable :: (cd: *Code_Declaration) -> bool {
@@ -10892,605 +11002,39 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
       // using x; the members of x are in scope until the end of the block
       case .USING;
-         cu := cast(*Code_Using) node;
-         base := cu.expression;
-
-         // using x: T; declares x
-         if (base.kind == .DECLARATION) {
-            declaration := cast(*Code_Declaration) base;
-            DetermineCodeNodeTypes(data, declaration);
-
-            ident := New(Code_Ident);
-            ident.base = declaration.base;
-            ident.kind = .IDENT;
-            ident.type = declaration.type;
-            ident.name = declaration.name;
-            ident.resolved_declaration = declaration;
-            base = ident;
-         }
-
-         DetermineCodeNodeTypes(data, base);
-         array_add(*data.usingStack, base);
-
-         TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-         return cast(*Type_Info) void;
+         return DetermineUsingType(data, node);
 
       case .LITERAL;
-         cl := cast(*Code_Literal) node;
-
-         // maybe i should determine the type of parent nodes from somewhere else.
-         // like for example if it is a declaration then from the decalration notes.
-         // maybe for this kind of things i need a seperate entry in the CompilationData.codeNodeTypes
-         // that says that i should ignore the type of this node.
-         //       - apila, 25/04/26
-         // null. a pointer like any other pointer that doesnt say otherwise, PhysicalStorageBuffer
-         if (cl.value_type == .POINTER) {
-            type := ConvertJaiTypeIfNecessary(node.type, string.[]);
-            TableAdd(*data.codeNodeTypes, node, type);
-            return type;
-         }
-
-         // this is not sufficient.
-         // if struct has members of type pointers then to be able to correctly determine the type of the member
-         // i need to pass the Type_Info_Struct to the members through DetermineCodeNodeTypes.
-         //    - apila, 26/04/26
-         if (cl.value_type == .STRUCT) {
-            if (node.type.type == .STRUCT) return DetermineStructLiteralTypes(data, cl, xx node.type);
-
-            // untyped and not nested in a struct literal (for example inside an array literal). the type is not known here.
-            for cl.struct_literal_info.arguments {
-               DetermineCodeNodeTypes(data, it);
-            }
-         } else if (cl.value_type == .ARRAY) {
-            // untyped struct literals in an array literal (f32x2.[.{1, 2}]) get the type of the elements
-            elementType: *Type_Info;
-            if (node.type.type == .ARRAY) elementType = (cast(*Type_Info_Array) node.type).element_type;
-
-            for cl.array_literal_info.array_members {
-               if (elementType != null && elementType.type == .STRUCT && it.kind == .LITERAL && (cast(*Code_Literal) it).value_type == .STRUCT && it.type.type != .STRUCT) {
-                  DetermineStructLiteralTypes(data, xx it, xx elementType);
-               } else {
-                  DetermineCodeNodeTypes(data, it);
-               }
-            }
-         }
-
-         TableAdd(*data.codeNodeTypes, node, node.type);
-         return node.type;
+         return DetermineLiteralType(data, node);
 
       // this case only called if accessing single variable (no access chains)
       // so it must be a variable declared somewhere
       case .IDENT;
-         ci := cast(*Code_Ident) node;
-         declaration := ci.resolved_declaration;
-
-         // the jai compiler doesnt resolve identifiers inside untyped struct literals (resolved_declaration is null, only the name is there).
-         // resolving it by name would mean reimplementing jai's scope rules so instead the user has to write the type.
-         assert(declaration != null, "the jai compiler didnt resolve identifier %. this happens when it is used inside an untyped struct literal (.{ ... }), which is not supported. write the type of the literal instead, for example f32x4.{ ... }. loc: %", ci.name, GetLocationString(ci));
-
-         // a member of a struct that is in scope because of using
-         memberOf := GetStructOfMemberDeclaration(declaration);
-         if (memberOf != null && !(declaration.flags & .IS_CONSTANT)) {
-            access := GetUsingAccess(data, ci, memberOf);
-            type := DetermineCodeNodeTypes(data, access);
-            TableAdd(*data.usingAccesses, ci, access);
-            TableAdd(*data.codeNodeTypes, node, type);
-            return type;
-         }
-
-         builtinIndex := GetBuiltinVariableIndex(.{ type = .Variable, variable.declaration = declaration });
-         if (builtinIndex != -1) {
-            builtin := BUILTIN_VARIABLES[builtinIndex];
-            assert(IsBuiltinVariableAvailable(builtin, data.shaderType), "% is not available in % shaders. loc: %", builtin.name, data.shaderType, GetLocationString(ci));
-         }
-
-         declarationType := DetermineCodeNodeTypes(data, declaration);
-
-         // a global variable is one this module declares (images, the builtins...) or one whose note says which memory it is in.
-         // a variable that is private to an invocation has to be declared in the shader.
-         if ((declaration.flags & .IS_GLOBAL) && !(declaration.flags & .IS_CONSTANT) && !IsModuleGlobalVariable(declaration)) {
-            if (!IsNotedVariable(declaration)) {
-               assert(false, "% is a global variable without a note. a global variable has to be @%, @%, @%, @%, @% or @%, other variables have to be declared in the shader. loc: %, declaration: %", ci.name, RAY_PAYLOAD_QUALIFIER, INCOMING_RAY_PAYLOAD_QUALIFIER, WORKGROUP_QUALIFIER, HIT_ATTRIBUTE_QUALIFIER, CALLABLE_DATA_QUALIFIER, INCOMING_CALLABLE_DATA_QUALIFIER, GetLocationString(ci), GetLocationString(declaration));
-            }
-
-            if (!table_contains(*data.declaredVariables, declaration))  DeclareNotedVariable(data, declaration, .{ type = .Variable, variable.declaration = declaration });
-         }
-
-         //
-         // dirty way to do what i want to do.
-         // what i want to do:
-         // since i now have TypeInfoDecorationlessCopyOfStruct, i need to update the types accordingly.
-         // simply i want to get the type from its declaration but .DECLARATION case in this function assumes that declaration is done inside the shader function
-         // because this function determines code node types only within the shader functions. so .DECLARATION creates a TypeInfoDecorationlessCopyOfStruct when it sees a struct.
-         // but this is not true for builtin types like __Image__. and in the .DECLARATION i don't have a way to know if the declaration is within a function if i were to do something like:
-         //       newNodeType := DetermineCodeNodeTypes(data, declaration);
-         // so my assumption here is that if the type of declaration is found in data.codeNodeTypes, then it means it is a local declaration and use the type of the declration, otherwise
-         // i assume that it is a variable with intrinsic type, so i just used the old code that used to work but im not sure about unwinding. idk man.
-         //
-         //                                     - apila, 07/06/26
-         //
-
-         // found, declarationType := table_find(*data.codeNodeTypes, declaration);
-         // newNodeType: *Type_Info;
-         // if (found) {
-         //    newNodeType = declarationType;
-         // } else {
-         //    //
-         //    // unwinding here because now matrices are #type,distinct.
-         //    // and i want to treat them as if they were normal arrays in the code generation.
-         //    // but they are distinct types as in a f32x4x4 is not the same as [4] f32x4 if user declares a variable of this type.
-         //    // one of them is OpTypeMatrix the other is OpTypeArray.
-         //    // and if you consider user defined types (types that are not intrinsic) i think unwinding has no problem with that Clueless.
-         //    //
-         //    //             - apila, 07/05/26
-         //    //
-         //    nodeTypeUnwinded := UnwindVariantsUpToDistinct(node.type);
-         //    newNodeType = ConvertJaiTypeIfNecessary(nodeTypeUnwinded, declaration.notes);
-
-         //    // im recursing into the expression here if it is constant
-         //    if (declaration.flags & .IS_CONSTANT) {
-         //       DetermineCodeNodeTypes(data, declaration.expression);
-         //    }
-         // }
-
-         TableAdd(*data.codeNodeTypes, node, declarationType);
-         return declarationType;
+         return DetermineIdentType(data, node);
 
       case .BINARY_OPERATOR;
-         cbo := cast(*Code_Binary_Operator) node;
+         return DetermineBinaryOperatorType(data, node);
 
-         if cbo.operator_type == {
-            case .TIMES_ASSIGN;        #through;
-            case .DIV_ASSIGN;          #through;
-            case .MOD_ASSIGN;          #through;
-            case .MINUS_ASSIGN;        #through;
-            case .PLUS_ASSIGN;         #through;
-            case .BITWISE_AND_ASSIGN;  #through;
-            case .BITWISE_OR_ASSIGN;   #through;
-            case .BITWISE_XOR_ASSIGN;  #through;
-            case .SHIFT_LEFT_ASSIGN;   #through;
-            case .SHIFT_RIGHT_ASSIGN;  #through;
-            case #char "=";
-               _ := DetermineCodeNodeTypes(data, cbo.left);
-               rightType := DetermineCodeNodeTypes(data, cbo.right);
-
-               TableAdd(*data.codeNodeTypes, node, rightType);
-               return rightType;
-
-            case #char "+"; #through;
-            case #char "-"; #through;
-            case #char "*"; #through;
-            case #char "/"; #through;
-            case #char "<"; #through;
-            case #char ">"; #through;
-            case #char "%"; #through;
-            case #char "&"; #through;
-            case #char "|"; #through;
-            case #char "^"; #through;
-            case .SHIFT_LEFT;       #through;
-            case .SHIFT_RIGHT;      #through;
-            case .LESS_OR_EQUAL;    #through;
-            case .GREATER_OR_EQUAL; #through;
-            case .IS_EQUAL;         #through;
-            case .IS_NOT_EQUAL;     #through;
-            case .LOGICAL_AND;      #through;
-            case .LOGICAL_OR;
-               rightType := DetermineCodeNodeTypes(data, cbo.right);
-               leftType := DetermineCodeNodeTypes(data, cbo.left);
-
-               if (rightType.type == TYPE_INFO_POINTER_TAG && leftType.type == TYPE_INFO_POINTER_TAG) {
-                  tipRight := cast(*TypeInfoPointer) rightType;
-                  tipLeft := cast(*TypeInfoPointer) leftType;
-
-                  assert(tipLeft.storageClass == tipRight.storageClass, "tipLeft.storageClass: %, tipRight.storageClass: %", tipLeft.storageClass, tipRight.storageClass);
-
-                  // p - q is the number of elements between them (s64)
-                  if (cbo.operator_type == #char "-") {
-                     TableAdd(*data.codeNodeTypes, node, node.type);
-                     return node.type;
-                  }
-
-                  TableAdd(*data.codeNodeTypes, node, rightType);
-                  return rightType;
-               }
-
-               if (rightType.type != TYPE_INFO_POINTER_TAG && leftType.type != TYPE_INFO_POINTER_TAG) {
-                  TableAdd(*data.codeNodeTypes, node, node.type);
-                  return node.type;
-               }
-
-               // one of them pointer the other is not
-               pointerType := ifx rightType.type == TYPE_INFO_POINTER_TAG then rightType else leftType;
-               TableAdd(*data.codeNodeTypes, node, pointerType);
-               return pointerType;
-
-            case #char ".";
-               // E.A (a value of an enum) or Module.x (named module). the type is the type of the right side.
-               if (cbo.left.type != null && cbo.left.type.type == .TYPE) {
-                  assert(cbo.right.kind == .IDENT, "kind: %", cbo.right.kind);
-                  ci := cast(*Code_Ident) cbo.right;
-                  rightType := DetermineCodeNodeTypes(data, ci.resolved_declaration);
-
-                  // normally i dont add the type of the right node to the table since i dont use it when generating instructions.
-                  // but this is an exception, i do use it.
-                  TableAdd(*data.codeNodeTypes, cbo.right, rightType);
-
-                  TableAdd(*data.codeNodeTypes, node, rightType);
-                  return rightType;
-               }
-
-               leftType := DetermineCodeNodeTypes(data, cbo.left);
-
-               if leftType.type == {
-                  case TYPE_INFO_POINTER_TAG; #through;
-                  case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG; #through;
-                  case .ARRAY; #through;
-                  case .STRUCT; {
-                     tis: *Type_Info_Struct;
-                     if leftType.type == {
-                        case TYPE_INFO_POINTER_TAG; {
-                           tip := cast(*TypeInfoPointer) leftType;
-                           if (tip.pointerTo.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG) {
-                              tis = (cast(*TypeInfoDecorationlessCopyOfStruct) tip.pointerTo).copyOf;
-                           } else {
-                              assert(tip.pointerTo.type == .STRUCT, "type: %, loc: %", TypeName(tip.pointerTo), GetLocationString(node));
-                              tis = xx tip.pointerTo;
-                           }
-                        }
-
-                        case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG; {
-                           tidcos := cast(*TypeInfoDecorationlessCopyOfStruct) leftType;
-                           tis = tidcos.copyOf;
-                        }
-
-                        case .STRUCT; {
-                           tis = xx leftType;
-                        }
-
-                        // array.data or array.count
-                        case .ARRAY; {
-                           tia := leftType.(*Type_Info_Array);
-                           tis = GetArrayViewTypeInfo(tia.element_type);
-                        }
-
-                        case; assert(false);
-                     }
-
-                     assert(cbo.right.kind == .IDENT, "cbo.right.kind: %", cbo.right.kind);
-                     right := cast(*Code_Ident) cbo.right;
-
-                     path, member := GetMemberPath(tis, right.name);
-                     assert(path.count > 0, "% is not a member of %. loc: %", right.name, tis.name, GetLocationString(right));
-
-                     notes := member.notes;
-                     newMemberType := ConvertJaiTypeIfNecessary(member.type, notes);
-                     pointsToDecorationless := leftType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) leftType).pointerTo.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG;
-                     if (leftType.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG || pointsToDecorationless) newMemberType = GetFunctionStorageClassType(newMemberType);
-
-                     TableAdd(*data.codeNodeTypes, node, newMemberType);
-                     return newMemberType;
-                  }
-
-                  case; assert(false, "type: %", leftType.type);
-               }
-
-            case .ARRAY_SUBSCRIPT;
-               leftType := DetermineCodeNodeTypes(data, cbo.left);
-               _ := DetermineCodeNodeTypes(data, cbo.right);
-
-               leftType = UnwindVariantsAllTheWay(leftType);
-
-               if leftType.type == {
-                  case .ARRAY; {
-                     tia := cast(*Type_Info_Array) leftType;
-                     TableAdd(*data.codeNodeTypes, node, tia.element_type);
-                     return tia.element_type;
-                  }
-
-                  case TYPE_INFO_POINTER_TAG; {
-                     tip := cast(*TypeInfoPointer) leftType;
-                     TableAdd(*data.codeNodeTypes, node, tip.pointerTo);
-                     return tip.pointerTo;
-                  }
-
-                  case TYPE_INFO_RUNTIME_ARRAY_TAG; {
-                     tira := cast(*TypeInfoRuntimeArray) leftType;
-                     TableAdd(*data.codeNodeTypes, node, tira.elementType);
-                     return tira.elementType;
-                  }
-
-                  case; assert(false, "type: %", leftType.type); return null;
-               }
-
-
-            case; assert(false, "operator: %", cbo.operator_type);
-         }
-
-      case .PROCEDURE_HEADER; {
-         cph := cast(*Code_Procedure_Header) node;
-
-         // a procedure is being typed while it is being typed: it calls itself (maybe through other procedures)
-         for data.proceduresBeingTyped {
-            assert(it != cph, "% calls itself (maybe through other procedures). recursion is not allowed in spirv. loc: %", cph.name, GetLocationString(cph));
-         }
-         array_add(*data.proceduresBeingTyped, cph);
-         defer data.proceduresBeingTyped.count -= 1;
-
-         // jai doesnt allow adding notes to the Code_Declaration if it is an argument.
-         // thats why i am doing this hack here. i just add the "payload" note to the TraceRay payload.
-         //          - apila, 08/09/26
-         if(IsTraceRayFunction(cph)) {
-            // last argument is the payload
-            assert(cph.arguments[cph.arguments.count - 1].type.type == .POINTER);
-
-            notes := NewArray(1, *Code_Note);
-            notes[0] = New(Code_Note);
-            notes[0].text = RAY_PAYLOAD_QUALIFIER;
-            cph.arguments[cph.arguments.count - 1].notes = notes;
-         }
-
-         for cph.arguments {
-            DetermineCodeNodeTypes(data, it);
-         }
-
-         for cph.returns {
-            DetermineCodeNodeTypes(data, it);
-         }
-
-         assert(cph.body_or_null != null, "loc: %:%", node.location.enclosing_load.fully_pathed_filename, node.location);
-         assert(cph.body_or_null.block != null);
-         DetermineCodeNodeTypes(data, cph.body_or_null.block);
-
-         TableAdd(*data.codeNodeTypes, node, node.type);
-         return node.type;
-      }
+      case .PROCEDURE_HEADER;
+         return DetermineProcedureHeaderType(data, node);
 
       case .PROCEDURE_CALL;
-         cpc := cast(*Code_Procedure_Call) node;
-         assert(cpc.resolved_procedure_expression != null, "loc: %", cpc.location);
-         assert(cpc.resolved_procedure_expression.kind == .PROCEDURE_HEADER || // constant function
-                cpc.resolved_procedure_expression.kind == .IDENT || // not constant function
-                cpc.resolved_procedure_expression.kind == .BINARY_OPERATOR, // namespaces
-                "kind: %", cpc.resolved_procedure_expression.kind
-         );
-
-         header := GetHeaderFromCodeProcedureCall(cpc);
-
-         if (IsMacroProcedure(header)) {
-            expansion := cpc.macro_expansion_block;
-            assert(expansion != null, "macro call has no expansion: %", header.name);
-            array_add(*data.macroExpansionCalls, cpc);
-            defer data.macroExpansionCalls.count -= 1;
-            DetermineCodeNodeTypes(data, expansion);
-
-            // the type of the call is the declared return type of the macro, not the type of the expression returned. (return 0 in a macro that returns f32)
-            returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
-            returnType := ifx returnTypeIdentifier.type == .Void then cast(*Type_Info) void else returnTypeIdentifier._type;
-            TableAdd(*data.codeNodeTypes, node, returnType);
-            return returnType;
-         }
-
-         // DebugPrint(format, ..args): the format is a constant string and the arguments are cast to Any. their types are the types of what is cast (see GenerateDebugPrint)
-         if (IsDebugPrint(header)) {
-            for GetDebugPrintArguments(cpc)  DetermineCodeNodeTypes(data, it);
-            TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-            return cast(*Type_Info) void;
-         }
-
-         // recurse into the procedure
-         DetermineCodeNodeTypes(data, header);
-
-         for cpc.arguments_unsorted {
-            DetermineCodeNodeTypes(data, it.expression);
-         }
-
-         // the arguments in the order of the parameters, with the default values filled in. these are the ones generated
-         for cpc.arguments_sorted {
-            DetermineCodeNodeTypes(data, it);
-         }
-
-         if (header.returns.count == 0) {
-            TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-            return cast(*Type_Info) void;
-         }
-
-         // recursed in to header above which then recurses into the arguments and the returns
-         // return count here is 1 as asserted above
-         returnType := GetNodeType(header.returns[0]);
-
-         TableAdd(*data.codeNodeTypes, node, returnType);
-         return returnType;
+         return DetermineProcedureCallType(data, node);
 
       case .DECLARATION;
-         cd := cast(*Code_Declaration) node;
-
-         // a declaration of a type (S :: struct {}), a procedure or code (the body of a for_expansion) is not a value
-         if ((cd.flags & .IS_CONSTANT) && (cd.type.type == .TYPE || cd.type.type == .CODE || cd.type.type == .PROCEDURE)) {
-            TableAdd(*data.codeNodeTypes, node, cd.type);
-            return cd.type;
-         }
-
-         if (cd.expression != null) {
-            DetermineCodeNodeTypes(data, cd.expression);
-         }
-
-         // some of the intrinsics
-         if (false) {
-         } else if (cd == meshPrimitivesVariableIdentifier.variable.declaration) {
-            assert(data.shaderType == .Mesh, "% only exists in mesh shaders. loc: %", cd.name, GetLocationString(cd));
-            tia := CreateTypeInfoArrayFixedSize(type_info(MeshPerPrimitive), data.maxPrimitives);
-            TableAdd(*data.codeNodeTypes, node, tia);
-            return tia;
-         } else if (cd == meshVerticesVariableIdentifier.variable.declaration) {
-            tia := CreateTypeInfoArrayFixedSize(type_info(MeshPerVertex), data.maxVertices);
-            TableAdd(*data.codeNodeTypes, node, tia);
-            return tia;
-         } else if (GetMeshPrimitiveIndicesIndex(.{ type = .Variable, variable.declaration = cd }) != -1) {
-            indicesIndex := GetMeshPrimitiveIndicesIndex(.{ type = .Variable, variable.declaration = cd });
-            assert(data.shaderType == .Mesh, "% only exists in mesh shaders", cd.name);
-            assert(indicesIndex == cast(int) data.primitiveTopology, "% is for % mesh shaders, this one outputs %", cd.name, MESH_PRIMITIVE_INDICES[indicesIndex].topology, data.primitiveTopology);
-
-            tia := CreateTypeInfoArrayFixedSize(GetArrayElementType(cd), data.maxPrimitives);
-            TableAdd(*data.codeNodeTypes, node, tia);
-            return tia;
-         } else if (cd == data.meshVertexOutVariableIdentifier.variable.declaration) {
-            elementType := GetArrayElementType(cd);
-            tia := CreateTypeInfoArrayFixedSize(elementType, data.maxVertices);
-            TableAdd(*data.codeNodeTypes, node, tia);
-            return tia;
-         } else if (cd == data.meshPrimitiveOutVariableIdentifier.variable.declaration) {
-            elementType := GetArrayElementType(cd);
-            tia := CreateTypeInfoArrayFixedSize(elementType, data.maxPrimitives);
-            TableAdd(*data.codeNodeTypes, node, tia);
-            return tia;
-         }
-
-         type := ConvertJaiTypeIfNecessary(cd.type, cd.notes);
-         storageClass := GetVariableStorageClass(data, .{ type = .Variable, variable.declaration = cd });
-
-         // workgroup variables dont have an explicit layout either (that would need WorkgroupMemoryExplicitLayoutKHR)
-         isLocalDeclaration := storageClass == .Function || storageClass == .Workgroup;
-
-         if (storageClass == .Workgroup) {
-            assert(data.shaderType == .Compute || data.shaderType == .Mesh || data.shaderType == .Task, "workgroup variables only exist in compute, mesh and task shaders. loc: %", GetLocationString(node));
-            assert(cd.expression == null, "a workgroup variable cant be initialized, it is shared by all the invocations of the workgroup. loc: %", GetLocationString(node));
-         }
-
-         // i am not sure but this might need to be recursive.
-         // that is if a member is also a struct i might need to recurse into it too. idk
-         //          - apila, 07/06/26
-         //
-         // since i dont have a proper vector type, i have to manually check, again.
-         //          - apila, 07/06/26
-         if (isLocalDeclaration) {
-            type = GetFunctionStorageClassType(type);
-         }
-
-         TableAdd(*data.codeNodeTypes, node, type);
-         return type;
+         return DetermineDeclarationType(data, node);
 
       case .CAST;
-         cc := cast(*Code_Cast) node;
-
-         // cast(T) *x is x. see IsCastOfAddressToPointee
-         if (IsCastOfAddressToPointee(cc)) {
-            type := DetermineCodeNodeTypes(data, (cast(*Code_Unary_Operator) cc.expression).subexpression);
-            TableAdd(*data.codeNodeTypes, node, type);
-            return type;
-         }
-
-         castFrom := DetermineCodeNodeTypes(data, cc.expression);
-
-         // you cant change storage classes with casts
-         // so the resulting pointer has the same storage class as the casted pointer
-         if (cc.type.type == .POINTER) {
-            assert(castFrom.type == TYPE_INFO_POINTER_TAG, "type: %", castFrom.type);
-            tipCastFrom := cast(*TypeInfoPointer) castFrom;
-
-            indirectionLevel := GetIndirectionLevelSpirvPointer(tipCastFrom);
-            newPointers := NewArray(indirectionLevel, TypeInfoPointer);
-
-            // pointerTo
-            for 0..indirectionLevel - 2 {
-               current := newPointers[it];
-               next := newPointers[it + 1];
-
-               current.pointerTo = *next;
-            }
-            newPointers[newPointers.count - 1].pointerTo = GetBaseType(cc.type);
-
-            // storage classes
-            storageClasses := FlattenStorageClasses(castFrom);
-            assert(storageClasses.count == newPointers.count, "storageClasses.count: %, newPointers.count: %", storageClasses.count, newPointers.count);
-
-            for storageClasses {
-               newPointers[it_index].storageClass = it;
-            }
-
-            TableAdd(*data.codeNodeTypes, node, *newPointers[0]);
-            return *newPointers[0];
-         }
-
-         TableAdd(*data.codeNodeTypes, node, cc.type);
-         return cc.type;
+         return DetermineCastType(data, node);
 
       case .RETURN;
-         cr := cast(*Code_Return) node;
-         for cr.arguments_unsorted {
-            DetermineCodeNodeTypes(data, it.expression);
-         }
+         return DetermineReturnType(data, node);
 
-         for cr.arguments_sorted {
-            DetermineCodeNodeTypes(data, it);
-         }
+      case .IF;
+         return DetermineIfType(data, node);
 
-         // return statement doesnt have any type
-         TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-         return cast(*Type_Info) void;
-
-      case .IF; {
-         ci := cast(*Code_If) node;
-
-         if (ci.if_flags & .IS_STATIC) {
-            takenBlock := GetStaticIfTakenBlock(ci);
-            if (takenBlock != null) DetermineCodeNodeTypes(data, takenBlock);
-
-            TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-            return cast(*Type_Info) void;
-         }
-
-         if (ci.if_flags & .IS_SWITCH_STATEMENT) {
-            DetermineCodeNodeTypes(data, ci.condition);
-            for GetSwitchCases(ci) {
-               if (it.condition != null) DetermineCodeNodeTypes(data, it.condition);
-               DetermineCodeNodeTypes(data, it.then_block);
-            }
-
-            TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-            return cast(*Type_Info) void;
-         }
-
-         if (ci.if_flags & .IS_IFX) {
-            assert(ci.then_block != null && ci.else_block != null, "ifx without else is not supported. loc: %", GetLocationString(node));
-            DetermineCodeNodeTypes(data, ci.condition);
-            DetermineCodeNodeTypes(data, ci.then_block);
-            DetermineCodeNodeTypes(data, ci.else_block);
-
-            TableAdd(*data.codeNodeTypes, node, ci.type);
-            return ci.type;
-         }
-
-         if (ci.condition != null) {
-            DetermineCodeNodeTypes(data, ci.condition);
-         }
-
-         if (ci.then_block != null) {
-            DetermineCodeNodeTypes(data, ci.then_block);
-         }
-
-         if (ci.else_block != null) {
-            DetermineCodeNodeTypes(data, ci.else_block);
-         }
-
-         // this prolly needs to change when i support ifx     - apila, 07/05/26
-         TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-         return cast(*Type_Info) void;
-      }
-
-      case .WHILE; {
-         cw := cast(*Code_While) node;
-
-         if (cw.condition) {
-            DetermineCodeNodeTypes(data, cw.condition);
-         }
-
-         if (cw.block) {
-            DetermineCodeNodeTypes(data, cw.block);
-         }
-
-         TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-         return cast(*Type_Info) void;
-      }
+      case .WHILE;
+         return DetermineWhileType(data, node);
 
       case .LOOP_CONTROL; {
          clc := cast(*Code_Loop_Control) node;
@@ -11499,142 +11043,14 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
          return cast(*Type_Info) void;
       }
 
-      case .UNARY_OPERATOR; {
-         cuo := cast(*Code_Unary_Operator) node;
-         assert(cuo.subexpression != null);
+      case .UNARY_OPERATOR;
+         return DetermineUnaryOperatorType(data, node);
 
-         subexpressionType := DetermineCodeNodeTypes(data, cuo.subexpression);
+      case .FOR;
+         return DetermineForType(data, node);
 
-         resultType: *Type_Info;
-         if cuo.operator_type == {
-            case #char "-"; #through;
-            case #char "!"; #through;
-            case #char "~"; {
-               resultType = cuo.type;
-            }
-
-            // .A, a value of an enum whose type is inferred
-            case #char "."; {
-               resultType = subexpressionType;
-            }
-
-            case .POINTER_DEREFERENCE; #through;
-            case .POSTFIX_DEREFERENCE; {
-               assert(subexpressionType.type == TYPE_INFO_POINTER_TAG, "can only derefence a pointer! type: %", subexpressionType.type);
-
-               tip := cast(*TypeInfoPointer) subexpressionType;
-               resultType = tip.pointerTo;
-            }
-
-            case #char "*"; {
-               tip := New(TypeInfoPointer);
-
-               //
-               // how can i know the storage class of the subexpression?
-               // idk. my brain not working at the moment. but today i learned that having a pointer to something stored in Function storage class is not valid
-               // so here im gonna say it is Physical which means pointer stuff only works if the pointer points to somewhere in Physical storage class. this is the restriction of my compiler from now on.
-               //
-               //          - apila, 29/05/26
-               //
-               // it is the storage class of the memory the subexpression is in (see GetLValueStorageClass). taking the address of a local variable is still an error, see the .UNARY_OPERATOR case of GenerateInstructions.
-               //
-
-               tip.storageClass = GetLValueStorageClass(data, cuo.subexpression);
-               tip.pointerTo = subexpressionType;
-               resultType = tip;
-            }
-
-            case; assert(false, "not yet implemented! type: %", cuo.operator_type);
-         }
-
-         TableAdd(*data.codeNodeTypes, node, resultType);
-         return resultType;
-      }
-
-      case .FOR; {
-         cf := cast(*Code_For) node;
-
-         // a for_expansion. the compiler gives its expansion, with the body of the loop inserted
-         if (cf.macro_expansion_procedure_call != null) {
-            DetermineCodeNodeTypes(data, cf.macro_expansion_procedure_call);
-            TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-            return cast(*Type_Info) void;
-         }
-
-         DetermineCodeNodeTypes(data, cf.iteration_expression);
-         if (cf.iteration_expression_right != null) DetermineCodeNodeTypes(data, cf.iteration_expression_right);
-
-         nodes := GetForLoopNodes(data, cf);
-
-         // the array is the address of the expression or a variable that has its value (see LoopBase)
-         if (nodes.baseDeclaration != null) {
-            loopBase: LoopBase;
-            loopBase.isLValue = IsLValueExpression(data, cf.iteration_expression);
-
-            baseType := GetNodeType(cf.iteration_expression);
-            if (loopBase.isLValue) {
-               loopBase.storageClass = GetLValueStorageClass(data, cf.iteration_expression);
-            } else {
-               loopBase.storageClass = .Function;
-               baseType = GetFunctionStorageClassType(baseType);
-            }
-
-            TableAdd(*data.loopBases, nodes.baseDeclaration, loopBase);
-            TableAdd(*data.codeNodeTypes, nodes.baseDeclaration, baseType);
-            TableAdd(*data.codeNodeTypes, nodes.base, baseType);
-         }
-
-         if (nodes.indexDeclaration != null) DetermineCodeNodeTypes(data, nodes.indexDeclaration);
-         if (nodes.element != null) DetermineCodeNodeTypes(data, nodes.element);
-         if (nodes.count != null)   DetermineCodeNodeTypes(data, nodes.count);
-
-         //
-         // for * array: it is a pointer to the element. it is not a variable, it is the address of array[it_index] (a pointer to a local variable cant be stored in spirv).
-         // where it is used it is generated as the address, and it.member as array[it_index].member (see DoDotsAndArraySubscripts).
-         //
-         if (cf.for_flags & .POINTER) {
-            assert(nodes.element != null, "for * over a range. loc: %", GetLocationString(cf));
-
-            pointerType := New(TypeInfoPointer);
-            pointerType.pointerTo = GetNodeType(nodes.element);
-            pointerType.storageClass = GetLValueStorageClass(data, nodes.element);
-
-            TableAdd(*data.codeNodeTypes, cf.ident_decl, pointerType);
-            TableAdd(*data.pointerIterators, cf.ident_decl, cf);
-         } else {
-            DetermineCodeNodeTypes(data, cf.ident_decl);
-         }
-
-         DetermineCodeNodeTypes(data, cf.block);
-
-         TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
-         return cast(*Type_Info) void;
-      }
-
-      case .EXTRACT; {
-         ce := cast(*Code_Extract) node;
-
-         // a value of a compound declaration: a, b := F();  or  a, b := x, y;
-         if (ce.from != null) {
-            type: *Type_Info;
-            if (ce.from.kind == .COMMA_SEPARATED_ARGUMENTS) {
-               type = DetermineCodeNodeTypes(data, (cast(*Code_Comma_Separated_Arguments) ce.from).arguments[ce.index].node);
-            } else {
-               assert(ce.from.kind == .PROCEDURE_CALL, "kind: %, loc: %", ce.from.kind, GetLocationString(node));
-               DetermineCodeNodeTypes(data, ce.from);
-               header := GetHeaderFromCodeProcedureCall(cast(*Code_Procedure_Call) ce.from);
-               type = GetMultipleReturnValueType(cast(*Type_Info_Procedure) header.type, ce.index);
-            }
-
-            TableAdd(*data.codeNodeTypes, node, type);
-            return type;
-         }
-
-         argument := GetMacroExpansionArgument(data, ce.index);
-         type := DetermineCodeNodeTypes(data, argument);
-         TableAdd(*data.codeNodeTypes, node, type);
-         return type;
-      }
+      case .EXTRACT;
+         return DetermineExtractType(data, node);
 
       // a, b := F();   a, b := x, y;   a, b = b, a;
       case .COMPOUND_DECLARATION; {
@@ -11686,6 +11102,753 @@ DetermineCodeNodeTypes :: (data: *CompilationData, node: *Code_Node) -> *Type_In
 
    assert(false, "didnt return! kind: %", node.kind);
    return null;
+}
+
+DetermineUsingType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cu := cast(*Code_Using) node;
+   base := cu.expression;
+
+   // using x: T; declares x
+   if (base.kind == .DECLARATION) {
+      declaration := cast(*Code_Declaration) base;
+      DetermineCodeNodeTypes(data, declaration);
+
+      ident := New(Code_Ident);
+      ident.base = declaration.base;
+      ident.kind = .IDENT;
+      ident.type = declaration.type;
+      ident.name = declaration.name;
+      ident.resolved_declaration = declaration;
+      base = ident;
+   }
+
+   DetermineCodeNodeTypes(data, base);
+   array_add(*data.usingStack, base);
+
+   TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+   return cast(*Type_Info) void;
+}
+
+DetermineLiteralType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cl := cast(*Code_Literal) node;
+
+   // maybe i should determine the type of parent nodes from somewhere else.
+   // like for example if it is a declaration then from the decalration notes.
+   // maybe for this kind of things i need a seperate entry in the CompilationData.codeNodeTypes
+   // that says that i should ignore the type of this node.
+   //       - apila, 25/04/26
+   // null. a pointer like any other pointer that doesnt say otherwise, PhysicalStorageBuffer
+   if (cl.value_type == .POINTER) {
+      type := ConvertJaiTypeIfNecessary(node.type, string.[]);
+      TableAdd(*data.codeNodeTypes, node, type);
+      return type;
+   }
+
+   // this is not sufficient.
+   // if struct has members of type pointers then to be able to correctly determine the type of the member
+   // i need to pass the Type_Info_Struct to the members through DetermineCodeNodeTypes.
+   //    - apila, 26/04/26
+   if (cl.value_type == .STRUCT) {
+      if (node.type.type == .STRUCT) return DetermineStructLiteralTypes(data, cl, xx node.type);
+
+      // untyped and not nested in a struct literal (for example inside an array literal). the type is not known here.
+      for cl.struct_literal_info.arguments {
+         DetermineCodeNodeTypes(data, it);
+      }
+   } else if (cl.value_type == .ARRAY) {
+      // untyped struct literals in an array literal (f32x2.[.{1, 2}]) get the type of the elements
+      elementType: *Type_Info;
+      if (node.type.type == .ARRAY) elementType = (cast(*Type_Info_Array) node.type).element_type;
+
+      for cl.array_literal_info.array_members {
+         if (elementType != null && elementType.type == .STRUCT && it.kind == .LITERAL && (cast(*Code_Literal) it).value_type == .STRUCT && it.type.type != .STRUCT) {
+            DetermineStructLiteralTypes(data, xx it, xx elementType);
+         } else {
+            DetermineCodeNodeTypes(data, it);
+         }
+      }
+   }
+
+   TableAdd(*data.codeNodeTypes, node, node.type);
+   return node.type;
+}
+
+DetermineIdentType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   ci := cast(*Code_Ident) node;
+   declaration := ci.resolved_declaration;
+
+   // the jai compiler doesnt resolve identifiers inside untyped struct literals (resolved_declaration is null, only the name is there).
+   // resolving it by name would mean reimplementing jai's scope rules so instead the user has to write the type.
+   assert(declaration != null, "the jai compiler didnt resolve identifier %. this happens when it is used inside an untyped struct literal (.{ ... }), which is not supported. write the type of the literal instead, for example f32x4.{ ... }. loc: %", ci.name, GetLocationString(ci));
+
+   // a member of a struct that is in scope because of using
+   memberOf := GetStructOfMemberDeclaration(declaration);
+   if (memberOf != null && !(declaration.flags & .IS_CONSTANT)) {
+      access := GetUsingAccess(data, ci, memberOf);
+      type := DetermineCodeNodeTypes(data, access);
+      TableAdd(*data.usingAccesses, ci, access);
+      TableAdd(*data.codeNodeTypes, node, type);
+      return type;
+   }
+
+   builtinIndex := GetBuiltinVariableIndex(.{ type = .Variable, variable.declaration = declaration });
+   if (builtinIndex != -1) {
+      builtin := BUILTIN_VARIABLES[builtinIndex];
+      assert(IsBuiltinVariableAvailable(builtin, data.shaderType), "% is not available in % shaders. loc: %", builtin.name, data.shaderType, GetLocationString(ci));
+   }
+
+   declarationType := DetermineCodeNodeTypes(data, declaration);
+
+   // a global variable is one this module declares (images, the builtins...) or one whose note says which memory it is in.
+   // a variable that is private to an invocation has to be declared in the shader.
+   if ((declaration.flags & .IS_GLOBAL) && !(declaration.flags & .IS_CONSTANT) && !IsModuleGlobalVariable(declaration)) {
+      if (!IsNotedVariable(declaration)) {
+         assert(false, "% is a global variable without a note. a global variable has to be @%, @%, @%, @%, @% or @%, other variables have to be declared in the shader. loc: %, declaration: %", ci.name, RAY_PAYLOAD_QUALIFIER, INCOMING_RAY_PAYLOAD_QUALIFIER, WORKGROUP_QUALIFIER, HIT_ATTRIBUTE_QUALIFIER, CALLABLE_DATA_QUALIFIER, INCOMING_CALLABLE_DATA_QUALIFIER, GetLocationString(ci), GetLocationString(declaration));
+      }
+
+      if (!table_contains(*data.declaredVariables, declaration))  DeclareNotedVariable(data, declaration, .{ type = .Variable, variable.declaration = declaration });
+   }
+
+   //
+   // dirty way to do what i want to do.
+   // what i want to do:
+   // since i now have TypeInfoDecorationlessCopyOfStruct, i need to update the types accordingly.
+   // simply i want to get the type from its declaration but .DECLARATION case in this function assumes that declaration is done inside the shader function
+   // because this function determines code node types only within the shader functions. so .DECLARATION creates a TypeInfoDecorationlessCopyOfStruct when it sees a struct.
+   // but this is not true for builtin types like __Image__. and in the .DECLARATION i don't have a way to know if the declaration is within a function if i were to do something like:
+   //       newNodeType := DetermineCodeNodeTypes(data, declaration);
+   // so my assumption here is that if the type of declaration is found in data.codeNodeTypes, then it means it is a local declaration and use the type of the declration, otherwise
+   // i assume that it is a variable with intrinsic type, so i just used the old code that used to work but im not sure about unwinding. idk man.
+   //
+   //                                     - apila, 07/06/26
+   //
+
+   // found, declarationType := table_find(*data.codeNodeTypes, declaration);
+   // newNodeType: *Type_Info;
+   // if (found) {
+   //    newNodeType = declarationType;
+   // } else {
+   //    //
+   //    // unwinding here because now matrices are #type,distinct.
+   //    // and i want to treat them as if they were normal arrays in the code generation.
+   //    // but they are distinct types as in a f32x4x4 is not the same as [4] f32x4 if user declares a variable of this type.
+   //    // one of them is OpTypeMatrix the other is OpTypeArray.
+   //    // and if you consider user defined types (types that are not intrinsic) i think unwinding has no problem with that Clueless.
+   //    //
+   //    //             - apila, 07/05/26
+   //    //
+   //    nodeTypeUnwinded := UnwindVariantsUpToDistinct(node.type);
+   //    newNodeType = ConvertJaiTypeIfNecessary(nodeTypeUnwinded, declaration.notes);
+
+   //    // im recursing into the expression here if it is constant
+   //    if (declaration.flags & .IS_CONSTANT) {
+   //       DetermineCodeNodeTypes(data, declaration.expression);
+   //    }
+   // }
+
+   TableAdd(*data.codeNodeTypes, node, declarationType);
+   return declarationType;
+}
+
+DetermineBinaryOperatorType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cbo := cast(*Code_Binary_Operator) node;
+
+   if cbo.operator_type == {
+      case .TIMES_ASSIGN;        #through;
+      case .DIV_ASSIGN;          #through;
+      case .MOD_ASSIGN;          #through;
+      case .MINUS_ASSIGN;        #through;
+      case .PLUS_ASSIGN;         #through;
+      case .BITWISE_AND_ASSIGN;  #through;
+      case .BITWISE_OR_ASSIGN;   #through;
+      case .BITWISE_XOR_ASSIGN;  #through;
+      case .SHIFT_LEFT_ASSIGN;   #through;
+      case .SHIFT_RIGHT_ASSIGN;  #through;
+      case #char "=";
+         _ := DetermineCodeNodeTypes(data, cbo.left);
+         rightType := DetermineCodeNodeTypes(data, cbo.right);
+
+         TableAdd(*data.codeNodeTypes, node, rightType);
+         return rightType;
+
+      case #char "+"; #through;
+      case #char "-"; #through;
+      case #char "*"; #through;
+      case #char "/"; #through;
+      case #char "<"; #through;
+      case #char ">"; #through;
+      case #char "%"; #through;
+      case #char "&"; #through;
+      case #char "|"; #through;
+      case #char "^"; #through;
+      case .SHIFT_LEFT;       #through;
+      case .SHIFT_RIGHT;      #through;
+      case .LESS_OR_EQUAL;    #through;
+      case .GREATER_OR_EQUAL; #through;
+      case .IS_EQUAL;         #through;
+      case .IS_NOT_EQUAL;     #through;
+      case .LOGICAL_AND;      #through;
+      case .LOGICAL_OR;
+         rightType := DetermineCodeNodeTypes(data, cbo.right);
+         leftType := DetermineCodeNodeTypes(data, cbo.left);
+
+         if (rightType.type == TYPE_INFO_POINTER_TAG && leftType.type == TYPE_INFO_POINTER_TAG) {
+            tipRight := cast(*TypeInfoPointer) rightType;
+            tipLeft := cast(*TypeInfoPointer) leftType;
+
+            assert(tipLeft.storageClass == tipRight.storageClass, "tipLeft.storageClass: %, tipRight.storageClass: %", tipLeft.storageClass, tipRight.storageClass);
+
+            // p - q is the number of elements between them (s64)
+            if (cbo.operator_type == #char "-") {
+               TableAdd(*data.codeNodeTypes, node, node.type);
+               return node.type;
+            }
+
+            TableAdd(*data.codeNodeTypes, node, rightType);
+            return rightType;
+         }
+
+         if (rightType.type != TYPE_INFO_POINTER_TAG && leftType.type != TYPE_INFO_POINTER_TAG) {
+            TableAdd(*data.codeNodeTypes, node, node.type);
+            return node.type;
+         }
+
+         // one of them pointer the other is not
+         pointerType := ifx rightType.type == TYPE_INFO_POINTER_TAG then rightType else leftType;
+         TableAdd(*data.codeNodeTypes, node, pointerType);
+         return pointerType;
+
+      case #char ".";
+         // E.A (a value of an enum) or Module.x (named module). the type is the type of the right side.
+         if (cbo.left.type != null && cbo.left.type.type == .TYPE) {
+            assert(cbo.right.kind == .IDENT, "kind: %", cbo.right.kind);
+            ci := cast(*Code_Ident) cbo.right;
+            rightType := DetermineCodeNodeTypes(data, ci.resolved_declaration);
+
+            // normally i dont add the type of the right node to the table since i dont use it when generating instructions.
+            // but this is an exception, i do use it.
+            TableAdd(*data.codeNodeTypes, cbo.right, rightType);
+
+            TableAdd(*data.codeNodeTypes, node, rightType);
+            return rightType;
+         }
+
+         leftType := DetermineCodeNodeTypes(data, cbo.left);
+
+         if leftType.type == {
+            case TYPE_INFO_POINTER_TAG; #through;
+            case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG; #through;
+            case .ARRAY; #through;
+            case .STRUCT; {
+               tis: *Type_Info_Struct;
+               if leftType.type == {
+                  case TYPE_INFO_POINTER_TAG; {
+                     tip := cast(*TypeInfoPointer) leftType;
+                     if (tip.pointerTo.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG) {
+                        tis = (cast(*TypeInfoDecorationlessCopyOfStruct) tip.pointerTo).copyOf;
+                     } else {
+                        assert(tip.pointerTo.type == .STRUCT, "type: %, loc: %", TypeName(tip.pointerTo), GetLocationString(node));
+                        tis = xx tip.pointerTo;
+                     }
+                  }
+
+                  case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG; {
+                     tidcos := cast(*TypeInfoDecorationlessCopyOfStruct) leftType;
+                     tis = tidcos.copyOf;
+                  }
+
+                  case .STRUCT; {
+                     tis = xx leftType;
+                  }
+
+                  // array.data or array.count
+                  case .ARRAY; {
+                     tia := leftType.(*Type_Info_Array);
+                     tis = GetArrayViewTypeInfo(tia.element_type);
+                  }
+
+                  case; assert(false);
+               }
+
+               assert(cbo.right.kind == .IDENT, "cbo.right.kind: %", cbo.right.kind);
+               right := cast(*Code_Ident) cbo.right;
+
+               path, member := GetMemberPath(tis, right.name);
+               assert(path.count > 0, "% is not a member of %. loc: %", right.name, tis.name, GetLocationString(right));
+
+               notes := member.notes;
+               newMemberType := ConvertJaiTypeIfNecessary(member.type, notes);
+               pointsToDecorationless := leftType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) leftType).pointerTo.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG;
+               if (leftType.type == TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG || pointsToDecorationless) newMemberType = GetFunctionStorageClassType(newMemberType);
+
+               TableAdd(*data.codeNodeTypes, node, newMemberType);
+               return newMemberType;
+            }
+
+            case; assert(false, "type: %", leftType.type);
+         }
+
+      case .ARRAY_SUBSCRIPT;
+         leftType := DetermineCodeNodeTypes(data, cbo.left);
+         _ := DetermineCodeNodeTypes(data, cbo.right);
+
+         leftType = UnwindVariantsAllTheWay(leftType);
+
+         if leftType.type == {
+            case .ARRAY; {
+               tia := cast(*Type_Info_Array) leftType;
+               TableAdd(*data.codeNodeTypes, node, tia.element_type);
+               return tia.element_type;
+            }
+
+            case TYPE_INFO_POINTER_TAG; {
+               tip := cast(*TypeInfoPointer) leftType;
+               TableAdd(*data.codeNodeTypes, node, tip.pointerTo);
+               return tip.pointerTo;
+            }
+
+            case TYPE_INFO_RUNTIME_ARRAY_TAG; {
+               tira := cast(*TypeInfoRuntimeArray) leftType;
+               TableAdd(*data.codeNodeTypes, node, tira.elementType);
+               return tira.elementType;
+            }
+
+            case; assert(false, "type: %", leftType.type); return null;
+         }
+
+
+      case; assert(false, "operator: %", cbo.operator_type);
+   }
+
+   assert(false, "didnt return! kind: %", node.kind);
+   return null;
+}
+
+DetermineProcedureHeaderType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cph := cast(*Code_Procedure_Header) node;
+
+   // a procedure is being typed while it is being typed: it calls itself (maybe through other procedures)
+   for data.proceduresBeingTyped {
+      assert(it != cph, "% calls itself (maybe through other procedures). recursion is not allowed in spirv. loc: %", cph.name, GetLocationString(cph));
+   }
+   array_add(*data.proceduresBeingTyped, cph);
+   defer data.proceduresBeingTyped.count -= 1;
+
+   // jai doesnt allow adding notes to the Code_Declaration if it is an argument.
+   // thats why i am doing this hack here. i just add the "payload" note to the TraceRay payload.
+   //          - apila, 08/09/26
+   if(IsTraceRayFunction(cph)) {
+      // last argument is the payload
+      assert(cph.arguments[cph.arguments.count - 1].type.type == .POINTER);
+
+      notes := NewArray(1, *Code_Note);
+      notes[0] = New(Code_Note);
+      notes[0].text = RAY_PAYLOAD_QUALIFIER;
+      cph.arguments[cph.arguments.count - 1].notes = notes;
+   }
+
+   for cph.arguments {
+      DetermineCodeNodeTypes(data, it);
+   }
+
+   for cph.returns {
+      DetermineCodeNodeTypes(data, it);
+   }
+
+   assert(cph.body_or_null != null, "loc: %:%", node.location.enclosing_load.fully_pathed_filename, node.location);
+   assert(cph.body_or_null.block != null);
+   DetermineCodeNodeTypes(data, cph.body_or_null.block);
+
+   TableAdd(*data.codeNodeTypes, node, node.type);
+   return node.type;
+}
+
+DetermineProcedureCallType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cpc := cast(*Code_Procedure_Call) node;
+   assert(cpc.resolved_procedure_expression != null, "loc: %", cpc.location);
+   assert(cpc.resolved_procedure_expression.kind == .PROCEDURE_HEADER || // constant function
+          cpc.resolved_procedure_expression.kind == .IDENT || // not constant function
+          cpc.resolved_procedure_expression.kind == .BINARY_OPERATOR, // namespaces
+          "kind: %", cpc.resolved_procedure_expression.kind
+   );
+
+   header := GetHeaderFromCodeProcedureCall(cpc);
+
+   if (IsMacroProcedure(header)) {
+      expansion := cpc.macro_expansion_block;
+      assert(expansion != null, "macro call has no expansion: %", header.name);
+      array_add(*data.macroExpansionCalls, cpc);
+      defer data.macroExpansionCalls.count -= 1;
+      DetermineCodeNodeTypes(data, expansion);
+
+      // the type of the call is the declared return type of the macro, not the type of the expression returned. (return 0 in a macro that returns f32)
+      returnTypeIdentifier := GetReturnTypeIdentifier(xx header.type);
+      returnType := ifx returnTypeIdentifier.type == .Void then cast(*Type_Info) void else returnTypeIdentifier._type;
+      TableAdd(*data.codeNodeTypes, node, returnType);
+      return returnType;
+   }
+
+   // DebugPrint(format, ..args): the format is a constant string and the arguments are cast to Any. their types are the types of what is cast (see GenerateDebugPrint)
+   if (IsDebugPrint(header)) {
+      for GetDebugPrintArguments(cpc)  DetermineCodeNodeTypes(data, it);
+      TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+      return cast(*Type_Info) void;
+   }
+
+   // recurse into the procedure
+   DetermineCodeNodeTypes(data, header);
+
+   for cpc.arguments_unsorted {
+      DetermineCodeNodeTypes(data, it.expression);
+   }
+
+   // the arguments in the order of the parameters, with the default values filled in. these are the ones generated
+   for cpc.arguments_sorted {
+      DetermineCodeNodeTypes(data, it);
+   }
+
+   if (header.returns.count == 0) {
+      TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+      return cast(*Type_Info) void;
+   }
+
+   // recursed in to header above which then recurses into the arguments and the returns
+   // return count here is 1 as asserted above
+   returnType := GetNodeType(header.returns[0]);
+
+   TableAdd(*data.codeNodeTypes, node, returnType);
+   return returnType;
+}
+
+DetermineDeclarationType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cd := cast(*Code_Declaration) node;
+
+   // a declaration of a type (S :: struct {}), a procedure or code (the body of a for_expansion) is not a value
+   if ((cd.flags & .IS_CONSTANT) && (cd.type.type == .TYPE || cd.type.type == .CODE || cd.type.type == .PROCEDURE)) {
+      TableAdd(*data.codeNodeTypes, node, cd.type);
+      return cd.type;
+   }
+
+   if (cd.expression != null) {
+      DetermineCodeNodeTypes(data, cd.expression);
+   }
+
+   // some of the intrinsics
+   if (false) {
+   } else if (cd == meshPrimitivesVariableIdentifier.variable.declaration) {
+      assert(data.shaderType == .Mesh, "% only exists in mesh shaders. loc: %", cd.name, GetLocationString(cd));
+      tia := CreateTypeInfoArrayFixedSize(type_info(MeshPerPrimitive), data.maxPrimitives);
+      TableAdd(*data.codeNodeTypes, node, tia);
+      return tia;
+   } else if (cd == meshVerticesVariableIdentifier.variable.declaration) {
+      tia := CreateTypeInfoArrayFixedSize(type_info(MeshPerVertex), data.maxVertices);
+      TableAdd(*data.codeNodeTypes, node, tia);
+      return tia;
+   } else if (GetMeshPrimitiveIndicesIndex(.{ type = .Variable, variable.declaration = cd }) != -1) {
+      indicesIndex := GetMeshPrimitiveIndicesIndex(.{ type = .Variable, variable.declaration = cd });
+      assert(data.shaderType == .Mesh, "% only exists in mesh shaders", cd.name);
+      assert(indicesIndex == cast(int) data.primitiveTopology, "% is for % mesh shaders, this one outputs %", cd.name, MESH_PRIMITIVE_INDICES[indicesIndex].topology, data.primitiveTopology);
+
+      tia := CreateTypeInfoArrayFixedSize(GetArrayElementType(cd), data.maxPrimitives);
+      TableAdd(*data.codeNodeTypes, node, tia);
+      return tia;
+   } else if (cd == data.meshVertexOutVariableIdentifier.variable.declaration) {
+      elementType := GetArrayElementType(cd);
+      tia := CreateTypeInfoArrayFixedSize(elementType, data.maxVertices);
+      TableAdd(*data.codeNodeTypes, node, tia);
+      return tia;
+   } else if (cd == data.meshPrimitiveOutVariableIdentifier.variable.declaration) {
+      elementType := GetArrayElementType(cd);
+      tia := CreateTypeInfoArrayFixedSize(elementType, data.maxPrimitives);
+      TableAdd(*data.codeNodeTypes, node, tia);
+      return tia;
+   }
+
+   type := ConvertJaiTypeIfNecessary(cd.type, cd.notes);
+   storageClass := GetVariableStorageClass(data, .{ type = .Variable, variable.declaration = cd });
+
+   // workgroup variables dont have an explicit layout either (that would need WorkgroupMemoryExplicitLayoutKHR)
+   isLocalDeclaration := storageClass == .Function || storageClass == .Workgroup;
+
+   if (storageClass == .Workgroup) {
+      assert(data.shaderType == .Compute || data.shaderType == .Mesh || data.shaderType == .Task, "workgroup variables only exist in compute, mesh and task shaders. loc: %", GetLocationString(node));
+      assert(cd.expression == null, "a workgroup variable cant be initialized, it is shared by all the invocations of the workgroup. loc: %", GetLocationString(node));
+   }
+
+   // i am not sure but this might need to be recursive.
+   // that is if a member is also a struct i might need to recurse into it too. idk
+   //          - apila, 07/06/26
+   //
+   // since i dont have a proper vector type, i have to manually check, again.
+   //          - apila, 07/06/26
+   if (isLocalDeclaration) {
+      type = GetFunctionStorageClassType(type);
+   }
+
+   TableAdd(*data.codeNodeTypes, node, type);
+   return type;
+}
+
+DetermineCastType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cc := cast(*Code_Cast) node;
+
+   // cast(T) *x is x. see IsCastOfAddressToPointee
+   if (IsCastOfAddressToPointee(cc)) {
+      type := DetermineCodeNodeTypes(data, (cast(*Code_Unary_Operator) cc.expression).subexpression);
+      TableAdd(*data.codeNodeTypes, node, type);
+      return type;
+   }
+
+   castFrom := DetermineCodeNodeTypes(data, cc.expression);
+
+   // you cant change storage classes with casts
+   // so the resulting pointer has the same storage class as the casted pointer
+   if (cc.type.type == .POINTER) {
+      assert(castFrom.type == TYPE_INFO_POINTER_TAG, "type: %", castFrom.type);
+      tipCastFrom := cast(*TypeInfoPointer) castFrom;
+
+      indirectionLevel := GetIndirectionLevelSpirvPointer(tipCastFrom);
+      newPointers := NewArray(indirectionLevel, TypeInfoPointer);
+
+      // pointerTo
+      for 0..indirectionLevel - 2 {
+         current := newPointers[it];
+         next := newPointers[it + 1];
+
+         current.pointerTo = *next;
+      }
+      newPointers[newPointers.count - 1].pointerTo = GetBaseType(cc.type);
+
+      // storage classes
+      storageClasses := FlattenStorageClasses(castFrom);
+      assert(storageClasses.count == newPointers.count, "storageClasses.count: %, newPointers.count: %", storageClasses.count, newPointers.count);
+
+      for storageClasses {
+         newPointers[it_index].storageClass = it;
+      }
+
+      TableAdd(*data.codeNodeTypes, node, *newPointers[0]);
+      return *newPointers[0];
+   }
+
+   TableAdd(*data.codeNodeTypes, node, cc.type);
+   return cc.type;
+}
+
+DetermineReturnType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cr := cast(*Code_Return) node;
+   for cr.arguments_unsorted {
+      DetermineCodeNodeTypes(data, it.expression);
+   }
+
+   for cr.arguments_sorted {
+      DetermineCodeNodeTypes(data, it);
+   }
+
+   // return statement doesnt have any type
+   TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+   return cast(*Type_Info) void;
+}
+
+DetermineIfType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   ci := cast(*Code_If) node;
+
+   if (ci.if_flags & .IS_STATIC) {
+      takenBlock := GetStaticIfTakenBlock(ci);
+      if (takenBlock != null) DetermineCodeNodeTypes(data, takenBlock);
+
+      TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+      return cast(*Type_Info) void;
+   }
+
+   if (ci.if_flags & .IS_SWITCH_STATEMENT) {
+      DetermineCodeNodeTypes(data, ci.condition);
+      for GetSwitchCases(ci) {
+         if (it.condition != null) DetermineCodeNodeTypes(data, it.condition);
+         DetermineCodeNodeTypes(data, it.then_block);
+      }
+
+      TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+      return cast(*Type_Info) void;
+   }
+
+   if (ci.if_flags & .IS_IFX) {
+      assert(ci.then_block != null && ci.else_block != null, "ifx without else is not supported. loc: %", GetLocationString(node));
+      DetermineCodeNodeTypes(data, ci.condition);
+      DetermineCodeNodeTypes(data, ci.then_block);
+      DetermineCodeNodeTypes(data, ci.else_block);
+
+      TableAdd(*data.codeNodeTypes, node, ci.type);
+      return ci.type;
+   }
+
+   if (ci.condition != null) {
+      DetermineCodeNodeTypes(data, ci.condition);
+   }
+
+   if (ci.then_block != null) {
+      DetermineCodeNodeTypes(data, ci.then_block);
+   }
+
+   if (ci.else_block != null) {
+      DetermineCodeNodeTypes(data, ci.else_block);
+   }
+
+   // this prolly needs to change when i support ifx     - apila, 07/05/26
+   TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+   return cast(*Type_Info) void;
+}
+
+DetermineWhileType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cw := cast(*Code_While) node;
+
+   if (cw.condition) {
+      DetermineCodeNodeTypes(data, cw.condition);
+   }
+
+   if (cw.block) {
+      DetermineCodeNodeTypes(data, cw.block);
+   }
+
+   TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+   return cast(*Type_Info) void;
+}
+
+DetermineUnaryOperatorType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cuo := cast(*Code_Unary_Operator) node;
+   assert(cuo.subexpression != null);
+
+   subexpressionType := DetermineCodeNodeTypes(data, cuo.subexpression);
+
+   resultType: *Type_Info;
+   if cuo.operator_type == {
+      case #char "-"; #through;
+      case #char "!"; #through;
+      case #char "~"; {
+         resultType = cuo.type;
+      }
+
+      // .A, a value of an enum whose type is inferred
+      case #char "."; {
+         resultType = subexpressionType;
+      }
+
+      case .POINTER_DEREFERENCE; #through;
+      case .POSTFIX_DEREFERENCE; {
+         assert(subexpressionType.type == TYPE_INFO_POINTER_TAG, "can only derefence a pointer! type: %", subexpressionType.type);
+
+         tip := cast(*TypeInfoPointer) subexpressionType;
+         resultType = tip.pointerTo;
+      }
+
+      case #char "*"; {
+         tip := New(TypeInfoPointer);
+
+         //
+         // how can i know the storage class of the subexpression?
+         // idk. my brain not working at the moment. but today i learned that having a pointer to something stored in Function storage class is not valid
+         // so here im gonna say it is Physical which means pointer stuff only works if the pointer points to somewhere in Physical storage class. this is the restriction of my compiler from now on.
+         //
+         //          - apila, 29/05/26
+         //
+         // it is the storage class of the memory the subexpression is in (see GetLValueStorageClass). taking the address of a local variable is still an error, see the .UNARY_OPERATOR case of GenerateInstructions.
+         //
+
+         tip.storageClass = GetLValueStorageClass(data, cuo.subexpression);
+         tip.pointerTo = subexpressionType;
+         resultType = tip;
+      }
+
+      case; assert(false, "not yet implemented! type: %", cuo.operator_type);
+   }
+
+   TableAdd(*data.codeNodeTypes, node, resultType);
+   return resultType;
+}
+
+DetermineForType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   cf := cast(*Code_For) node;
+
+   // a for_expansion. the compiler gives its expansion, with the body of the loop inserted
+   if (cf.macro_expansion_procedure_call != null) {
+      DetermineCodeNodeTypes(data, cf.macro_expansion_procedure_call);
+      TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+      return cast(*Type_Info) void;
+   }
+
+   DetermineCodeNodeTypes(data, cf.iteration_expression);
+   if (cf.iteration_expression_right != null) DetermineCodeNodeTypes(data, cf.iteration_expression_right);
+
+   nodes := GetForLoopNodes(data, cf);
+
+   // the array is the address of the expression or a variable that has its value (see LoopBase)
+   if (nodes.baseDeclaration != null) {
+      loopBase: LoopBase;
+      loopBase.isLValue = IsLValueExpression(data, cf.iteration_expression);
+
+      baseType := GetNodeType(cf.iteration_expression);
+      if (loopBase.isLValue) {
+         loopBase.storageClass = GetLValueStorageClass(data, cf.iteration_expression);
+      } else {
+         loopBase.storageClass = .Function;
+         baseType = GetFunctionStorageClassType(baseType);
+      }
+
+      TableAdd(*data.loopBases, nodes.baseDeclaration, loopBase);
+      TableAdd(*data.codeNodeTypes, nodes.baseDeclaration, baseType);
+      TableAdd(*data.codeNodeTypes, nodes.base, baseType);
+   }
+
+   if (nodes.indexDeclaration != null) DetermineCodeNodeTypes(data, nodes.indexDeclaration);
+   if (nodes.element != null) DetermineCodeNodeTypes(data, nodes.element);
+   if (nodes.count != null)   DetermineCodeNodeTypes(data, nodes.count);
+
+   //
+   // for * array: it is a pointer to the element. it is not a variable, it is the address of array[it_index] (a pointer to a local variable cant be stored in spirv).
+   // where it is used it is generated as the address, and it.member as array[it_index].member (see DoDotsAndArraySubscripts).
+   //
+   if (cf.for_flags & .POINTER) {
+      assert(nodes.element != null, "for * over a range. loc: %", GetLocationString(cf));
+
+      pointerType := New(TypeInfoPointer);
+      pointerType.pointerTo = GetNodeType(nodes.element);
+      pointerType.storageClass = GetLValueStorageClass(data, nodes.element);
+
+      TableAdd(*data.codeNodeTypes, cf.ident_decl, pointerType);
+      TableAdd(*data.pointerIterators, cf.ident_decl, cf);
+   } else {
+      DetermineCodeNodeTypes(data, cf.ident_decl);
+   }
+
+   DetermineCodeNodeTypes(data, cf.block);
+
+   TableAdd(*data.codeNodeTypes, node, cast(*Type_Info) void);
+   return cast(*Type_Info) void;
+}
+
+DetermineExtractType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
+   ce := cast(*Code_Extract) node;
+
+   // a value of a compound declaration: a, b := F();  or  a, b := x, y;
+   if (ce.from != null) {
+      type: *Type_Info;
+      if (ce.from.kind == .COMMA_SEPARATED_ARGUMENTS) {
+         type = DetermineCodeNodeTypes(data, (cast(*Code_Comma_Separated_Arguments) ce.from).arguments[ce.index].node);
+      } else {
+         assert(ce.from.kind == .PROCEDURE_CALL, "kind: %, loc: %", ce.from.kind, GetLocationString(node));
+         DetermineCodeNodeTypes(data, ce.from);
+         header := GetHeaderFromCodeProcedureCall(cast(*Code_Procedure_Call) ce.from);
+         type = GetMultipleReturnValueType(cast(*Type_Info_Procedure) header.type, ce.index);
+      }
+
+      TableAdd(*data.codeNodeTypes, node, type);
+      return type;
+   }
+
+   argument := GetMacroExpansionArgument(data, ce.index);
+   type := DetermineCodeNodeTypes(data, argument);
+   TableAdd(*data.codeNodeTypes, node, type);
+   return type;
 }
 
 GetArrayViewTypeInfo :: (elementType: *Type_Info) -> *Type_Info_Struct {
@@ -12369,7 +12532,7 @@ ForLoopNodes :: struct {
 //
 // a pointer that is used directly instead of being stored in a variable:
 //    - the it of a for * loop, the address of the element in the current iteration
-//    - a macro parameter whose argument is a pointer to a payload or a workgroup variable. spirv doesnt allow storing such a pointer.
+//    - a macro parameter whose argument is a pointer to a payload, a workgroup or a local variable. spirv doesnt allow storing such a pointer.
 // they cant be assigned.
 PointerValue :: struct {
    ssaId:      SSAId;
@@ -13326,6 +13489,10 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
                   } else if (ciBase.resolved_declaration.flags & .IS_CONSTANT) {
                      // a constant (a lookup table TABLE :: s32.[...]) doesnt exist in memory. it is put in a variable so it can be indexed
                      currentBaseSSAId.*, currentBaseSpirvType.* = MaterializeValue(data, b, baseNode, currentFunction);
+                  } else if (table_contains(*userFunctionArguments, ciBase.resolved_declaration) && !IsSmallArgument(baseType)) {
+                     // a parameter that is passed by value (see GetFunctionSpirvType) is not in memory, its members are extracted
+                     currentBaseSSAId.* = GenerateInstructions(data, baseNode, null, b, currentFunction);
+                     currentBaseSpirvType.* = baseType;
                   } else {
                      baseIdentifier := GetVariableIdentifier(ciBase);
                      currentBaseSSAId.* = GetSSAId(data, baseIdentifier);
@@ -13388,10 +13555,7 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
                   if (currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG) {
                      indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) s32 });
                      array_add(indices, indexSSAId);
-                  } else {
-                     // only literals allowed
-                     assert(cbo.right.kind == .LITERAL);
-
+                  } else if (cbo.right.kind == .LITERAL) {
                      // here i am cheating a lil bit. i actually dont need the ssa id i need to integer value.
                      // so i am just using the existing function. maybe i should have just created a function and call it in the .LITERAL case of GenerateInstructions
                      // as well as here.
@@ -13402,6 +13566,28 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
 
                      index := literalIdentifier.intLiteral.value._s64;
                      array_add(literalIndices, index);
+                  } else {
+                     // a value (a by-value parameter, a returned array) can only be indexed by literals with OpCompositeExtract.
+                     // the array is put in a variable so it can be indexed at runtime
+                     arraySSAId := currentBaseSSAId.*;
+                     arraySpirvType := currentBaseSpirvType.*;
+                     if (literalIndices.count > 0) {
+                        arraySSAId = EmitCompositeExtract(data, b, .{ type = ._Type, _type = leftType }, arraySSAId, literalIndices.*);
+                        arraySpirvType = leftType;
+                        array_reset(literalIndices);
+                     }
+
+                     variableType := GetFunctionStorageClassType(leftType);
+                     arraySSAId = ConvertValue(data, b, arraySSAId, arraySpirvType, variableType, cbo);
+                     arrayPointerType := GetPointerType(variableType, .Function);
+                     variableSSAId := GetNextSSAId(data);
+                     WriteSingleInstruction(data.generalBuilder, .Variable, GetSSAId(data, .{ type = ._Type, _type = arrayPointerType }), variableSSAId, SpvStorageClass.Function);
+                     WriteSingleInstructionIfReachable(b, *data.isBlockReachable, .Store, variableSSAId, arraySSAId);
+                     currentBaseSSAId.* = variableSSAId;
+                     currentBaseSpirvType.* = arrayPointerType;
+
+                     indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) s32 });
+                     array_add(indices, indexSSAId);
                   }
                }
 
@@ -13587,6 +13773,7 @@ IsLValueExpression :: (data: *CompilationData, node: *Code_Node) -> bool {
          if (isUsingAccess) return IsLValueExpression(data, usingAccess);
          if (table_contains(*data.loopBases, ci.resolved_declaration)) return true;
          if (table_contains(*data.pointerValues, ci.resolved_declaration) || table_contains(*data.pointerIterators, ci.resolved_declaration)) return false;
+         if (table_contains(*userFunctionArguments, ci.resolved_declaration) && !IsSmallArgument(GetNodeType(ci))) return false; // passed by value (see GetFunctionSpirvType)
          return ci.resolved_declaration != null && !(ci.resolved_declaration.flags & .IS_CONSTANT);
 
       case .BINARY_OPERATOR;

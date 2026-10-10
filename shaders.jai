@@ -4331,6 +4331,71 @@ TestConstantBitsAndVariants :: (data: *TestHashData) {
    data.f = zero + 0.0 + n + TEST_NAN;
 } @compute @1
 
+TestByValueStruct :: struct {
+   color: f32x3;
+   inner: TestInner;
+   table: [4] f32;
+}
+
+TestByValueLuminance :: (c: f32x3) -> f32 {
+   return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+}
+
+TestByValueMembers :: (s: TestByValueStruct, i: s32) -> f32 {
+   sum := s.color.y + s.inner.value + xx s.inner.indices.z + s.table[2] + s.table[i];
+   for s.table  sum += it;
+   return sum;
+}
+
+TestByValueArray :: (a: [4] f32, i: s32) -> f32 {
+   sum := a[1] + a[i];
+   for a  sum += it;
+   return sum;
+}
+
+TestByValueReturnArray :: (f: f32) -> [4] f32 {
+   result: [4] f32;
+   result[0] = f;
+   return result;
+}
+
+TestMacroRandom :: (state: *u32) -> f32 #expand {
+   state.* = state.* * 747796405 + 2891336453;
+   return cast(f32) (state.* >> 8) * 5.9604645e-8;
+}
+
+TestMacroRandomTwice :: (state: *u32) -> f32 #expand {
+   return TestMacroRandom(state) + TestMacroRandom(state);
+}
+
+TestMacroSetInner :: (inner: *TestInner, value: f32) #expand {
+   inner.value = value;
+   inner.indices.y += 1;
+}
+
+// the address of a local variable can be the argument of a pointer parameter of a macro, the macro uses the pointer directly
+TestMacroLocalPointer :: (data: *TestData) {
+   rng: u32 = data.u;
+   data.f = TestMacroRandom(*rng) + TestMacroRandomTwice(*rng);
+
+   inners: [2] TestInner;
+   TestMacroSetInner(*inners[data.i], data.f);
+   local: TestInner;
+   TestMacroSetInner(*local, 2);
+   TestMacroIncrement(*local.indices.x, 3);
+   data.inner.* = local;
+   data.u = rng + xx inners[1].indices.y;
+} @compute @1
+
+// the members and elements of parameters that are passed by value (vectors, structs, arrays) can be read
+TestByValueParameters :: (data: *TestData) {
+   s: TestByValueStruct;
+   s.color = data.v3;
+   s.inner = data.inner.*;
+   s.table[2] = data.f;
+   data.f = TestByValueLuminance(data.v3) + TestByValueMembers(s, data.i) + TestByValueArray(s.table, data.i) + TestByValueReturnArray(data.f)[data.i];
+} @compute @1
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.

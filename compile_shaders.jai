@@ -41,6 +41,7 @@ BUILD_FOLDER      :: "build";
 
    options := GetBuildOptions(w);
    options.buildFolder = BUILD_FOLDER;
+   options.optimize = array_find(args, "optimize"); // runs spirv-opt on the outputs
    SetBuildOptions(options, w);
 
    // compile
