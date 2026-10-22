@@ -4,7 +4,7 @@
 #import "File";
 #import "File_Utilities";
 #import "Basic";
-#import,file "ApilaSpirv.jai";
+#import "ApilaSpirv";
 #import "Process";
 #import "String";
 

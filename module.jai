@@ -2867,6 +2867,47 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             if (identifier.type == ._Type) CollectNumericUses(identifier._type, *uses, *visited);
          }
 
+         // Int8 and Int16 dont allow 8 and 16 bit types in buffer, push constant or input/output memory. those need their own capabilities.
+         // the pointers are taken from the walk above and not from identifierToSSAId because the pointer types of struct members are not in there yet.
+         // pointers inside the pointee are not followed since what they point to is in their own storage class. they are in uses.pointers too.
+         for tip: uses.pointers {
+            pointeeUses: NumericUses;
+            pointeeVisited: VisitedTypes;
+            defer deinit(*pointeeVisited);
+            CollectNumericUses(tip.pointerTo, *pointeeUses, *pointeeVisited, followPointers = false);
+
+            if tip.storageClass == {
+               case .StorageBuffer; #through;
+               case .PhysicalStorageBuffer;
+                  if (pointeeUses.integers8) {
+                     RequireCapability(*data, .StorageBuffer8BitAccess);
+                     RequireExtension(*data, "SPV_KHR_8bit_storage");
+                  }
+                  if (pointeeUses.integers16) {
+                     RequireCapability(*data, .StorageBuffer16BitAccess);
+                     RequireExtension(*data, "SPV_KHR_16bit_storage");
+                  }
+
+               case .PushConstant;
+                  if (pointeeUses.integers8) {
+                     RequireCapability(*data, .StoragePushConstant8);
+                     RequireExtension(*data, "SPV_KHR_8bit_storage");
+                  }
+                  if (pointeeUses.integers16) {
+                     RequireCapability(*data, .StoragePushConstant16);
+                     RequireExtension(*data, "SPV_KHR_16bit_storage");
+                  }
+
+               case .Input; #through;
+               case .Output;
+                  // there is no 8 bit equivalent. 8 bit types cant be inputs or outputs at all.
+                  if (pointeeUses.integers16) {
+                     RequireCapability(*data, .StorageInputOutput16);
+                     RequireExtension(*data, "SPV_KHR_16bit_storage");
+                  }
+            }
+         }
+
          if (uses.integers16) WriteSingleInstruction(*b, .Capability, SpvCapability.Int16);
          if (uses.floats64)   WriteSingleInstruction(*b, .Capability, SpvCapability.Float64);
       }
@@ -2887,7 +2928,6 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    {
       WriteSingleInstruction(*b, .Extension, "SPV_EXT_descriptor_heap");
       WriteSingleInstruction(*b, .Extension, "SPV_KHR_untyped_pointers");
-      WriteSingleInstruction(*b, .Extension, "SPV_KHR_8bit_storage");
       WriteSingleInstruction(*b, .Extension, "SPV_KHR_physical_storage_buffer");
 
       if type == {
@@ -12312,19 +12352,22 @@ ConstantToIdentifier :: (value: ConstantValue, type_: *Type_Info) -> Identifier,
 }
 
 NumericUses :: struct {
+   integers8:  bool;
    integers16: bool;
    floats64:   bool;
+   pointers:   [..] *TypeInfoPointer; // every pointer type that was walked through
 }
 
 // the scalar types a type has in it (the members of structs, the elements of arrays, what pointers point to...)
 VisitedTypes :: Table(*Type_Info, bool);
 
-CollectNumericUses :: (type: *Type_Info, uses: *NumericUses, visited: *VisitedTypes) {
+CollectNumericUses :: (type: *Type_Info, uses: *NumericUses, visited: *VisitedTypes, followPointers := true) {
    if (type == null || table_contains(visited, type)) return;
    table_add(visited, type, true);
 
    info, isNumeric := GetNumericInfo(type);
    if (isNumeric) {
+      if ((info.kind == .Signed || info.kind == .Unsigned) && info.bitSize == 8)  uses.integers8  = true;
       if ((info.kind == .Signed || info.kind == .Unsigned) && info.bitSize == 16) uses.integers16 = true;
       if (info.kind == .Float && info.bitSize == 64) uses.floats64 = true;
       return;
@@ -12332,23 +12375,24 @@ CollectNumericUses :: (type: *Type_Info, uses: *NumericUses, visited: *VisitedTy
 
    if type.type == {
       case .STRUCT;
-         for GetStructMembers(cast(*Type_Info_Struct) type)  CollectNumericUses(ConvertJaiTypeIfNecessary(it.type, it.notes), uses, visited);
+         for GetStructMembers(cast(*Type_Info_Struct) type)  CollectNumericUses(ConvertJaiTypeIfNecessary(it.type, it.notes), uses, visited, followPointers);
       case TYPE_INFO_DECORATIONLESS_COPY_OF_STRUCT_TAG;
-         CollectNumericUses((cast(*TypeInfoDecorationlessCopyOfStruct) type).copyOf, uses, visited);
+         CollectNumericUses((cast(*TypeInfoDecorationlessCopyOfStruct) type).copyOf, uses, visited, followPointers);
       case .ARRAY;
-         CollectNumericUses((cast(*Type_Info_Array) type).element_type, uses, visited);
+         CollectNumericUses((cast(*Type_Info_Array) type).element_type, uses, visited, followPointers);
       case .VARIANT;
-         CollectNumericUses(UnwindVariantsAllTheWay(type), uses, visited);
+         CollectNumericUses(UnwindVariantsAllTheWay(type), uses, visited, followPointers);
       case .POINTER;
-         CollectNumericUses((cast(*Type_Info_Pointer) type).pointer_to, uses, visited);
+         if (followPointers) CollectNumericUses((cast(*Type_Info_Pointer) type).pointer_to, uses, visited, followPointers);
       case TYPE_INFO_POINTER_TAG;
-         CollectNumericUses((cast(*TypeInfoPointer) type).pointerTo, uses, visited);
+         array_add(*uses.pointers, cast(*TypeInfoPointer) type);
+         if (followPointers) CollectNumericUses((cast(*TypeInfoPointer) type).pointerTo, uses, visited, followPointers);
       case TYPE_INFO_RUNTIME_ARRAY_TAG;
-         CollectNumericUses((cast(*TypeInfoRuntimeArray) type).elementType, uses, visited);
+         CollectNumericUses((cast(*TypeInfoRuntimeArray) type).elementType, uses, visited, followPointers);
       case .PROCEDURE;
          tip := cast(*Type_Info_Procedure) type;
-         for tip.argument_types  CollectNumericUses(it, uses, visited);
-         for tip.return_types    CollectNumericUses(it, uses, visited);
+         for tip.argument_types  CollectNumericUses(it, uses, visited, followPointers);
+         for tip.return_types    CollectNumericUses(it, uses, visited, followPointers);
    }
 }
 

@@ -1,5 +1,5 @@
 #import "File";
-#import,file "ApilaSpirv.jai";
+#import "ApilaSpirv";
 
 FixedArrayTest :: (data: *RgenData) {
    x: [3] f32;
