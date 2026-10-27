@@ -2800,6 +2800,98 @@ TestComputeRayQuery :: (data: *TestRayQueryData) {
    RayQueryTerminate(*q);
 } @compute @1
 
+TestHitObjectData :: struct {
+   tlas:    u32;
+   hint:    u32;
+   t:       f32;
+   bary:    f32x2;
+   indices: s32x4;
+   origin:  f32x3;
+   dir:     f32x3;
+   flags:   u32;
+   kind:    u32;
+   sbt:     u32;
+   handle:  u32x2;
+}
+
+// the trace finds the hit, the invocations are reordered by it, then its shader is run
+TestRgenHitObject :: (data: *TestHitObjectData) {
+   payload: TestRayPayload; @payload
+   attribs: f32x2; @hitobjectattribute
+   h: HitObject;
+   HitObjectTraceRay(*h, tlases[data.tlas], .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   ReorderThread(*h);
+
+   if HitObjectIsHit(*h) {
+      HitObjectGetAttributes(*h, *attribs);
+      data.bary = attribs;
+      data.t = HitObjectGetRayTMin(*h) + HitObjectGetRayTMax(*h);
+      data.indices = s32x4.{ HitObjectGetInstanceCustomIndex(*h), HitObjectGetInstanceId(*h), HitObjectGetGeometryIndex(*h), HitObjectGetPrimitiveIndex(*h) };
+      data.origin = HitObjectGetObjectRayOrigin(*h) + HitObjectGetWorldRayOrigin(*h);
+      data.dir = HitObjectGetObjectRayDirection(*h) + HitObjectGetWorldRayDirection(*h);
+      data.dir += HitObjectGetObjectToWorld(*h) * f32x4.{ 0, 0, 0, 1 } + HitObjectGetWorldToObject(*h) * f32x4.{ 1, 0, 0, 0 };
+      data.flags = cast(u32) HitObjectGetRayFlags(*h);
+      data.kind = HitObjectGetHitKind(*h);
+      data.sbt = HitObjectGetShaderBindingTableRecordIndex(*h);
+      data.handle = HitObjectGetShaderRecordBufferHandle(*h);
+      HitObjectSetShaderBindingTableRecordIndex(*h, 2);
+   } else if HitObjectIsMiss(*h) || HitObjectIsEmpty(*h) {
+      data.t = 0;
+   }
+
+   HitObjectExecuteShader(*h, *payload);
+} @rgen
+
+// the overloads: the tlas offset, the hint and its bits
+TestRgenHitObjectReorder :: (data: *TestHitObjectData) {
+   payload: TestRayPayload; @payload
+   h: HitObject;
+   HitObjectTraceRay(*h, data.tlas, .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);   // the offset of the tlas in the heap
+   ReorderThread(*h, data.hint, 4);
+   ReorderThread(data.hint, 2);
+   HitObjectReorderExecuteShader(*h, *payload);
+   HitObjectReorderExecuteShader(*h, *payload, data.hint, 4);
+
+   HitObjectTraceReorderExecute(*h, tlases[data.tlas], .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   HitObjectTraceReorderExecute(*h, data.tlas, .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload, data.hint, 4);
+   ImageWrite(0, .{ 0, 0 }, payload.color);
+} @rgen
+
+testGlobalHitObjectAttributes: f32x2; @hitobjectattribute
+
+// a hit object made without tracing: a miss, nothing, or the hit of a ray query
+TestRgenHitObjectRecord :: (data: *TestHitObjectData) {
+   payload: TestRayPayload; @payload
+   h: HitObject;
+   HitObjectRecordEmpty(*h);
+   HitObjectRecordMiss(*h, .Opaque, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);
+   HitObjectExecuteShader(*h, *payload);
+
+   q: RayQuery;
+   RayQueryInitialize(*q, data.tlas, .Opaque, 0xFF, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);
+   while RayQueryProceed(*q) {}
+   HitObjectRecordFromQuery(*h, *q, 0, *testGlobalHitObjectAttributes);
+   HitObjectRecordFromQuery(*h, *q, 1, *testGlobalHitObjectAttributes, 3);
+   HitObjectExecuteShader(*h, *payload);
+} @rgen
+
+// closest hit and miss shaders can trace into a hit object and run it, they cant reorder
+TestRchitHitObject :: (data: *TestHitObjectData) {
+   incoming: TestRayPayload; @payloadin
+   payload: TestRayPayload; @payload
+   h: HitObject;
+   HitObjectTraceRay(*h, tlases[data.tlas], .Opaque, 0xFF, 0, 1, 0, worldrayorigin, 0.001, worldraydirection, 1000, *payload);
+   if HitObjectIsHit(*h)  HitObjectExecuteShader(*h, *payload);
+   incoming.color = payload.color;
+} @rchit
+
+TestRmissHitObject :: (data: *TestHitObjectData) {
+   payload: TestRayPayload; @payload
+   h: HitObject;
+   HitObjectRecordMiss(*h, .Opaque, 1, worldrayorigin, 0.001, worldraydirection, 1000);
+   HitObjectExecuteShader(*h, *payload);
+} @rmiss
+
 TestRgenPayloadB :: struct {
    distance: f32;
 }
