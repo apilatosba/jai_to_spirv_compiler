@@ -144,12 +144,13 @@ MeshPerPrimitive :: struct {
    cullPrimitive:  bool;
 }
 
-operator *  :: (m: mat4, v: f32x4)  -> f32x4 { return .{}; };
-operator *  :: (m: mat3, v: f32x3)  -> f32x3 { return .{}; };
-operator *  :: (m: f32x3x4, v: f32x4) -> f32x3 { return .{}; };
-operator *  :: (a: mat4, b: mat4)   -> mat4  { return .{}; }; // this is not valid jai operation unfortunately :(  - apila, 14/05/26
+// the bodies are the cpu implementations (see cpu.jai), the backend doesnt look at them
+operator *  :: (m: mat4, v: f32x4)  -> f32x4 { return mul(m, v); };
+operator *  :: (m: mat3, v: f32x3)  -> f32x3 { return mul(m, v); };
+operator *  :: (m: f32x3x4, v: f32x4) -> f32x3 { return m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3] * v.w; };
+operator *  :: (a: mat4, b: mat4)   -> mat4  { return mul(a, b); }; // this is not valid jai operation unfortunately :(  - apila, 14/05/26
 
-// arithmetic on vectors. these only exist so that jai typechecks the shader, the backend generates the instructions from the operator node itself.
+// arithmetic on vectors. jai typechecks the shader with these, the backend generates the instructions from the operator node itself. their bodies are the cpu implementations (see cpu.jai).
 // a scalar operand is broadcast to a vector (vector + scalar is vector + .{ scalar, scalar, ... }), see DoBinaryArithmetic.
 #insert #run -> string {
    builder: String_Builder;
@@ -174,12 +175,12 @@ operator *  :: (a: mat4, b: mat4)   -> mat4  { return .{}; }; // this is not val
       operators: [] string = FLOAT_OPERATORS;
       if (v.isInt) operators = INT_OPERATORS;
       for op: operators {
-         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { return .{}; }\n", op, v.name, v.name,   v.name);
-         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { return .{}; }\n", op, v.name, v.scalar, v.name);
-         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { return .{}; }\n", op, v.scalar, v.name, v.name);
+         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { % }\n", op, v.name, v.name,   v.name, VectorOperatorBody(op, v.name, true,  true));
+         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { % }\n", op, v.name, v.scalar, v.name, VectorOperatorBody(op, v.name, true,  false));
+         print_to_builder(*builder, "operator % :: (a: %, b: %) -> % { % }\n", op, v.scalar, v.name, v.name, VectorOperatorBody(op, v.name, false, true));
       }
 
-      if (v.isSigned) print_to_builder(*builder, "operator - :: (a: %) -> % { return .{}; }\n", v.name, v.name);
+      if (v.isSigned) print_to_builder(*builder, "operator - :: (a: %) -> % { % }\n", v.name, v.name, VectorNegateBody(v.name));
    }
 
    return builder_to_string(*builder);
@@ -533,20 +534,22 @@ BUILTIN_VARIABLES :: BuiltinVariable.[
 };
 
 // the math intrinsics (hlsl names) and the subgroup intrinsics. see MATH_INTRINSICS and SUBGROUP_INTRINSICS
+// the bodies of the math intrinsics are the cpu implementations (see cpu.jai). the subgroup ones only exist on the gpu
 #insert #run -> string {
    builder: String_Builder;
 
-   DeclareOverloads :: (builder: *String_Builder, name: string, signatures: [] MathIntrinsicSignature) {
+   DeclareOverloads :: (builder: *String_Builder, name: string, signatures: [] MathIntrinsicSignature, cpu: bool) {
       for signature: signatures {
          for type: signature.types {
             header, returnType := ExpandSignature(signature.signature, type);
-            print_to_builder(builder, "% :: % { r: %; return r; } @%\n", name, header, returnType, INTRINSIC_FUNCTION_NOTE_NAME);
+            body := ifx cpu then MathIntrinsicCpuBody(name, header) else tprint("r: %; return r;", returnType);
+            print_to_builder(builder, "% :: % { % } @%\n", name, header, body, INTRINSIC_FUNCTION_NOTE_NAME);
          }
       }
    }
 
-   for MATH_INTRINSICS      DeclareOverloads(*builder, it.name, it.signatures);
-   for SUBGROUP_INTRINSICS  DeclareOverloads(*builder, it.name, it.signatures);
+   for MATH_INTRINSICS      DeclareOverloads(*builder, it.name, it.signatures, true);
+   for SUBGROUP_INTRINSICS  DeclareOverloads(*builder, it.name, it.signatures, false);
 
    return builder_to_string(*builder);
 };
@@ -1430,13 +1433,13 @@ GenerateTextureFunction :: (data: *CompilationData, textureFunction: *ResourceFu
 #insert #run sprint("% :: (hitT: f32, hitKind: u32) -> bool { r: bool; return r; } @%", REPORT_INTERSECTION_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
 // prints like jai's print: % is the next argument, %1 %2... an argument by its position, \% is a % sign. the format must be a constant string.
-// it is DebugPrintf of NonSemantic.DebugPrintf, the validation layers print it. the printf specifier of an argument comes from its type.
-#insert #run sprint("% :: (format: string, args: .. Any) { } @%", DEBUG_PRINT_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
+// it is DebugPrintf of NonSemantic.DebugPrintf, the validation layers print it. the printf specifier of an argument comes from its type. on the cpu it is print.
+#insert #run sprint("% :: (format: string, args: .. Any) { print(format, ..args); } @%", DEBUG_PRINT_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
 // runs the callable shader at sbtIndex of the shader binding table. data is the address of a @callabledata variable, the callable shader gets it as its @callabledatain variable
 #insert #run sprint("% :: (sbtIndex: u32, data: *$T) { } @%", EXECUTE_CALLABLE_FUNCTION_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
 
-// atomics on a pointer to buffer memory or to a workgroup variable. they return the value that was there before.
+// atomics on a pointer to buffer memory or to a workgroup variable. they return the value that was there before. the bodies are the cpu implementations (see cpu.jai)
 #insert #run -> string {
    builder: String_Builder;
 
@@ -1445,15 +1448,17 @@ GenerateTextureFunction :: (data: *CompilationData, textureFunction: *ResourceFu
 
    for type: TYPES {
       for name: FUNCTIONS {
-         print_to_builder(*builder, "% :: (pointer: *%, value: %) -> % { return 0; } @%\n", name, type, type, type, INTRINSIC_FUNCTION_NOTE_NAME);
+         print_to_builder(*builder, "% :: (pointer: *%, value: %) -> % { % } @%\n", name, type, type, type, AtomicCpuBody(name), INTRINSIC_FUNCTION_NOTE_NAME);
       }
 
       // stores value if the value at pointer is comparator
-      print_to_builder(*builder, "% :: (pointer: *%, comparator: %, value: %) -> % { return 0; } @%\n", ATOMIC_COMPARE_EXCHANGE_FUNCTION_NAME, type, type, type, type, INTRINSIC_FUNCTION_NOTE_NAME);
+      print_to_builder(*builder, "% :: (pointer: *%, comparator: %, value: %) -> % { % } @%\n", ATOMIC_COMPARE_EXCHANGE_FUNCTION_NAME, type, type, type, type, AtomicCpuBody(ATOMIC_COMPARE_EXCHANGE_FUNCTION_NAME), INTRINSIC_FUNCTION_NOTE_NAME);
    }
 
    return builder_to_string(*builder);
 };
+
+#load "cpu.jai";
 // ^^^^^^ intrinsics ^^^^^^^^^
 
 ProcessMessage :: (message: *Message) {
@@ -11735,6 +11740,12 @@ DetermineProcedureHeaderType :: (data: *CompilationData, node: *Code_Node) -> *T
 
    for cph.returns {
       DetermineCodeNodeTypes(data, it);
+   }
+
+   // the body of an intrinsic is its cpu implementation (see cpu.jai), it is not generated
+   if (cph.notes.count > 0 && cph.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) {
+      TableAdd(*data.codeNodeTypes, node, node.type);
+      return node.type;
    }
 
    assert(cph.body_or_null != null, "loc: %:%", node.location.enclosing_load.fully_pathed_filename, node.location);
