@@ -2690,6 +2690,7 @@ CompilationData :: struct {
    pointerIterators:                         Table(*Code_Declaration, *Code_For); // the it of a for * loop. it is the address of the element, see the .FOR case of DetermineCodeNodeTypes
    pointerValues:                            Table(*Code_Declaration, PointerValue); // variables that are a pointer that is not stored anywhere, see PointerValue
    loopBases:                                Table(*Code_Declaration, LoopBase); // see LoopBase
+   meshOutputParameters:                     Table(*Code_Declaration, *Code_Declaration); // a parameter of a procedure that is given a mesh output is that output, see BindMeshOutputArguments
    interfaceVariableIdentifiers:             [..] Identifier; // other global variables the entry point uses (workgroup variables)
    usesInt64Atomics:                         bool;
    usesDemote:                               bool;
@@ -3592,7 +3593,13 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
                   it.offset_in_bytes
                );
 
-               if (IsMatrixType(it.type)) {
+               // the layout of a matrix is decorated on the member, also when the member is an array of matrices ([2] mat4, [2][3] mat3...)
+               matrixType := it.type;
+               while (matrixType.type == .ARRAY && (cast(*Type_Info_Array) matrixType).array_type == .FIXED && !IsMatrixType(matrixType)) {
+                  matrixType = (cast(*Type_Info_Array) matrixType).element_type;
+               }
+
+               if (IsMatrixType(matrixType)) {
                   WriteSingleInstruction(
                      *b,
                      .MemberDecorate,
@@ -3601,7 +3608,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
                      SpvDecoration.ColMajor
                   );
 
-                  vectorType := GetMatrixVector(it.type);
+                  vectorType := GetMatrixVector(matrixType);
                   vectorSize := GetVectorSize(vectorType);
 
                   WriteSingleInstruction(
@@ -7495,7 +7502,7 @@ WriteTypeOrVariableOrConstant :: (data: *CompilationData, b: *BuilderType, ident
                   // struct { count: int, data: *type };
 
                   elementType := tia.element_type;
-                  assert(tia.element_type.type != .POINTER && tia.element_type.type != .ARRAY, "tia.element_type.type: %. known limitation: cant use pointers inside array. i think i need to just idk update DetermineCodeNodeTypes().", tia.element_type.type);
+                  assert(tia.element_type.type != .POINTER, "tia.element_type.type: %. known limitation: cant use pointers inside array. i think i need to just idk update DetermineCodeNodeTypes().", tia.element_type.type);
                   elementTypeIdentifier: Identifier = .{ type = ._Type, _type = elementType };
                   WriteTypeOrVariableOrConstant(data, b, elementTypeIdentifier);
 
@@ -8182,8 +8189,11 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
          GetSSAId(data, functionTypeIdentifier)
       );
 
+      spirvArgumentIndex := 0;
       for header.arguments {
-         spirvType := functionSpirvType.argument_types[it_index];
+         if (table_contains(*data.meshOutputParameters, it)) continue; // the procedure uses the output variable (see BindMeshOutputArguments)
+         spirvType := functionSpirvType.argument_types[spirvArgumentIndex];
+         spirvArgumentIndex += 1;
          variableSSAId := GetSSAId(data, .{ type = .Variable, variable.declaration = it });
          WriteSingleInstruction(
             b,
@@ -8246,16 +8256,19 @@ GetFunctionSpirvType :: (data: *CompilationData, header: *Code_Procedure_Header)
    result.runtime_size = tip.runtime_size;
    result.type = tip.type;
 
-   result.argument_types = NewArray(tip.argument_types.count, *Type_Info);
+   // a parameter that is given a mesh output is not a parameter of the spirv function (see BindMeshOutputArguments)
+   argumentTypes: [..] *Type_Info;
    for header.arguments {
+      if (table_contains(*data.meshOutputParameters, it)) continue;
       argumentType := GetNodeType(it);
 
       if (IsSmallArgument(argumentType)) {
-         result.argument_types[it_index] = GetPointerType(argumentType, .Function);
+         array_add(*argumentTypes, GetPointerType(argumentType, .Function));
       } else {
-         result.argument_types[it_index] = argumentType;
+         array_add(*argumentTypes, argumentType);
       }
    }
+   result.argument_types = argumentTypes;
 
    // the spirv return type: pointers are converted and more than one value is a struct (see GetReturnTypeIdentifier)
    returnTypeIdentifier := GetReturnTypeIdentifier(tip);
@@ -8872,7 +8885,7 @@ GenerateIdent :: (data: *CompilationData, node: *Code_Node, general: *BuilderTyp
       RETURN(identifierSSAId, declaration.type);
    }
 
-   variableIdentifier := GetVariableIdentifier(ci);
+   variableIdentifier := GetVariableIdentifier(data, ci);
    variableSSAId := GetSSAId(data, variableIdentifier);
    variableName := GetVariableName(variableIdentifier);
    variableStorageClass := GetVariableStorageClass(data, variableIdentifier);
@@ -8893,13 +8906,11 @@ GenerateIdent :: (data: *CompilationData, node: *Code_Node, general: *BuilderTyp
       }
    }
 
-   if (table_contains(*userFunctionArguments, declaration)) {
-      if (!IsSmallArgument(variableType)) {
-         assert(!additionalData.isLValue, "immutable function parameter cant be lvalue");
+   if (IsByValueParameter(data, declaration, variableType)) {
+      assert(!additionalData.isLValue, "immutable function parameter cant be lvalue");
 
-         if (identifierOut != null) identifierOut.* = variableIdentifier;
-         RETURN(variableSSAId, variableType);
-      }
+      if (identifierOut != null) identifierOut.* = variableIdentifier;
+      RETURN(variableSSAId, variableType);
    }
 
    if (additionalData.isLValue) {
@@ -9182,7 +9193,7 @@ GenerateBinaryOperator :: (data: *CompilationData, node: *Code_Node, general: *B
          // checking if the variable is an intrinsic array.
          if (cbo.left.kind == .IDENT) {
             ci := cast(*Code_Ident) cbo.left;
-            variable := GetVariableIdentifier(ci);
+            variable := GetVariableIdentifier(data, ci);
             if false {
             } else if (IdentifierCompare(variable, meshVerticesVariableIdentifier) || IdentifierCompare(variable, meshPrimitivesVariableIdentifier)) {
                // do nothing. DoDotsAndArraySubscripts works for this.
@@ -9822,6 +9833,7 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
    // the arguments in the order of the parameters, the compiler puts named arguments in their place and fills in the default values
    assert(cpc.arguments_sorted.count == header.arguments.count, "varargs are not supported. loc: %", GetLocationString(node));
    for argumentNode: cpc.arguments_sorted {
+      if (table_contains(*data.meshOutputParameters, header.arguments[it_index])) continue; // the procedure uses the output variable (see BindMeshOutputArguments)
       argumentType := GetNodeType(header.arguments[it_index]);
       argumentSSAId := GenerateInstructions(data, argumentNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = argumentType });
 
@@ -11788,6 +11800,9 @@ DetermineProcedureCallType :: (data: *CompilationData, node: *Code_Node) -> *Typ
       return cast(*Type_Info) void;
    }
 
+   // before the procedure is typed, its parameters that are given a mesh output are that output
+   BindMeshOutputArguments(data, cpc, header);
+
    // recurse into the procedure
    DetermineCodeNodeTypes(data, header);
 
@@ -11824,6 +11839,14 @@ DetermineDeclarationType :: (data: *CompilationData, node: *Code_Node) -> *Type_
 
    if (cd.expression != null) {
       DetermineCodeNodeTypes(data, cd.expression);
+   }
+
+   // a parameter that is given a mesh output is the output, it has its type (see BindMeshOutputArguments)
+   isMeshOutputParameter, meshOutput := table_find(*data.meshOutputParameters, cd);
+   if (isMeshOutputParameter) {
+      type := DetermineCodeNodeTypes(data, meshOutput);
+      TableAdd(*data.codeNodeTypes, node, type);
+      return type;
    }
 
    // some of the intrinsics
@@ -12864,6 +12887,13 @@ GetForLoopNodes :: (data: *CompilationData, cf: *Code_For) -> ForLoopNodes {
       }
 
       arrayType := cf.iteration_expression.type;
+
+      // the mesh outputs are array views in jai but fixed arrays in spirv (see GetVariableTypeIdentifier)
+      nodeType := GetNodeType(cf.iteration_expression);
+      if (arrayType.type == .ARRAY && (cast(*Type_Info_Array) arrayType).array_type == .VIEW && nodeType.type == .ARRAY && (cast(*Type_Info_Array) nodeType).array_type == .FIXED) {
+         arrayType = nodeType;
+      }
+
       assert(arrayType.type == .ARRAY, "can only iterate over arrays and ranges. type: %, loc: %", arrayType.*, GetLocationString(cf));
       tia := cast(*Type_Info_Array) arrayType;
       assert(tia.array_type == .FIXED || tia.array_type == .VIEW, "array type: %, loc: %", tia.array_type, GetLocationString(cf));
@@ -13305,8 +13335,72 @@ IsStructLiteralConstant :: (data: *CompilationData, literal: *Code_Literal) -> b
    return result;
 }
 
-GetVariableIdentifier :: (ci: *Code_Ident) -> Identifier {
-   return .{ type = .Variable, variable.declaration = ci.resolved_declaration };
+GetVariableIdentifier :: (data: *CompilationData, ci: *Code_Ident) -> Identifier {
+   return .{ type = .Variable, variable.declaration = ResolveMeshOutputParameter(data, ci.resolved_declaration) };
+}
+
+// the mesh outputs of the user (the first two parameters of the entry point) are Output variables.
+// a pointer to Output memory cant be a parameter of a function in spirv (only Function, Private, Workgroup... ones can, and a jai array view would need its address in a buffer).
+// so a parameter of a procedure that is given a mesh output is not a parameter of the spirv function, the procedure uses the output variable directly (it is a global variable).
+// the procedures are generated for each entry point, so a parameter is bound to the output of the entry point being compiled.
+//    WriteVertex :: (o: [] MeshOutVertex, i: s32) { o[i].uv = ...; }
+//    WriteVertex(mOutVertex, 0); // o is mOutVertex in WriteVertex
+// a parameter has to be given the same output in every call (in the same entry point), it cant be a mesh output in one call and something else in another.
+// the builtin outputs (meshvertices, meshprimitives, meshtriangles...) are global variables in jai too, procedures use them directly instead.
+BindMeshOutputArguments :: (data: *CompilationData, cpc: *Code_Procedure_Call, header: *Code_Procedure_Header) {
+   if (data.shaderType != .Mesh) return;
+   if (header.notes.count > 0 && header.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) return;
+   if (cpc.arguments_sorted.count != header.arguments.count) return; // varargs, GenerateProcedureCall says they are not supported
+
+   for argument: cpc.arguments_sorted {
+      parameter := header.arguments[it_index];
+
+      meshOutput: *Code_Declaration;
+      if (argument.kind == .IDENT) {
+         declaration := ResolveMeshOutputParameter(data, (cast(*Code_Ident) argument).resolved_declaration);
+         assert(declaration == null || !IsBuiltinMeshOutputVariable(declaration), "% cant be passed to a procedure, it is a global variable, use it directly in the procedure. loc: %", declaration.name, GetLocationString(argument));
+         if (declaration != null && IsMeshOutputVariable(data, declaration)) meshOutput = declaration;
+      }
+
+      isBound, boundTo := table_find(*data.meshOutputParameters, parameter);
+      if (meshOutput != null) {
+         if (isBound) {
+            assert(boundTo == meshOutput, "parameter % of % is given % here and % in another call. a parameter that is given a mesh output has to be given the same output in every call (see BindMeshOutputArguments). loc: %", parameter.name, header.name, meshOutput.name, boundTo.name, GetLocationString(argument));
+         } else {
+            // the procedure is typed by its first call. if that call didnt give a mesh output, the parameter is a regular one
+            assert(!table_contains(*data.codeNodeTypes, parameter), "parameter % of % is given the mesh output % here and something else in another call. a parameter that is given a mesh output has to be given it in every call (see BindMeshOutputArguments). loc: %", parameter.name, header.name, meshOutput.name, GetLocationString(argument));
+            TableAdd(*data.meshOutputParameters, parameter, meshOutput);
+         }
+      } else {
+         assert(!isBound, "parameter % of % is given the mesh output % in another call and something else here. a parameter that is given a mesh output has to be given it in every call (see BindMeshOutputArguments). loc: %", parameter.name, header.name, boundTo.name, GetLocationString(argument));
+      }
+   }
+}
+
+// the declaration of the mesh output a parameter is given, or the declaration itself if it is not such a parameter (see BindMeshOutputArguments)
+ResolveMeshOutputParameter :: (data: *CompilationData, declaration: *Code_Declaration) -> *Code_Declaration {
+   isBound, meshOutput := table_find(*data.meshOutputParameters, declaration);
+   return ifx isBound then meshOutput else declaration;
+}
+
+// the mesh outputs of the user, the first two parameters of the entry point
+IsMeshOutputVariable :: (data: *CompilationData, declaration: *Code_Declaration) -> bool {
+   variable: Identifier = .{ type = .Variable, variable.declaration = declaration };
+   return IdentifierCompare(variable, data.meshVertexOutVariableIdentifier) ||
+          IdentifierCompare(variable, data.meshPrimitiveOutVariableIdentifier);
+}
+
+// meshvertices, meshprimitives, meshtriangles...
+IsBuiltinMeshOutputVariable :: (declaration: *Code_Declaration) -> bool {
+   variable: Identifier = .{ type = .Variable, variable.declaration = declaration };
+   return IdentifierCompare(variable, meshVerticesVariableIdentifier) ||
+          IdentifierCompare(variable, meshPrimitivesVariableIdentifier) ||
+          GetMeshPrimitiveIndicesIndex(variable) != -1;
+}
+
+// a parameter of a procedure that is passed by value (see GetFunctionSpirvType), its value is not in memory
+IsByValueParameter :: (data: *CompilationData, declaration: *Code_Declaration, type: *Type_Info) -> bool {
+   return table_contains(*userFunctionArguments, declaration) && !table_contains(*data.meshOutputParameters, declaration) && !IsSmallArgument(type);
 }
 
 GetDescriptorHeapIdentifier :: (data: *CompilationData, sourceVariable: Identifier) -> Identifier {
@@ -13787,12 +13881,12 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
                   } else if (ciBase.resolved_declaration.flags & .IS_CONSTANT) {
                      // a constant (a lookup table TABLE :: s32.[...]) doesnt exist in memory. it is put in a variable so it can be indexed
                      currentBaseSSAId.*, currentBaseSpirvType.* = MaterializeValue(data, b, baseNode, currentFunction);
-                  } else if (table_contains(*userFunctionArguments, ciBase.resolved_declaration) && !IsSmallArgument(baseType)) {
+                  } else if (IsByValueParameter(data, ciBase.resolved_declaration, baseType)) {
                      // a parameter that is passed by value (see GetFunctionSpirvType) is not in memory, its members are extracted
                      currentBaseSSAId.* = GenerateInstructions(data, baseNode, null, b, currentFunction);
                      currentBaseSpirvType.* = baseType;
                   } else {
-                     baseIdentifier := GetVariableIdentifier(ciBase);
+                     baseIdentifier := GetVariableIdentifier(data, ciBase);
                      currentBaseSSAId.* = GetSSAId(data, baseIdentifier);
 
                      baseSpirvType := New(TypeInfoPointer);
@@ -14071,7 +14165,7 @@ IsLValueExpression :: (data: *CompilationData, node: *Code_Node) -> bool {
          if (isUsingAccess) return IsLValueExpression(data, usingAccess);
          if (table_contains(*data.loopBases, ci.resolved_declaration)) return true;
          if (table_contains(*data.pointerValues, ci.resolved_declaration) || table_contains(*data.pointerIterators, ci.resolved_declaration)) return false;
-         if (table_contains(*userFunctionArguments, ci.resolved_declaration) && !IsSmallArgument(GetNodeType(ci))) return false; // passed by value (see GetFunctionSpirvType)
+         if (IsByValueParameter(data, ci.resolved_declaration, GetNodeType(ci))) return false; // passed by value (see GetFunctionSpirvType)
          return ci.resolved_declaration != null && !(ci.resolved_declaration.flags & .IS_CONSTANT);
 
       case .BINARY_OPERATOR;
@@ -14114,7 +14208,7 @@ GetLValueStorageClass :: (data: *CompilationData, node: *Code_Node) -> SpvStorag
          ci := cast(*Code_Ident) node;
          isUsingAccess, usingAccess := table_find(*data.usingAccesses, ci);
          if (isUsingAccess) return GetLValueStorageClass(data, usingAccess);
-         return GetVariableStorageClass(data, .{ type = .Variable, variable.declaration = ci.resolved_declaration });
+         return GetVariableStorageClass(data, GetVariableIdentifier(data, ci));
 
       case .BINARY_OPERATOR;
          cbo := cast(*Code_Binary_Operator) node;

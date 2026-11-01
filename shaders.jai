@@ -3485,6 +3485,76 @@ TestInterfaceArraysFragment :: (v: TestArrayOut, p: TestPrim, data: *TestData) -
    return f32x4.{ v.weights[0], v.weights[1], v.uv.x, 1 };
 } @fragment
 
+// the mesh outputs are Output variables, a procedure that is given one uses the variable directly (it is not a parameter of the spirv function).
+// the outputs are only written, a mesh shader cant read them.
+TestWriteMeshOutputs :: (o: [] TestArrayOut, v: f32x2) {
+   o[0].uv = v;
+   o[1].weights[1] = v.x;
+}
+
+TestWriteAllMeshOutputs :: (o: [] TestArrayOut, i: s32, v: f32x2) -> f32 {
+   TestWriteMeshOutputs(o, v); // passed on to another procedure
+   o[i] = TestArrayOut.{ .[1, 2], v };
+   for * o  it.uv = v;
+   return v.x;
+}
+
+// the builtin outputs are global variables, they are used directly
+TestWriteBuiltinMeshOutputs :: () {
+   meshvertices[0].position = .{ 0, 0, 0, 1 };
+   meshtriangles[0] = .{ 0, 1, 2 };
+}
+
+TestMeshOutputsInProcedures :: (o: [] TestArrayOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(3, 1);
+   TestWriteMeshOutputs(o, data.v2);
+   TestWriteMeshOutputs(o, data.v2 * 2);
+   data.f = TestWriteAllMeshOutputs(o, data.i, data.v2);
+   TestWriteBuiltinMeshOutputs();
+   for * o  it.weights[0] = 1;
+} @mesh @1_1_1 @3_1 @triangles
+
+// the same procedures are generated again for each entry point
+TestMeshOutputsInProceduresAgain :: (o: [] TestArrayOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(3, 1);
+   TestWriteAllMeshOutputs(o, 0, data.v2);
+} @mesh @1_1_1 @3_1 @triangles
+
+TestMatrixArrayBuffer :: struct {
+   matrices: [2] mat4;
+   normals:  [2] mat3;
+   grid:     [2][3] mat4;
+   scale:    f32;
+}
+
+TestMatrixArrayData :: struct {
+   buffer: *TestMatrixArrayBuffer;
+   rows:   [] [4] f32;  // an array view of arrays
+   grids:  [] [2][3] s32;
+   i:      s32;
+   f:      f32;
+}
+
+// a member that is an array of matrices needs ColMajor and MatrixStride like a matrix member. whole arrays are copied out of a buffer and back.
+TestMatrixArraysInBuffer :: (o: [] TestOut, p: [] TestPrim, data: *TestMatrixArrayData) {
+   b := data.buffer;
+   matrices := b.matrices;
+   normals := b.normals;
+   grid := b.grid;
+   b.matrices = matrices;
+   b.grid[1] = grid[0];
+   b.normals[0] = b.normals[1];
+   data.f = matrices[1][0].x + normals[0][1].y + grid[1][2][3].w + b.matrices[0][1].z;
+
+   row := data.rows[1];
+   data.rows[0] = row;
+   data.rows[data.i][2] = 3;
+   cells := data.grids[data.i];
+   data.grids[0][1] = cells[0];
+   for data.rows  data.f += it[0];
+   data.f += row[2] + data.rows[1][3] + xx cells[1][2];
+} @mesh @1_1_1 @1_1 @triangles
+
 TEST_ALIGNMENT :: 16;
 
 TestAlignedMembers :: struct {

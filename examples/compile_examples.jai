@@ -2,7 +2,7 @@
 #import "File";
 #import "File_Utilities";
 #import "Basic";
-#import,file "../ApilaSpirv.jai";
+#import,file "../module.jai";
 #import "Process";
 
 #run {
