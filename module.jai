@@ -533,7 +533,7 @@ BUILTIN_VARIABLES :: BuiltinVariable.[
    return builder_to_string(*builder);
 };
 
-// the math intrinsics (hlsl names) and the subgroup intrinsics. see MATH_INTRINSICS and SUBGROUP_INTRINSICS
+// the math intrinsics and the subgroup intrinsics. see MATH_INTRINSICS and SUBGROUP_INTRINSICS
 // the bodies of the math intrinsics are the cpu implementations (see cpu.jai). the subgroup ones only exist on the gpu
 #insert #run -> string {
    builder: String_Builder;
@@ -542,6 +542,10 @@ BUILTIN_VARIABLES :: BuiltinVariable.[
       for signature: signatures {
          for type: signature.types {
             header, returnType := ExpandSignature(signature.signature, type);
+
+            // the Math module has this overload, it is the intrinsic (see MATH_MODULE_INTRINSICS)
+            if (IsMathModuleOverload(name, type)) continue;
+
             body := ifx cpu then MathIntrinsicCpuBody(name, header) else tprint("r: %; return r;", returnType);
             print_to_builder(builder, "% :: % { % } @%\n", name, header, body, INTRINSIC_FUNCTION_NOTE_NAME);
          }
@@ -594,6 +598,34 @@ MathIntrinsic :: struct {
 
    coreOp:     SpvOp;   // a spirv instruction instead (if it is not Nop)
    broadcast:  bool;    // the scalar arguments are made vectors of the result type (clamp(v, 0, 1))
+}
+
+//
+// the Math module of jai has the f32 overload of these, with the same meaning. declaring it here too would make a call ambiguous in a program that imports both,
+// so the overload of Math is the intrinsic: a call to it is generated as the intrinsic (see IsIntrinsicProcedure). a shader that uses them has to import Math.
+//
+MATH_MODULE_INTRINSICS :: string.["sin", "cos", "tan", "asin", "acos", "atan", "atan2", "sqrt", "pow", "exp", "log", "abs", "floor", "ceil", "saturate", "lerp", "isnan", "isinf"];
+
+IsMathModuleOverload :: (name: string, type: string) -> bool {
+   return type == "f32" && array_find(MATH_MODULE_INTRINSICS, name);
+}
+
+// a procedure whose calls are generated as an instruction instead of a function: the ones of this module (noted @intrinsic), and the overloads of the Math module that are the math intrinsics (see MATH_MODULE_INTRINSICS)
+IsIntrinsicProcedure :: (header: *Code_Procedure_Header) -> bool {
+   if (header.notes.count > 0 && header.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) return true;
+   if (!IsFromMathModule(header) || !array_find(MATH_MODULE_INTRINSICS, header.name)) return false;
+
+   // the f32 overload. the others (float64, Vector3...) are not intrinsics, the f32xN ones of this module are
+   tip := cast(*Type_Info_Procedure) header.type;
+   isF32Overload := tip.return_types.count == 1 && (CompareType(tip.return_types[0], type_info(f32)) || CompareType(tip.return_types[0], type_info(bool)));
+   for tip.argument_types  if (!CompareType(it, type_info(f32))) isF32Overload = false;
+   assert(isF32Overload, "this overload of % of the Math module is not supported in a shader, only the f32 one is (the math intrinsics are f32, f32xN and s32). loc: %", header.name, GetLocationString(header));
+   return true;
+}
+
+IsFromMathModule :: (node: *Code_Node) -> bool {
+   file := node.location.enclosing_load;
+   return file != null && file.enclosing_import != null && file.enclosing_import.module_name == "Math";
 }
 
 // the integer overloads are only 32 bit. with 64 bit ones too min(x, 3) is ambiguous for jai (x: s32 can be s64 too, as the literal can be s32).
@@ -654,6 +686,10 @@ MATH_INTRINSICS :: MathIntrinsic.[
    .{ "ddx",         UNARY_FLOAT, .Bad,         .Bad,    .Bad,    .DPdx,   false },
    .{ "ddy",         UNARY_FLOAT, .Bad,         .Bad,    .Bad,    .DPdy,   false },
    .{ "fwidth",      UNARY_FLOAT, .Bad,         .Bad,    .Bad,    .Fwidth, false },
+
+   // a float is nan or infinity. scalars only, there are no bool vectors
+   .{ "isnan",       .[.{ "(x: T) -> bool", .["f32"] }], .Bad, .Bad, .Bad, .IsNan, false },
+   .{ "isinf",       .[.{ "(x: T) -> bool", .["f32"] }], .Bad, .Bad, .Bad, .IsInf, false },
 
    // bitcasts: the same bits as another type
    .{ "asuint",       .[.{ "(x: T) -> U", FLOATS }, .{ "(x: T) -> U", SIGNED_INTEGERS }],            .Bad, .Bad, .Bad, .Bitcast, false },
@@ -2691,6 +2727,7 @@ CompilationData :: struct {
    pointerValues:                            Table(*Code_Declaration, PointerValue); // variables that are a pointer that is not stored anywhere, see PointerValue
    loopBases:                                Table(*Code_Declaration, LoopBase); // see LoopBase
    arrayParameters:                          Table(*Code_Declaration, *Code_Declaration); // a [] parameter of a procedure or a macro that is given an array that cant be viewed (a mesh output, a workgroup or local array) is that array, see BindArrayArguments
+   pointerParameters:                        Table(*Code_Declaration, *TypeInfoPointer); // a pointer parameter of a procedure that is given a pointer to a local, workgroup... variable, see BindPointerArguments
    interfaceVariableIdentifiers:             [..] Identifier; // other global variables the entry point uses (workgroup variables)
    usesInt64Atomics:                         bool;
    usesDemote:                               bool;
@@ -4461,6 +4498,8 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          }
 
          case .Fwidth; #through;
+         case .IsNan; #through;
+         case .IsInf; #through;
          case .Transpose; {
             assert(operands.count == 3);
             for operands  assert(it.type == cast(*Type_Info) SSAId);
@@ -5953,6 +5992,8 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          }
 
          case .Fwidth; #through;
+         case .IsNan; #through;
+         case .IsInf; #through;
          case .Transpose; #through;
          case .DPdy; #through;
          case .DPdx; {
@@ -8167,7 +8208,7 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
          .Function,
          GetSSAId(data, returnTypeIdentifier),
          GetSSAId(data,  .{ type = .Function, function = header }),
-         SpvFunctionControlMask.MaskNone,
+         GetFunctionControl(header),
          GetSSAId(data, functionTypeIdentifier)
       );
 
@@ -8183,6 +8224,9 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
             GetSSAId(data, .{ type = ._Type, _type = spirvType }),
             variableSSAId
          );
+
+         // a pointer to a local (workgroup...) variable is not in a variable, the procedure uses it directly (see BindPointerArguments)
+         if (table_contains(*data.pointerParameters, it))  table_set(*data.pointerValues, it, .{ ssaId = variableSSAId, spirvType = spirvType });
       }
 
       WriteSingleInstruction(
@@ -8223,6 +8267,13 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
    }
 }
 
+// the procedures are not inlined unless they are marked inline (F :: inline () {...}).
+// the compilers usually inline every call, which blows up the size of the shader when a big procedure is called in many places.
+GetFunctionControl :: (header: *Code_Procedure_Header) -> SpvFunctionControlMask {
+   if (header.procedure_flags & .SYNTACTICALLY_MARKED_AS_INLINE_YES) return .InlineMask;
+   return .DontInlineMask;
+}
+
 // i should be using the codeNodeTypes here in this function, in this "for tip.argument_types" block to get the type of "it".
 // you know codeNodeTypes shouldnt belong to CompilationData, so when you make it global nd complete seperate pass from the CompileToSpirv
 // use it directly here too.
@@ -8244,7 +8295,10 @@ GetFunctionSpirvType :: (data: *CompilationData, header: *Code_Procedure_Header)
       if (table_contains(*data.arrayParameters, it)) continue;
       argumentType := GetNodeType(it);
 
-      if (IsSmallArgument(argumentType)) {
+      // a pointer to a local (workgroup...) variable is passed as it is (see BindPointerArguments)
+      if (table_contains(*data.pointerParameters, it)) {
+         array_add(*argumentTypes, argumentType);
+      } else if (IsSmallArgument(argumentType)) {
          array_add(*argumentTypes, GetPointerType(argumentType, .Function));
       } else {
          array_add(*argumentTypes, argumentType);
@@ -8268,7 +8322,7 @@ GenerateInstructionsData :: struct {
    spirvShouldHaveBeenType:                     *Type_Info;
    isLValue:                                    bool     = false; // maybe i should have two functions GenerateAddress and GenerateExpression instead of single GenerateInstructions function and a lvalue boolean like this. idk man. - apila, 15/04/26
    accessChainBaseArrayElementTypeIfImageHeap:  *TypeInfoImage;
-   isMacroPointerArgument:                      bool     = false; // the argument of a pointer parameter of a macro, the macro uses the pointer directly (see PointerValue)
+   isPointerArgument:                           bool     = false; // the argument of a pointer parameter of a macro or a procedure, it can point to a local variable (see PointerValue and BindPointerArguments)
 }
 
 // traverse AST and output the generated spirv.
@@ -8559,7 +8613,7 @@ GenerateExtract :: (data: *CompilationData, node: *Code_Node, general: *BuilderT
    // Generate the original call argument with its own type first; the
    // expansion site applies its conversion after substitution.
    argumentSpirvType: *Type_Info;
-   argumentSSAId := GenerateInstructions(data, argument, general, function, currentFunction, .{ isMacroPointerArgument = additionalData.isMacroPointerArgument }, spirvType = *argumentSpirvType);
+   argumentSSAId := GenerateInstructions(data, argument, general, function, currentFunction, .{ isPointerArgument = additionalData.isPointerArgument }, spirvType = *argumentSpirvType);
    assert(argumentSpirvType != null, "macro argument has no SPIR-V type");
    RETURN(argumentSSAId, argumentSpirvType);
 }
@@ -8831,10 +8885,10 @@ GenerateIdent :: (data: *CompilationData, node: *Code_Node, general: *BuilderTyp
       RETURN(accessSSAId, accessSpirvType);
    }
 
-   // the it of a for * loop or a macro parameter that is a pointer to a payload or a workgroup variable, see PointerValue
+   // the it of a for * loop or a macro or procedure parameter that is a pointer to a local, payload or workgroup variable, see PointerValue
    isPointerValue, pointerValue := table_find(*data.pointerValues, ci.resolved_declaration);
    if (isPointerValue) {
-      assert(!additionalData.isLValue, "% cant be assigned (it is the it of a for * loop, or a macro parameter that points to a payload or a workgroup variable which spirv doesnt allow to store). loc: %", ci.name, GetLocationString(node));
+      assert(!additionalData.isLValue, "% cant be assigned (it is the it of a for * loop, or a macro or procedure parameter that points to a local, payload or workgroup variable which spirv doesnt allow to store). loc: %", ci.name, GetLocationString(node));
       RETURN(pointerValue.ssaId, pointerValue.spirvType);
    }
 
@@ -8960,12 +9014,12 @@ GenerateUnaryOperator :: (data: *CompilationData, node: *Code_Node, general: *Bu
          assert(subexpressionLValueSpirvType.type == TYPE_INFO_POINTER_TAG);
 
          // RayPayloadKHR is allowed because TraceRay takes the address of the payload. it only uses it to know which payload variable to use.
-         // Workgroup is allowed for the atomics. (a workgroup pointer cant be stored or passed to a procedure, DoCast checks the storage classes)
-         // Function (a local variable) is allowed as the argument of a pointer parameter of a macro: the macro uses the pointer directly, it is never stored (see PointerValue).
+         // Workgroup is allowed for the atomics and for pointer parameters. (a workgroup pointer cant be stored, DoCast checks the storage classes)
+         // Function (a local variable) is allowed as the argument of a pointer parameter of a macro or a procedure: it is never stored (see PointerValue and BindPointerArguments).
          storageClass := subexpressionLValueSpirvType.(*TypeInfoPointer).storageClass;
          isRayQuery := storageClass == .Function && IsRayQueryOrHitObject((cast(*TypeInfoPointer) subexpressionLValueSpirvType).pointerTo);
-         isLocalForMacro := storageClass == .Function && additionalData.isMacroPointerArgument;
-         assert(storageClass == .PhysicalStorageBuffer || storageClass == .RayPayloadKHR || storageClass == .Workgroup || storageClass == .CallableDataKHR || storageClass == .HitObjectAttributeEXT || isRayQuery || isLocalForMacro, "taking the address of something in % storage class is not allowed in spirv (for example a local variable). only memory reached through a pointer (PhysicalStorageBuffer) can be addressed, and a local variable can only be passed to a pointer parameter of a macro. loc: %", storageClass, GetLocationString(node));
+         isLocalArgument := storageClass == .Function && additionalData.isPointerArgument;
+         assert(storageClass == .PhysicalStorageBuffer || storageClass == .RayPayloadKHR || storageClass == .Workgroup || storageClass == .CallableDataKHR || storageClass == .HitObjectAttributeEXT || isRayQuery || isLocalArgument, "taking the address of something in % storage class is not allowed in spirv (for example a local variable). only memory reached through a pointer (PhysicalStorageBuffer) can be addressed, and a local variable can only be passed to a pointer parameter of a macro or a procedure. loc: %", storageClass, GetLocationString(node));
 
          RETURN(subexpressionLValueSSAId, subexpressionLValueSpirvType);
       }
@@ -9541,8 +9595,8 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
    //                            - apila, 10/06/26
    //
    // sin, cos, clamp, dot, mul... (see MATH_INTRINSICS)
-   if (header.notes.count > 0 && header.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) {
-      mathIntrinsic := GetMathIntrinsic(identifierName);
+   if (IsIntrinsicProcedure(header)) {
+      mathIntrinsic := GetMathIntrinsic(header.name);
       if (mathIntrinsic != null) {
          resultSpirvType: *Type_Info;
          resultSSAId := GenerateMathIntrinsic(data, mathIntrinsic, cpc, header, general, function, currentFunction, *resultSpirvType);
@@ -9794,9 +9848,7 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
       }
    }
 
-   if (header.notes.count > 0) {
-      assert(header.notes[0].text != INTRINSIC_FUNCTION_NOTE_NAME, "intrinsic function not yet implemetned! name: %", identifierName);
-   }
+   assert(!IsIntrinsicProcedure(header), "intrinsic function not yet implemetned! name: %", identifierName);
 
    // if code reached here then it means this is a user defined function.
    AddFunctionDependency(*functionDependencyTable, currentFunction, header);
@@ -9812,11 +9864,24 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
    array_add(*operands, resultSSAId);
    array_add(*operands, GetSSAId(data, .{ type = .Function, function = header }));
 
+   // the pointers into local variables that are copied for the call, the values are copied back after it (see GeneratePointerArgument)
+   copies: [..] PointerArgumentCopy;
+   copies.allocator = temp;
+
    // the arguments in the order of the parameters, the compiler puts named arguments in their place and fills in the default values
    assert(cpc.arguments_sorted.count == header.arguments.count, "varargs are not supported. loc: %", GetLocationString(node));
    for argumentNode: cpc.arguments_sorted {
       if (table_contains(*data.arrayParameters, header.arguments[it_index])) continue; // the procedure uses the array variable (see BindArrayArguments)
       argumentType := GetNodeType(header.arguments[it_index]);
+
+      isPointerParameter, pointerType := table_find(*data.pointerParameters, header.arguments[it_index]);
+      if (isPointerParameter) {
+         pointerSSAId, copy := GeneratePointerArgument(data, argumentNode, pointerType, general, function, currentFunction);
+         if (copy.copySSAId != 0)  array_add(*copies, copy);
+         array_add(*operands, ac(pointerSSAId));
+         continue;
+      }
+
       argumentSSAId := GenerateInstructions(data, argumentNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = argumentType });
 
       if (IsSmallArgument(argumentType)) {
@@ -9855,6 +9920,11 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
       .FunctionCall,
       .. operands
    );
+
+   for copies {
+      valueSSAId := Load(data, function, .{ type = ._Type, _type = it.type }, it.copySSAId, false);
+      Store(data, function, it.addressSSAId, valueSSAId, false, it.type);
+   }
 
    if (returnTypeIdentifier.type == .Void) RETURN(resultSSAId, returnType);
 
@@ -10376,9 +10446,9 @@ GenerateDeclaration :: (data: *CompilationData, node: *Code_Node, general: *Buil
    // a macro parameter that is a pointer. the argument is generated with its own type: if it points to a payload, a workgroup or a local variable
    // spirv doesnt allow storing it so the parameter is the pointer itself (see PointerValue). a pointer to buffer memory is an ordinary variable.
    macroPointerArgumentSSAId: SSAId;
-   if (cd.type.type == .POINTER && cd.expression != null && cd.expression.kind == .EXTRACT && (cast(*Code_Extract) cd.expression).from == null) {
+   if (IsMacroPointerParameter(cd)) {
       argumentSpirvType: *Type_Info;
-      argumentSSAId := GenerateInstructions(data, cd.expression, general, function, currentFunction, .{ isMacroPointerArgument = true }, spirvType = *argumentSpirvType);
+      argumentSSAId := GenerateInstructions(data, cd.expression, general, function, currentFunction, .{ isPointerArgument = true }, spirvType = *argumentSpirvType);
       assert(argumentSpirvType != null && argumentSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
 
       if ((cast(*TypeInfoPointer) argumentSpirvType).storageClass != .PhysicalStorageBuffer) {
@@ -11778,7 +11848,7 @@ DetermineProcedureHeaderType :: (data: *CompilationData, node: *Code_Node) -> *T
    }
 
    // the body of an intrinsic is its cpu implementation (see cpu.jai), it is not generated
-   if (cph.notes.count > 0 && cph.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) {
+   if (IsIntrinsicProcedure(cph)) {
       TableAdd(*data.codeNodeTypes, node, node.type);
       return node.type;
    }
@@ -11823,8 +11893,10 @@ DetermineProcedureCallType :: (data: *CompilationData, node: *Code_Node) -> *Typ
       return cast(*Type_Info) void;
    }
 
-   // before the procedure is typed, its parameters that are given an array that cant be viewed are that array
+   // before the procedure is typed, its parameters that are given an array that cant be viewed are that array,
+   // and its pointer parameters that are given a pointer to a local (workgroup...) variable are pointers to that memory
    BindArrayArguments(data, cpc, header);
+   BindPointerArguments(data, cpc, header);
 
    // recurse into the procedure
    DetermineCodeNodeTypes(data, header);
@@ -11871,6 +11943,22 @@ DetermineDeclarationType :: (data: *CompilationData, node: *Code_Node) -> *Type_
       type := DetermineCodeNodeTypes(data, array);
       TableAdd(*data.codeNodeTypes, node, type);
       return type;
+   }
+
+   // a pointer parameter that is given a pointer to a local (workgroup...) variable points to that memory (see BindPointerArguments)
+   isPointerParameter, pointerType := table_find(*data.pointerParameters, cd);
+   if (isPointerParameter) {
+      TableAdd(*data.codeNodeTypes, node, pointerType);
+      return pointerType;
+   }
+
+   // same for a pointer parameter of a macro, it is the pointer it is given (see GenerateDeclaration)
+   if (IsMacroPointerParameter(cd)) {
+      argumentType := GetNodeType(cd.expression);
+      if (IsNonBufferPointer(argumentType)) {
+         TableAdd(*data.codeNodeTypes, node, argumentType);
+         return argumentType;
+      }
    }
 
    // some of the intrinsics
@@ -12886,6 +12974,7 @@ ForLoopNodes :: struct {
 // a pointer that is used directly instead of being stored in a variable:
 //    - the it of a for * loop, the address of the element in the current iteration
 //    - a macro parameter whose argument is a pointer to a payload, a workgroup or a local variable. spirv doesnt allow storing such a pointer.
+//    - a procedure parameter that is given such a pointer, it is the OpFunctionParameter (see BindPointerArguments)
 // they cant be assigned.
 PointerValue :: struct {
    ssaId:      SSAId;
@@ -13389,7 +13478,7 @@ GetVariableIdentifier :: (data: *CompilationData, ci: *Code_Ident) -> Identifier
 // a local array is not a global variable, it cant be given to a procedure (only to a macro, see BindArrayMacroParameter).
 // the builtin outputs (meshvertices, meshprimitives, meshtriangles...) are global variables in jai too, procedures use them directly instead.
 BindArrayArguments :: (data: *CompilationData, cpc: *Code_Procedure_Call, header: *Code_Procedure_Header) {
-   if (header.notes.count > 0 && header.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) return;
+   if (IsIntrinsicProcedure(header)) return;
    if (cpc.arguments_sorted.count != header.arguments.count) return; // varargs, GenerateProcedureCall says they are not supported
 
    for argument: cpc.arguments_sorted {
@@ -13461,6 +13550,105 @@ GetBoundArrayArgument :: (data: *CompilationData, argument: *Code_Node, isMacro:
 ResolveArrayParameter :: (data: *CompilationData, declaration: *Code_Declaration) -> *Code_Declaration {
    isBound, array := table_find(*data.arrayParameters, declaration);
    return ifx isBound then array else declaration;
+}
+
+// a pointer is a buffer pointer (PhysicalStorageBuffer). a pointer to a local, workgroup, payload... variable cant be stored in spirv,
+// but a pointer to a local or a workgroup variable can be a parameter of a function (the payloads cant, they can only be given to a macro).
+// so a pointer parameter that is given such a pointer is a pointer to that storage class, and the procedure uses it directly (see PointerValue).
+// the procedures are generated for each entry point, so a parameter is bound to the storage class of the entry point being compiled.
+//    Bump :: (x: *f32) { x.* += 1; }
+//    local: f32;
+//    Bump(*local); // x is a pointer to Function memory in Bump
+// a parameter has to be given the same storage class in every call (in the same entry point), it cant be given a local in one call and a buffer pointer in another.
+// spirv only allows a variable (or a pointer parameter) itself to be passed, not a pointer into it (*local.member, *array[i], the it of a for * loop).
+// such an argument is copied to a new variable before the call and copied back after it (see GeneratePointerArgument).
+BindPointerArguments :: (data: *CompilationData, cpc: *Code_Procedure_Call, header: *Code_Procedure_Header) {
+   if (IsIntrinsicProcedure(header)) return;
+   if (cpc.arguments_sorted.count != header.arguments.count) return; // varargs, GenerateProcedureCall says they are not supported
+
+   for argument: cpc.arguments_sorted {
+      parameter := header.arguments[it_index];
+      if (parameter.type.type != .POINTER) continue;
+
+      argumentType := DetermineCodeNodeTypes(data, argument);
+      pointerType := ifx IsNonBufferPointer(argumentType) then cast(*TypeInfoPointer) argumentType else null;
+
+      isBound, boundTo := table_find(*data.pointerParameters, parameter);
+      if (pointerType != null) {
+         // the storage classes spirv allows for the pointer arguments of a function call
+         storageClass := pointerType.storageClass;
+         assert(storageClass == .Function || storageClass == .Private || storageClass == .Workgroup, "a pointer to % memory cant be given to a procedure in spirv (only to a local or a workgroup variable), make the procedure a macro. loc: %", storageClass, GetLocationString(argument));
+
+         if (isBound) {
+            assert(boundTo.storageClass == pointerType.storageClass, "parameter % of % is given a pointer to % memory here and to % memory in another call. a pointer parameter that is given a pointer to a local (workgroup...) variable has to be given one in the same storage class in every call (see BindPointerArguments). loc: %", parameter.name, header.name, pointerType.storageClass, boundTo.storageClass, GetLocationString(argument));
+         } else {
+            // the procedure is typed by its first call. if that call gave a buffer pointer, the parameter is a regular one
+            assert(!table_contains(*data.codeNodeTypes, parameter), "parameter % of % is given a pointer to % memory here and a buffer pointer in another call. a pointer parameter that is given a pointer to a local (workgroup...) variable has to be given one in every call, copy the value to a local variable and pass its address instead (see BindPointerArguments). loc: %", parameter.name, header.name, pointerType.storageClass, GetLocationString(argument));
+            TableAdd(*data.pointerParameters, parameter, pointerType);
+         }
+      } else {
+         assert(!isBound, "parameter % of % is given a pointer to % memory in another call and something else here. a pointer parameter that is given a pointer to a local (workgroup...) variable has to be given one in the same storage class in every call, copy the value to a local variable and pass its address instead (see BindPointerArguments). loc: %", parameter.name, header.name, boundTo.storageClass, GetLocationString(argument));
+      }
+   }
+}
+
+// the argument of a pointer parameter of a procedure that is a pointer to a local (workgroup...) variable (see BindPointerArguments).
+// returns the pointer that is passed. if it is a pointer into a variable, it is a new variable that has a copy of the value and copyBack is set: the value is copied back after the call.
+GeneratePointerArgument :: (data: *CompilationData, argument: *Code_Node, parameterType: *TypeInfoPointer, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header) -> SSAId, copyBack: PointerArgumentCopy {
+   argumentSpirvType: *Type_Info;
+   argumentSSAId := GenerateInstructions(data, argument, general, function, currentFunction, .{ isPointerArgument = true }, spirvType = *argumentSpirvType);
+   assert(IsNonBufferPointer(argumentSpirvType) && (cast(*TypeInfoPointer) argumentSpirvType).storageClass == parameterType.storageClass, "the argument is not a pointer to % memory. loc: %", parameterType.storageClass, GetLocationString(argument));
+
+   if (IsMemoryObjectDeclarationArgument(data, argument)) return argumentSSAId, .{};
+
+   pointee := parameterType.pointerTo;
+   assert(parameterType.storageClass == .Function, "only a % variable itself can be passed to a procedure, not a pointer into it (spirv doesnt allow it, and the variable is shared so it cant be copied). pass the variable or make the procedure a macro. loc: %", parameterType.storageClass, GetLocationString(argument));
+   assert(!IsRayQueryOrHitObject(pointee), "a % cant be copied, only a variable itself can be passed to a procedure, not a pointer into it. loc: %", TypeName(pointee), GetLocationString(argument));
+
+   storageClass := SpvStorageClass.Function;
+   copySSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(general, *data.isBlockReachable, .Variable, GetSSAId(data, .{ type = ._Type, _type = GetPointerType(pointee, storageClass) }), copySSAId, storageClass);
+
+   valueSSAId := Load(data, function, .{ type = ._Type, _type = pointee }, argumentSSAId, false);
+   Store(data, function, copySSAId, valueSSAId, false, pointee);
+
+   return copySSAId, .{ copySSAId = copySSAId, addressSSAId = argumentSSAId, type = pointee };
+}
+
+// a pointer into a local variable that is given to a procedure is a copy of the value (see GeneratePointerArgument)
+PointerArgumentCopy :: struct {
+   copySSAId:     SSAId; // 0 if the argument is not copied
+   addressSSAId:  SSAId;
+   type:          *Type_Info;
+}
+
+// spirv only allows a memory object declaration as the pointer argument of a function call: a variable or a pointer parameter, not a pointer into one
+//    *local             yes
+//    pointerParameter   yes (see BindPointerArguments)
+//    *local.member      no
+//    it of for *        no
+IsMemoryObjectDeclarationArgument :: (data: *CompilationData, argument: *Code_Node) -> bool {
+   if (argument.kind == .IDENT) return table_contains(*data.pointerParameters, (cast(*Code_Ident) argument).resolved_declaration);
+   if (argument.kind != .UNARY_OPERATOR || (cast(*Code_Unary_Operator) argument).operator_type != #char "*") return false;
+
+   subexpression := (cast(*Code_Unary_Operator) argument).subexpression;
+   if (subexpression.kind != .IDENT) return false;
+
+   ci := cast(*Code_Ident) subexpression;
+   if (table_contains(*data.usingAccesses, ci)) return false; // a member
+   if (table_contains(*data.loopBases, ci.resolved_declaration)) return false; // the address of what a for loop iterates
+   if (GetBuiltinVariableIndex(GetVariableIdentifier(data, ci)) != -1) return false; // the sample masks are an element of an array (see GenerateIdent)
+   return true;
+}
+
+// a pointer that cant be stored: a pointer to a local, workgroup, payload... variable
+IsNonBufferPointer :: (type: *Type_Info) -> bool {
+   return type != null && type.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) type).storageClass != .PhysicalStorageBuffer;
+}
+
+// a parameter of a macro is a declaration in the expansion that is initialized with the argument (a Code_Extract)
+IsMacroPointerParameter :: (cd: *Code_Declaration) -> bool {
+   return cd.type.type == .POINTER && cd.expression != null && cd.expression.kind == .EXTRACT && (cast(*Code_Extract) cd.expression).from == null;
 }
 
 IsArrayOfType :: (type: *Type_Info, arrayType: Type_Info_Array.Array_Type) -> bool {

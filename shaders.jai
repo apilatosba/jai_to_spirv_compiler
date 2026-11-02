@@ -1,5 +1,6 @@
 #import "File";
 #import "ApilaSpirv";
+#import "Math"; // the f32 overloads of sin, sqrt, lerp... (see MATH_MODULE_INTRINSICS)
 
 FixedArrayTest :: (data: *RgenData) {
    x: [3] f32;
@@ -343,7 +344,6 @@ PbrFragment :: (v: PbrMeshOutVertex, p: PbrMeshOutPrimitive, data: *PbrData) -> 
    return f32x4.{color.x, color.y, color.z, 1.0};
 } @fragment
 
-PI: f32 : 3.1415927;
 
 // https://learnopengl.com/PBR/IBL/Diffuse-irradiance
 DirectionToEquirectangularUv :: (v_: f32x3) -> f32x2 {
@@ -3305,6 +3305,16 @@ TestMacroWorkgroupPointer :: (data: *TestComputeData) {
    TestMacroIncrement(*counter, 1);
 } @compute @8_8
 
+TestIncrement :: (p: *s32, amount: s32) { p.* += amount; }
+
+// a pointer to a workgroup variable can be given to a procedure too
+TestWorkgroupPointerPassed :: (data: *TestComputeData) {
+   counter: s32; @workgroup
+   if localinvocationindex == 0  counter = 0;
+   Barrier();
+   TestIncrement(*counter, 1);
+} @compute @8_8
+
 // the pointers in an array point to buffer memory, like the other pointers
 TestPointerArrayData :: struct {
    ptrs:    [2] *s32;
@@ -4241,6 +4251,48 @@ TestForPointer :: (o: [] TestOut, p: [] TestPrim, data: *TestForPointerData) {
    data.i += local[1].indices.x + locals[2];
 } @mesh @1_1_1 @1_1 @triangles
 
+TestBumpFloat :: (x: *f32, amount: f32) { x.* += amount; }
+
+// a procedure that is given a pointer passes it on, it is still the variable
+TestTouchInnerTwice :: (inner: *TestInner) {
+   TestTouchInner(inner);
+   TestBumpFloat(*inner.value, 2);
+}
+
+TestSumInline :: inline (v: *f32x3) -> f32 { return v.x + v.y + v.z; }
+
+// a pointer to a local variable can be given to a procedure. the variable itself is passed,
+// a pointer into it (a member, an element, the it of a for * loop) is copied to a new variable and copied back after the call
+TestPointerToLocalPassed :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   inner: TestInner;
+   TestTouchInner(*inner);
+   TestTouchInnerTwice(*inner);
+   TestBumpFloat(*inner.value, data.f);
+
+   local: [4] TestInner;
+   for * local  TestTouchInner(it);
+   TestTouchInner(*local[2]);
+
+   v := data.v3;
+   data.f = inner.value + local[2].value + TestSumInline(*v);
+} @mesh @1_1_1 @1_1 @triangles
+
+TestMacroTouchInner :: (inner: *TestInner) #expand { TestTouchInner(inner); }
+
+// a pointer parameter of a macro that is given a local can be given to a procedure
+TestMacroPointerToLocalPassed :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   inner: TestInner;
+   TestMacroTouchInner(*inner);
+   data.f = inner.value;
+} @mesh @1_1_1 @1_1 @triangles
+
+// the same procedures are given buffer pointers in another entry point
+TestBufferPointerPassed :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   TestTouchInnerTwice(data.inner);
+   TestBumpFloat(*data.f, 1);
+   data.f += TestSumInline(*data.v3);
+} @mesh @1_1_1 @1_1 @triangles
+
 TestComputeData :: struct {
    count:  u32;
    values: *f32;
@@ -4361,6 +4413,7 @@ TestHlslIntrinsics :: (data: *TestIntrinsicData) {
    data.f = sin(f) + cos(f) + tan(f) + asin(f) + acos(f) + atan(f) + atan2(f, 2) + sqrt(f) + inversesqrt(f) + pow(f, 2);
    data.f += exp(f) + exp2(f) + log(f) + log2(f) + abs(f) + sign(f) + floor(f) + ceil(f) + round(f) + trunc(f) + frac(f);
    data.f += min(f, 1) + max(f, 2) + clamp(f, 0, 1) + saturate(f) + lerp(f, 2, 0.5) + step(0.5, f) + smoothstep(0, 1, f);
+   if isnan(f) || isinf(f)  data.f = 0;
 
    // a scalar given to a vector parameter is made a vector (clamp(v, 0, 1))
    data.v3 = sin(v3) + abs(v3) + min(v3, v3) + clamp(v3, 0, 1) + clamp(v3, v3, v3) + saturate(v3) + lerp(v3, v3, 0.5) + step(0.5, v3) + smoothstep(0, 1, v3);
@@ -4767,11 +4820,20 @@ UnsupportedUsingParameter :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    data.i = UnsupportedUsingParameterHelper(data);
 } @mesh @1_1_1 @1_1 @triangles
 
-// spirv doesnt allow a pointer to a local variable to be passed to a procedure
-UnsupportedPointerToLocalPassed :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
-   local: [4] TestInner;
-   for * local  TestTouchInner(it);
+// a pointer parameter is a pointer to a local variable or a buffer pointer, it cant be both in the same entry point
+UnsupportedPointerToLocalAndBufferPassed :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
+   local: TestInner;
+   TestTouchInner(*local);
+   TestTouchInner(*data.inner);
 } @mesh @1_1_1 @1_1 @triangles
+
+UnsupportedAddOne :: (x: *s32) { x.* += 1; }
+
+// spirv only allows a workgroup variable itself to be passed, and it cant be copied since it is shared
+UnsupportedPointerIntoWorkgroupPassed :: (data: *TestComputeData) {
+   counters: [4] s32; @workgroup
+   UnsupportedAddOne(*counters[1]);
+} @compute @64
 
 // a workgroup variable is shared by all the invocations of the workgroup, they would all initialize it
 UnsupportedWorkgroupInitializer :: (data: *TestComputeData) {

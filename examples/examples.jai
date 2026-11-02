@@ -4,6 +4,7 @@
 //
 
 #import,file "../ApilaSpirv.jai";
+#import "Math"; // the f32 overloads of sin, sqrt, lerp... (see MATH_MODULE_INTRINSICS)
 
 MeshOutVertex :: struct {
    uv: f32x2;
@@ -200,7 +201,6 @@ PbrFragment :: (v: PbrMeshOutVertex, p: PbrMeshOutPrimitive, data: *PbrData) -> 
    return f32x4.{color.x, color.y, color.z, 1.0};
 } @fragment
 
-PI: f32 : 3.1415927;
 
 // https://learnopengl.com/PBR/IBL/Diffuse-irradiance
 DirectionToEquirectangularUv :: (v_: f32x3) -> f32x2 {

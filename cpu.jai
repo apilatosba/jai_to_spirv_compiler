@@ -171,6 +171,10 @@ MathIntrinsicCpuBody :: (name: string, header: string) -> string {
       case "ddy";          #through;
       case "fwidth";       return Componentwise("0");
 
+      // the exponent bits are all set. infinity has no mantissa bits, nan has some
+      case "isnan";        return "return ((cast(*u32) *x).* & 0x7fff_ffff) > 0x7f80_0000;";
+      case "isinf";        return "return ((cast(*u32) *x).* & 0x7fff_ffff) == 0x7f80_0000;";
+
       case "asuint";       #through;
       case "asint";        #through;
       case "asfloat";      return Componentwise("(cast(*$R) *x).*");
