@@ -3520,6 +3520,137 @@ TestMeshOutputsInProceduresAgain :: (o: [] TestArrayOut, p: [] TestPrim, data: *
    TestWriteAllMeshOutputs(o, 0, data.v2);
 } @mesh @1_1_1 @3_1 @triangles
 
+// a macro parameter that is given a mesh output is the output too, like a parameter of a procedure.
+TestWriteMeshOutputsMacro :: (o: [] TestArrayOut, v: f32x2) #expand {
+   o[0].uv = v;
+   o[1].weights[1] = v.x;
+}
+
+TestWriteAllMeshOutputsMacro :: (o: [] TestArrayOut, i: s32, v: f32x2) #expand {
+   TestWriteMeshOutputsMacro(o, v); // passed on to another macro
+   TestWriteMeshOutputs(o, v);      // and to a procedure
+   o[i] = TestArrayOut.{ .[1, 2], v };
+   for * o  it.uv = v;
+}
+
+// a procedure that is given a mesh output gives it to a macro
+TestWriteMeshOutputsThroughMacro :: (o: [] TestArrayOut, v: f32x2) {
+   TestWriteMeshOutputsMacro(o, v);
+}
+
+TestMeshOutputsInMacros :: (o: [] TestArrayOut, p: [] TestPrim, data: *TestData) {
+   SetMeshOutputs(3, 1);
+   TestWriteMeshOutputsMacro(o, data.v2);
+   TestWriteMeshOutputsMacro(o, data.v2 * 2);
+   TestWriteAllMeshOutputsMacro(o, data.i, data.v2);
+   TestWriteMeshOutputsThroughMacro(o, data.v2);
+} @mesh @1_1_1 @3_1 @triangles
+
+// the struct of a stage input or output is also in a buffer. the interface variables dont have offsets, the buffer needs them (see GetInterfaceType)
+TestSharedInterfaceData :: struct {
+   outs:   [] TestArrayOut;
+   single: TestArrayOut;
+   v2:     f32x2;
+}
+
+// every call of a macro has its own expansion, so the same macro can be given a mesh output in one call and an array in a buffer in another
+TestInterfaceStructInBufferMesh :: (o: [] TestArrayOut, p: [] TestPrim, data: *TestSharedInterfaceData) {
+   SetMeshOutputs(3, 1);
+   TestWriteMeshOutputsMacro(o, data.v2);
+   TestWriteMeshOutputsMacro(data.outs, data.v2);
+   o[1] = data.outs[0];
+   o[2] = data.single;
+   data.single = data.outs[1];
+   data.outs[2].weights[0] = data.v2.y;
+} @mesh @1_1_1 @3_1 @triangles
+
+TestInterfaceStructInBufferFragment :: (v: TestArrayOut, p: TestPrim, data: *TestSharedInterfaceData) -> f32x4 {
+   data.single = v;
+   data.outs[0] = v;
+   copy := v;
+   return f32x4.{ copy.weights[0], v.weights[1], data.single.uv.x, 1 };
+} @fragment
+
+// a view of a fixed array points to it, so the array has to be in a buffer (see GenerateArrayViewOfFixedArray).
+// a workgroup or a local array cant be viewed, a [] parameter that is given one is the array (see BindArrayArguments).
+TestSumArray :: (a: [] f32) -> f32 {
+   sum: f32;
+   for a  sum += it;
+   return sum + a[a.count - 1];
+}
+
+TestScaleArray :: (a: [] f32, scale: f32) {
+   for * a  it.* *= scale;
+   for i: 0..a.count - 1  a[i] += 1;
+}
+
+// a parameter that is given a workgroup array is given it in every call, these are only called with it
+TestSumWorkgroupArray :: (a: [] f32) -> f32 {
+   return TestSumArrayAgain(a); // passed on to another procedure
+}
+
+TestSumArrayAgain :: (a: [] f32) -> f32 {
+   sum: f32;
+   for a  sum += it;
+   return sum + a[a.count - 1];
+}
+
+TestScaleWorkgroupArray :: (a: [] f32, scale: f32) {
+   for * a  it.* *= scale;
+   for i: 0..a.count - 1  a[i] += 1;
+}
+
+TestScaleArrayMacro :: (a: [] f32, scale: f32) -> s64 #expand {
+   for * a  it.* *= scale;
+   a[0] = scale;
+   return a.count;
+}
+
+TestFixedArrayViewData :: struct {
+   buffer: *TestFixedArrayViewBuffer;
+   f:      f32;
+   i:      s32;
+}
+
+TestFixedArrayViewBuffer :: struct {
+   values:   [4] f32;
+   matrices: [2] mat4;
+}
+
+testWorkgroupValues: [8] f32; @workgroup
+
+TestFixedArrayViews :: (o: [] TestOut, p: [] TestPrim, data: *TestFixedArrayViewData) {
+   SetMeshOutputs(1, 1);
+   b := data.buffer;
+
+   // in a buffer: a view
+   view: [] f32 = b.values;
+   data.f = view[data.i] + xx view.count;
+   data.f += TestSumArray(b.values);
+   TestScaleArray(b.values, 2);
+   data.f += xx TestScaleArrayMacro(b.values, 3);
+   matrices: [] mat4 = b.matrices;
+   data.f += matrices[1][0].x;
+
+   // a workgroup array, given to a procedure (in every call) and to a macro
+   TestScaleWorkgroupArray(testWorkgroupValues, 2);
+   TestScaleWorkgroupArray(testWorkgroupValues, 3);
+   data.f += TestSumWorkgroupArray(testWorkgroupValues);
+   data.f += xx TestScaleArrayMacro(testWorkgroupValues, 3);
+
+   // a local array, given to a macro
+   local: [3] f32;
+   data.f += xx TestScaleArrayMacro(local, 4);
+   data.f += local[0];
+
+   // the count of a mesh output
+   data.f += xx (o.count + TestCountOutputs(o));
+} @mesh @1_1_1 @1_1 @triangles
+
+TestCountOutputs :: (o: [] TestOut) -> s64 {
+   return o.count;
+}
+
 TestMatrixArrayBuffer :: struct {
    matrices: [2] mat4;
    normals:  [2] mat3;

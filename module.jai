@@ -2690,7 +2690,7 @@ CompilationData :: struct {
    pointerIterators:                         Table(*Code_Declaration, *Code_For); // the it of a for * loop. it is the address of the element, see the .FOR case of DetermineCodeNodeTypes
    pointerValues:                            Table(*Code_Declaration, PointerValue); // variables that are a pointer that is not stored anywhere, see PointerValue
    loopBases:                                Table(*Code_Declaration, LoopBase); // see LoopBase
-   meshOutputParameters:                     Table(*Code_Declaration, *Code_Declaration); // a parameter of a procedure that is given a mesh output is that output, see BindMeshOutputArguments
+   arrayParameters:                          Table(*Code_Declaration, *Code_Declaration); // a [] parameter of a procedure or a macro that is given an array that cant be viewed (a mesh output, a workgroup or local array) is that array, see BindArrayArguments
    interfaceVariableIdentifiers:             [..] Identifier; // other global variables the entry point uses (workgroup variables)
    usesInt64Atomics:                         bool;
    usesDemote:                               bool;
@@ -3547,23 +3547,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
             annotateInfo := GetAnnotateInfoFromStruct(type);
             tis := type.(*Type_Info_Struct);
 
-            // Stage input/output structs are interface types, not buffer
-            // layout types.  In particular, Offset (and the other member
-            // layout decorations) are invalid on an Input interface
-            // variable.  The same user struct can still be used as a
-            // physical-storage/push-constant struct elsewhere, so decide
-            // this from the entry-point arguments rather than from the
-            // struct type alone.
-            isInterfaceStruct := false;
-            if data.shaderType == .Fragment {
-               isInterfaceStruct =
-                  CompareType(type, data.fragmentVertexInVariableIdentifier.variable.declaration.type) ||
-                  CompareType(type, data.fragmentPrimitiveInVariableIdentifier.variable.declaration.type);
-            } else if data.shaderType == .Mesh {
-               vertexType := GetArrayElementType(data.meshVertexOutVariableIdentifier.variable.declaration);
-               primitiveType := GetArrayElementType(data.meshPrimitiveOutVariableIdentifier.variable.declaration);
-               isInterfaceStruct = CompareType(type, vertexType) || CompareType(type, primitiveType);
-            }
+            // the stage inputs and outputs dont have offsets, they use the decorationless copy of the struct (see GetInterfaceType)
 
             // idk about the Block decoration.
             // i think it is not needed for any struct other than push constant block.
@@ -3580,8 +3564,6 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
                   SpvDecoration.Block
                );
             }
-
-            if (isInterfaceStruct) continue;
 
             for GetStructMembers(tis) {
                WriteSingleInstruction(
@@ -8191,7 +8173,7 @@ GenerateFunctions :: (data: *CompilationData, body: *Code_Procedure_Body, b: *Bu
 
       spirvArgumentIndex := 0;
       for header.arguments {
-         if (table_contains(*data.meshOutputParameters, it)) continue; // the procedure uses the output variable (see BindMeshOutputArguments)
+         if (table_contains(*data.arrayParameters, it)) continue; // the procedure uses the array variable (see BindArrayArguments)
          spirvType := functionSpirvType.argument_types[spirvArgumentIndex];
          spirvArgumentIndex += 1;
          variableSSAId := GetSSAId(data, .{ type = .Variable, variable.declaration = it });
@@ -8256,10 +8238,10 @@ GetFunctionSpirvType :: (data: *CompilationData, header: *Code_Procedure_Header)
    result.runtime_size = tip.runtime_size;
    result.type = tip.type;
 
-   // a parameter that is given a mesh output is not a parameter of the spirv function (see BindMeshOutputArguments)
+   // a parameter that is given an array that cant be viewed is not a parameter of the spirv function (see BindArrayArguments)
    argumentTypes: [..] *Type_Info;
    for header.arguments {
-      if (table_contains(*data.meshOutputParameters, it)) continue;
+      if (table_contains(*data.arrayParameters, it)) continue;
       argumentType := GetNodeType(it);
 
       if (IsSmallArgument(argumentType)) {
@@ -9833,7 +9815,7 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
    // the arguments in the order of the parameters, the compiler puts named arguments in their place and fills in the default values
    assert(cpc.arguments_sorted.count == header.arguments.count, "varargs are not supported. loc: %", GetLocationString(node));
    for argumentNode: cpc.arguments_sorted {
-      if (table_contains(*data.meshOutputParameters, header.arguments[it_index])) continue; // the procedure uses the output variable (see BindMeshOutputArguments)
+      if (table_contains(*data.arrayParameters, header.arguments[it_index])) continue; // the procedure uses the array variable (see BindArrayArguments)
       argumentType := GetNodeType(header.arguments[it_index]);
       argumentSSAId := GenerateInstructions(data, argumentNode, general, function, currentFunction, .{ spirvShouldHaveBeenType = argumentType });
 
@@ -10388,6 +10370,9 @@ GenerateDeclaration :: (data: *CompilationData, node: *Code_Node, general: *Buil
    // identifiers that refer to it use its value directly. see the .IDENT case
    if (cd.flags & .IS_CONSTANT) return 0;
 
+   // a macro parameter that is given an array that cant be viewed is the array variable, identifiers that refer to it use the array (see BindArrayMacroParameter)
+   if (table_contains(*data.arrayParameters, cd)) return 0;
+
    // a macro parameter that is a pointer. the argument is generated with its own type: if it points to a payload, a workgroup or a local variable
    // spirv doesnt allow storing it so the parameter is the pointer itself (see PointerValue). a pointer to buffer memory is an ordinary variable.
    macroPointerArgumentSSAId: SSAId;
@@ -10479,6 +10464,12 @@ GenerateCast :: (data: *CompilationData, node: *Code_Node, general: *BuilderType
    castTo := GetNodeType(node);
    castFrom := GetNodeType(cc.expression);
 
+   // a fixed array to an array view (jai inserts this cast when a fixed array is given to a [] parameter)
+   if (IsArrayOfType(castTo, .VIEW) && IsArrayOfType(castFrom, .FIXED)) {
+      viewSSAId := GenerateArrayViewOfFixedArray(data, cc.expression, castTo, castFrom, general, function, currentFunction);
+      RETURN(viewSSAId, castTo);
+   }
+
    expressionSSAId := GenerateInstructions(data, cc.expression, general, function, currentFunction);
 
    resultSpirvType: *Type_Info;
@@ -10486,6 +10477,35 @@ GenerateCast :: (data: *CompilationData, node: *Code_Node, general: *BuilderType
    assert(resultSpirvType != null);
 
    RETURN(resultSSAId, resultSpirvType);
+}
+
+// an array view of a fixed array is { array.count, *array[0] }. the data of a view is a buffer pointer, so the array must be in buffer memory.
+// a mesh output, a workgroup or a local array cant be viewed, a [] parameter that is given one is the array itself (see BindArrayArguments).
+GenerateArrayViewOfFixedArray :: (data: *CompilationData, arrayNode: *Code_Node, viewType: *Type_Info, arrayType: *Type_Info, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header) -> SSAId {
+   ArrayCantBeViewed :: (what: string) #expand {
+      assert(false, "an array view cant point to %, only to an array in a buffer. a mesh output, a workgroup array or a local array can be given to a [] parameter of a macro if it is a variable (a mesh output or a workgroup array also to a [] parameter of a procedure). loc: %", what, GetLocationString(arrayNode));
+   }
+
+   // a constant (TABLE :: f32.[...]) doesnt exist in memory
+   if (!IsLValueExpression(data, arrayNode)) ArrayCantBeViewed("a value that is not in memory");
+
+   arrayPointerSpirvType: *Type_Info;
+   arrayPointerSSAId := GenerateInstructions(data, arrayNode, general, function, currentFunction, .{ isLValue = true }, spirvType = *arrayPointerSpirvType);
+   assert(arrayPointerSpirvType != null && arrayPointerSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(arrayNode));
+
+   storageClass := (cast(*TypeInfoPointer) arrayPointerSpirvType).storageClass;
+   if (storageClass != .PhysicalStorageBuffer) ArrayCantBeViewed(tprint("an array in % memory", storageClass));
+
+   // the address of the array is the address of its first element
+   dataPointerType := GetPointerType((cast(*Type_Info_Array) viewType).element_type, .PhysicalStorageBuffer);
+   dataSSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Bitcast, GetSSAId(data, .{ type = ._Type, _type = dataPointerType }), dataSSAId, arrayPointerSSAId);
+
+   countSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = (cast(*Type_Info_Array) arrayType).array_count, bitSize = 64 } });
+
+   viewSSAId := GetNextSSAId(data);
+   WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .CompositeConstruct, GetSSAId(data, .{ type = ._Type, _type = viewType }), viewSSAId, countSSAId, dataSSAId);
+   return viewSSAId;
 }
 
 GenerateCompoundDeclaration :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header, additionalData: GenerateInstructionsData, lValueOut: *SSAId, spirvType: **Type_Info, lValueOutSpirvType: **Type_Info, identifierOut: *Identifier) -> SSAId {
@@ -11106,6 +11126,9 @@ OperatorToString :: (operatorType: Operator_Type) -> string {
 // converts a value to the type it should be (implicit conversions of jai, or between a struct and its decorationless copy)
 ConvertValue :: (data: *CompilationData, b: *BuilderType, ssaId: SSAId, fromType: *Type_Info, toType: *Type_Info, node: *Code_Node) -> SSAId {
    if (CompareType(fromType, toType)) return ssaId;
+
+   // a fixed array is viewed by GenerateArrayViewOfFixedArray, it is converted here when jai doesnt cast it: a mesh output is an array view in jai but a fixed array in spirv
+   assert(!IsArrayOfType(toType, .VIEW) || !IsArrayOfType(fromType, .FIXED), "an array view can only point to an array in a buffer, not to a mesh output, a workgroup array, a local array or a constant. a mesh output can be given to a [] parameter of a procedure or a macro (see BindArrayArguments). loc: %", GetLocationString(node));
 
    // a struct (or array) and its decorationless copy are logically the same type, OpCopyLogical converts between them in both directions.
    if (IsDecorationlessType(toType) || IsDecorationlessType(fromType)) {
@@ -11800,8 +11823,8 @@ DetermineProcedureCallType :: (data: *CompilationData, node: *Code_Node) -> *Typ
       return cast(*Type_Info) void;
    }
 
-   // before the procedure is typed, its parameters that are given a mesh output are that output
-   BindMeshOutputArguments(data, cpc, header);
+   // before the procedure is typed, its parameters that are given an array that cant be viewed are that array
+   BindArrayArguments(data, cpc, header);
 
    // recurse into the procedure
    DetermineCodeNodeTypes(data, header);
@@ -11841,10 +11864,11 @@ DetermineDeclarationType :: (data: *CompilationData, node: *Code_Node) -> *Type_
       DetermineCodeNodeTypes(data, cd.expression);
    }
 
-   // a parameter that is given a mesh output is the output, it has its type (see BindMeshOutputArguments)
-   isMeshOutputParameter, meshOutput := table_find(*data.meshOutputParameters, cd);
-   if (isMeshOutputParameter) {
-      type := DetermineCodeNodeTypes(data, meshOutput);
+   // a parameter that is given an array that cant be viewed is the array, it has its type (see BindArrayArguments and BindArrayMacroParameter)
+   BindArrayMacroParameter(data, cd);
+   isArrayParameter, array := table_find(*data.arrayParameters, cd);
+   if (isArrayParameter) {
+      type := DetermineCodeNodeTypes(data, array);
       TableAdd(*data.codeNodeTypes, node, type);
       return type;
    }
@@ -11869,12 +11893,12 @@ DetermineDeclarationType :: (data: *CompilationData, node: *Code_Node) -> *Type_
       TableAdd(*data.codeNodeTypes, node, tia);
       return tia;
    } else if (cd == data.meshVertexOutVariableIdentifier.variable.declaration) {
-      elementType := GetArrayElementType(cd);
+      elementType := GetInterfaceType(GetArrayElementType(cd));
       tia := CreateTypeInfoArrayFixedSize(elementType, data.maxVertices);
       TableAdd(*data.codeNodeTypes, node, tia);
       return tia;
    } else if (cd == data.meshPrimitiveOutVariableIdentifier.variable.declaration) {
-      elementType := GetArrayElementType(cd);
+      elementType := GetInterfaceType(GetArrayElementType(cd));
       tia := CreateTypeInfoArrayFixedSize(elementType, data.maxPrimitives);
       TableAdd(*data.codeNodeTypes, node, tia);
       return tia;
@@ -11899,6 +11923,11 @@ DetermineDeclarationType :: (data: *CompilationData, node: *Code_Node) -> *Type_
    //          - apila, 07/06/26
    if (isLocalDeclaration) {
       type = GetFunctionStorageClassType(type);
+   }
+
+   // the inputs of a fragment shader (see GetInterfaceType)
+   if (storageClass == .Input) {
+      type = GetInterfaceType(type);
    }
 
    TableAdd(*data.codeNodeTypes, node, type);
@@ -12473,7 +12502,11 @@ EvaluateConstant :: (data: *CompilationData, node: *Code_Node) -> ConstantValue,
 
          // E.A or Module.CONSTANT, or the count of a fixed array
          if (cbo.operator_type == #char ".") {
+            // a mesh output is an array view in jai but a fixed array in spirv (and so is a parameter that is given one, see BindArrayArguments)
             leftType := cbo.left.type;
+            isTyped, leftNodeType := table_find(*data.codeNodeTypes, cbo.left);
+            if (isTyped && IsArrayOfType(leftNodeType, .FIXED)) leftType = leftNodeType;
+
             if (leftType != null && leftType.type == .ARRAY && (cast(*Type_Info_Array) leftType).array_type == .FIXED && cbo.right.kind == .IDENT && (cast(*Code_Ident) cbo.right).name == "count") {
                return INT(xx (cast(*Type_Info_Array) leftType).array_count), true;
             }
@@ -13063,6 +13096,12 @@ GetFunctionStorageClassType :: (type: *Type_Info) -> *Type_Info {
    return newType;
 }
 
+// the inputs and outputs of a stage (the mesh outputs, the fragment inputs) must not have offset decorations either.
+// the same struct can also be in a buffer where it needs them, so the interface variables use the decorationless copy of the struct.
+GetInterfaceType :: (type: *Type_Info) -> *Type_Info {
+   return GetFunctionStorageClassType(type);
+}
+
 // the block of a static if (#if) that the compiler took. null if no block is taken.
 // the other blocks are not typechecked by the compiler so they must be ignored.
 GetStaticIfTakenBlock :: (ci: *Code_If) -> *Code_Block {
@@ -13336,51 +13375,96 @@ IsStructLiteralConstant :: (data: *CompilationData, literal: *Code_Literal) -> b
 }
 
 GetVariableIdentifier :: (data: *CompilationData, ci: *Code_Ident) -> Identifier {
-   return .{ type = .Variable, variable.declaration = ResolveMeshOutputParameter(data, ci.resolved_declaration) };
+   return .{ type = .Variable, variable.declaration = ResolveArrayParameter(data, ci.resolved_declaration) };
 }
 
-// the mesh outputs of the user (the first two parameters of the entry point) are Output variables.
-// a pointer to Output memory cant be a parameter of a function in spirv (only Function, Private, Workgroup... ones can, and a jai array view would need its address in a buffer).
-// so a parameter of a procedure that is given a mesh output is not a parameter of the spirv function, the procedure uses the output variable directly (it is a global variable).
-// the procedures are generated for each entry point, so a parameter is bound to the output of the entry point being compiled.
+// a jai array view is { count, data } and data is a buffer pointer, so a view can only point to an array in buffer memory (see GenerateArrayViewOfFixedArray).
+// the mesh outputs (the first two parameters of the entry point, they are Output variables), workgroup arrays and local arrays cant be viewed.
+// a pointer to them cant be a parameter of a function in spirv either (only to Function, Private, Workgroup... memory, and only a variable itself).
+// so a [] parameter that is given such an array is the array: the procedure uses the variable directly (it is a global variable).
+// the procedures are generated for each entry point, so a parameter is bound to the array of the entry point being compiled.
 //    WriteVertex :: (o: [] MeshOutVertex, i: s32) { o[i].uv = ...; }
 //    WriteVertex(mOutVertex, 0); // o is mOutVertex in WriteVertex
-// a parameter has to be given the same output in every call (in the same entry point), it cant be a mesh output in one call and something else in another.
+// a parameter has to be given the same array in every call (in the same entry point), it cant be given such an array in one call and something else in another.
+// a local array is not a global variable, it cant be given to a procedure (only to a macro, see BindArrayMacroParameter).
 // the builtin outputs (meshvertices, meshprimitives, meshtriangles...) are global variables in jai too, procedures use them directly instead.
-BindMeshOutputArguments :: (data: *CompilationData, cpc: *Code_Procedure_Call, header: *Code_Procedure_Header) {
-   if (data.shaderType != .Mesh) return;
+BindArrayArguments :: (data: *CompilationData, cpc: *Code_Procedure_Call, header: *Code_Procedure_Header) {
    if (header.notes.count > 0 && header.notes[0].text == INTRINSIC_FUNCTION_NOTE_NAME) return;
    if (cpc.arguments_sorted.count != header.arguments.count) return; // varargs, GenerateProcedureCall says they are not supported
 
    for argument: cpc.arguments_sorted {
       parameter := header.arguments[it_index];
+      array := GetBoundArrayArgument(data, argument, isMacro = false);
 
-      meshOutput: *Code_Declaration;
-      if (argument.kind == .IDENT) {
-         declaration := ResolveMeshOutputParameter(data, (cast(*Code_Ident) argument).resolved_declaration);
-         assert(declaration == null || !IsBuiltinMeshOutputVariable(declaration), "% cant be passed to a procedure, it is a global variable, use it directly in the procedure. loc: %", declaration.name, GetLocationString(argument));
-         if (declaration != null && IsMeshOutputVariable(data, declaration)) meshOutput = declaration;
-      }
-
-      isBound, boundTo := table_find(*data.meshOutputParameters, parameter);
-      if (meshOutput != null) {
+      isBound, boundTo := table_find(*data.arrayParameters, parameter);
+      if (array != null) {
          if (isBound) {
-            assert(boundTo == meshOutput, "parameter % of % is given % here and % in another call. a parameter that is given a mesh output has to be given the same output in every call (see BindMeshOutputArguments). loc: %", parameter.name, header.name, meshOutput.name, boundTo.name, GetLocationString(argument));
+            assert(boundTo == array, "parameter % of % is given % here and % in another call. a parameter that is given an output or a workgroup array has to be given the same array in every call (see BindArrayArguments). loc: %", parameter.name, header.name, array.name, boundTo.name, GetLocationString(argument));
          } else {
-            // the procedure is typed by its first call. if that call didnt give a mesh output, the parameter is a regular one
-            assert(!table_contains(*data.codeNodeTypes, parameter), "parameter % of % is given the mesh output % here and something else in another call. a parameter that is given a mesh output has to be given it in every call (see BindMeshOutputArguments). loc: %", parameter.name, header.name, meshOutput.name, GetLocationString(argument));
-            TableAdd(*data.meshOutputParameters, parameter, meshOutput);
+            // the procedure is typed by its first call. if that call didnt give such an array, the parameter is a regular one
+            assert(!table_contains(*data.codeNodeTypes, parameter), "parameter % of % is given % here and something else in another call. a parameter that is given an output or a workgroup array has to be given it in every call (see BindArrayArguments). loc: %", parameter.name, header.name, array.name, GetLocationString(argument));
+            TableAdd(*data.arrayParameters, parameter, array);
          }
       } else {
-         assert(!isBound, "parameter % of % is given the mesh output % in another call and something else here. a parameter that is given a mesh output has to be given it in every call (see BindMeshOutputArguments). loc: %", parameter.name, header.name, boundTo.name, GetLocationString(argument));
+         assert(!isBound, "parameter % of % is given % in another call and something else here. a parameter that is given an output or a workgroup array has to be given it in every call (see BindArrayArguments). loc: %", parameter.name, header.name, boundTo.name, GetLocationString(argument));
       }
    }
 }
 
-// the declaration of the mesh output a parameter is given, or the declaration itself if it is not such a parameter (see BindMeshOutputArguments)
-ResolveMeshOutputParameter :: (data: *CompilationData, declaration: *Code_Declaration) -> *Code_Declaration {
-   isBound, meshOutput := table_find(*data.meshOutputParameters, declaration);
-   return ifx isBound then meshOutput else declaration;
+// a macro parameter is a declaration in the expansion that is initialized with the argument (a Code_Extract). spirv has the same problem with it:
+// the parameter would be a local array view that points to the array. so a macro parameter that is given an array that cant be viewed is that array too.
+// the expansion is in the function the macro is called from, so this works for a local array too.
+// unlike a procedure, every call has its own expansion, so a macro can be given such an array in one call and something else in another.
+//    WriteVertex :: (o: [] MeshOutVertex) #expand { o[0].uv = ...; }
+//    WriteVertex(mOutVertex); // o is mOutVertex in this expansion
+BindArrayMacroParameter :: (data: *CompilationData, cd: *Code_Declaration) {
+   if (cd.expression == null || cd.expression.kind != .EXTRACT) return;
+   ce := cast(*Code_Extract) cd.expression;
+   if (ce.from != null) return; // a value of a compound declaration, not a macro argument
+
+   array := GetBoundArrayArgument(data, GetMacroExpansionArgument(data, ce.index), isMacro = true);
+   if (array != null) table_set(*data.arrayParameters, cd, array);
+}
+
+// the declaration of the array that cant be viewed that is given as an argument (also through a parameter that is given one), null if the argument is something else.
+// a fixed array is given to a [] parameter with a cast (jai inserts it), a mesh output is already an array view in jai.
+GetBoundArrayArgument :: (data: *CompilationData, argument: *Code_Node, isMacro: bool) -> *Code_Declaration {
+   isFixedArray := false;
+   if (argument.kind == .CAST) {
+      cc := cast(*Code_Cast) argument;
+      if (!IsArrayOfType(argument.type, .VIEW) || !IsArrayOfType(cc.expression.type, .FIXED)) return null;
+      argument = cc.expression;
+      isFixedArray = true;
+   }
+
+   if (argument.kind != .IDENT) return null;
+
+   // a parameter that is given such an array is passed on, it is the array
+   argumentDeclaration := (cast(*Code_Ident) argument).resolved_declaration;
+   declaration := ResolveArrayParameter(data, argumentDeclaration);
+   if (declaration == null) return null;
+   if (declaration != argumentDeclaration) isFixedArray = true;
+   assert(!IsBuiltinMeshOutputVariable(declaration), "% cant be passed to a procedure or a macro, it is a global variable, use it directly. loc: %", declaration.name, GetLocationString(argument));
+
+   if (data.shaderType == .Mesh && IsMeshOutputVariable(data, declaration)) return declaration;
+   if (!isFixedArray || (declaration.flags & .IS_CONSTANT)) return null;
+
+   // a fixed array in buffer memory is viewed (see GenerateArrayViewOfFixedArray), a variable is not in buffer memory
+   storageClass := GetVariableStorageClass(data, .{ type = .Variable, variable.declaration = declaration });
+   if (storageClass == .Workgroup) return declaration;
+   assert(isMacro || storageClass != .Function, "the local array % cant be given to a [] parameter of a procedure: an array view can only point to an array in a buffer and a procedure cant use the local variables of its caller. make the procedure a macro or make the parameter a fixed array ([N] T). loc: %", declaration.name, GetLocationString(argument));
+   if (isMacro && storageClass == .Function) return declaration;
+   return null;
+}
+
+// the declaration of the array a parameter is given, or the declaration itself if it is not such a parameter (see BindArrayArguments)
+ResolveArrayParameter :: (data: *CompilationData, declaration: *Code_Declaration) -> *Code_Declaration {
+   isBound, array := table_find(*data.arrayParameters, declaration);
+   return ifx isBound then array else declaration;
+}
+
+IsArrayOfType :: (type: *Type_Info, arrayType: Type_Info_Array.Array_Type) -> bool {
+   return type != null && type.type == .ARRAY && (cast(*Type_Info_Array) type).array_type == arrayType;
 }
 
 // the mesh outputs of the user, the first two parameters of the entry point
@@ -13400,7 +13484,7 @@ IsBuiltinMeshOutputVariable :: (declaration: *Code_Declaration) -> bool {
 
 // a parameter of a procedure that is passed by value (see GetFunctionSpirvType), its value is not in memory
 IsByValueParameter :: (data: *CompilationData, declaration: *Code_Declaration, type: *Type_Info) -> bool {
-   return table_contains(*userFunctionArguments, declaration) && !table_contains(*data.meshOutputParameters, declaration) && !IsSmallArgument(type);
+   return table_contains(*userFunctionArguments, declaration) && !table_contains(*data.arrayParameters, declaration) && !IsSmallArgument(type);
 }
 
 GetDescriptorHeapIdentifier :: (data: *CompilationData, sourceVariable: Identifier) -> Identifier {
@@ -13578,15 +13662,19 @@ GetVariableTypeIdentifier :: (data: *CompilationData, variable: Identifier) -> I
    }
 
    if (IdentifierCompare(variable, data.meshVertexOutVariableIdentifier)) {
-      elementType := GetArrayElementType(declaration);
+      elementType := GetInterfaceType(GetArrayElementType(declaration));
       typeInfo := CreateTypeInfoArrayFixedSize(elementType, data.maxVertices);
       return .{ type = ._Type, _type = typeInfo };
    }
 
    if (IdentifierCompare(variable, data.meshPrimitiveOutVariableIdentifier)) {
-      elementType := GetArrayElementType(declaration);
+      elementType := GetInterfaceType(GetArrayElementType(declaration));
       typeInfo := CreateTypeInfoArrayFixedSize(elementType, data.maxPrimitives);
       return .{ type = ._Type, _type = typeInfo };
+   }
+
+   if (IdentifierCompare(variable, data.fragmentVertexInVariableIdentifier) || IdentifierCompare(variable, data.fragmentPrimitiveInVariableIdentifier)) {
+      return .{ type = ._Type, _type = GetInterfaceType(declaration.type) };
    }
 
    return .{ type = ._Type, _type = declaration.type };
@@ -13993,22 +14081,31 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
                         // the struct layout is the same tho. first member is count, the second is data pointer (but typed). i colud have done it so that data pointer is of type *u8 always
                         // but then i need to DoCast() idk. idk maybe. idk man.
                         //          - apila, 23/09/26
-                        assert(currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG, "i put this assertion because i forgot the what the other case is for. unlucky");
-
-                        dataIndexIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = ARRAY_VIEW_DATA_FIELD_INDEX, bitSize = 32 } };
-                        dataIndexSSAId := GetSSAId(data, dataIndexIdentifier);
-                        array_add(indices, dataIndexSSAId);
-
                         dataType := New(TypeInfoPointer);
                         dataType.storageClass = .PhysicalStorageBuffer; // Clueeeee
                         dataType.pointerTo = tia.element_type;
-                        pointerSSAId, _pointerSpirvType := DoAccessChainOrCompositeExtract(data, b, dataType, currentBaseSSAId.*, indices, literalIndices, currentBaseSpirvType.*);
-                        assert(_pointerSpirvType.type == TYPE_INFO_POINTER_TAG);
-                        pointerSpirvType := _pointerSpirvType.(*TypeInfoPointer);
 
-                        // pointerSSAId is the address of the data field
-                        currentBaseSSAId.* = IndexPointer(data, b, pointerSSAId, pointerSpirvType, cbo.right, currentFunction);
-                        currentBaseSpirvType.* = pointerSpirvType.pointerTo;
+                        if (currentBaseSpirvType.*.type == TYPE_INFO_POINTER_TAG) {
+                           dataIndexIdentifier: Identifier = .{ type = .IntLiteral, intLiteral = .{ unsigned = false, value._s64 = ARRAY_VIEW_DATA_FIELD_INDEX, bitSize = 32 } };
+                           dataIndexSSAId := GetSSAId(data, dataIndexIdentifier);
+                           array_add(indices, dataIndexSSAId);
+
+                           pointerSSAId, _pointerSpirvType := DoAccessChainOrCompositeExtract(data, b, dataType, currentBaseSSAId.*, indices, literalIndices, currentBaseSpirvType.*);
+                           assert(_pointerSpirvType.type == TYPE_INFO_POINTER_TAG);
+                           pointerSpirvType := _pointerSpirvType.(*TypeInfoPointer);
+
+                           // pointerSSAId is the address of the data field
+                           currentBaseSSAId.* = IndexPointer(data, b, pointerSSAId, pointerSpirvType, cbo.right, currentFunction);
+                           currentBaseSpirvType.* = pointerSpirvType.pointerTo;
+                        } else {
+                           // the view is a value (a parameter that is passed by value, see GetFunctionSpirvType), its data field is extracted
+                           array_add(literalIndices, ARRAY_VIEW_DATA_FIELD_INDEX);
+                           dataSSAId, _ := DoAccessChainOrCompositeExtract(data, b, dataType, currentBaseSSAId.*, indices, literalIndices, currentBaseSpirvType.*);
+
+                           indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) u64 });
+                           currentBaseSSAId.* = OffsetPointer(data, b, dataSSAId, dataType, indexSSAId, false, cbo.right);
+                           currentBaseSpirvType.* = dataType;
+                        }
                      }
 
                      case #char "."; {
