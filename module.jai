@@ -1,3 +1,9 @@
+//
+// a shader that uses the f32 math intrinsics (sin, sqrt, abs, lerp...) has to #import "Math". their f32 overloads are the ones of Math, this module doesnt declare them (see MATH_MODULE_INTRINSICS).
+// without the import the error doesnt point at the cause: abs(f32) resolves to the s32 overload and fails with "Number mismatch".
+// Math also declares PI, so dont declare your own, use that one.
+//
+
 #import "Basic";
 #import "Compiler";
 #import "Math";
