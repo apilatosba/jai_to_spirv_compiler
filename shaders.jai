@@ -4689,6 +4689,27 @@ TestByValueParameters :: (data: *TestData) {
    data.f = TestByValueLuminance(data.v3) + TestByValueMembers(s, data.i) + TestByValueArray(s.table, data.i) + TestByValueReturnArray(data.f)[data.i];
 } @compute @1
 
+TestByValuePointerMembers :: (d: TestData, i: s32) -> f32 {
+   d.floats[i] = 1;
+   d.inner[i].indices.y = 2;
+   return d.floats[i * 3] + d.floats.* + xx d.ints[1] + d.inner.value + d.inner[1].value + xx d.inner[i].indices.z;
+}
+
+TestReturnPointer :: (data: *TestData) -> *f32 {
+   return data.floats;
+}
+
+TestReturnInner :: (data: *TestData) -> *TestInner {
+   return data.inner;
+}
+
+// the pointer members of a struct parameter that is passed by value, and returned pointers, can be indexed and dereferenced
+TestByValuePointerParameter :: (data: *TestData) {
+   data.f = TestByValuePointerMembers(data.*, data.i) + TestReturnPointer(data)[data.i] + TestReturnInner(data).value + TestReturnInner(data)[1].value;
+   TestReturnPointer(data)[2] = data.f;
+   TestReturnInner(data).indices.x = 3;
+} @compute @1
+
 //
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.

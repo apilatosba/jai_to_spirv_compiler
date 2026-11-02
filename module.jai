@@ -13815,9 +13815,9 @@ GetArithmeticOperandTypes :: (leftType: *Type_Info, rightType: *Type_Info, opera
 // p[x] is *(p + x * size_of(element)).
 // "addressOfPointer" is the address where p is stored (a variable or a struct member). returns the address of the element.
 IndexPointer :: (data: *CompilationData, b: *BuilderType, addressOfPointer: SSAId, addressOfPointerType: *TypeInfoPointer, indexNode: *Code_Node, currentFunction: *Code_Procedure_Header) -> SSAId {
-   assert(addressOfPointerType.pointerTo.type == TYPE_INFO_POINTER_TAG);
+   assert(addressOfPointerType.pointerTo.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(indexNode));
    pointerType := cast(*TypeInfoPointer) addressOfPointerType.pointerTo;
-   assert(pointerType.storageClass == .PhysicalStorageBuffer, "can only index PhysicalStorageBuffer pointers. storageClass: %", pointerType.storageClass);
+   assert(pointerType.storageClass == .PhysicalStorageBuffer, "can only index PhysicalStorageBuffer pointers. storageClass: %, loc: %", pointerType.storageClass, GetLocationString(indexNode));
 
    pointerSSAId := Load(data, b, .{ type = ._Type, _type = pointerType }, addressOfPointer, addressOfPointerType.storageClass == .PhysicalStorageBuffer);
 
@@ -14138,6 +14138,10 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
             // p[x]
             // *(p + x)
 
+            // the pointer is a value when the base is a value (a parameter that is passed by value, see GetFunctionSpirvType) or a returned pointer.
+            // otherwise the base is in memory and pointerSSAId below is the address where the pointer is stored
+            isPointerValue := currentBaseSpirvType.*.type != TYPE_INFO_POINTER_TAG || cbo.left.kind == .PROCEDURE_CALL;
+
             pointerSpirvType: *TypeInfoPointer;
             pointerSSAId: SSAId;
             if (indices.count > 0 || literalIndices.count > 0) {
@@ -14153,24 +14157,42 @@ DoDotsAndArraySubscripts :: (data: *CompilationData, b: *BuilderType, cbo: *Code
                pointerSpirvType = xx currentBaseSpirvType.*;
             }
 
-            loadFromSpirvType: *TypeInfoPointer;
-            loadFromSpirvType = pointerSpirvType;
+            if (isPointerValue) {
+               // pointerSSAId is the pointer itself, there is nothing to load
+               if cbo.operator_type == {
+                  case #char "."; {
+                     currentBaseSSAId.* = pointerSSAId;
+                  }
 
-            // pointerSSAId is the address where the pointer is stored
-            if cbo.operator_type == {
-               case #char "."; {
-                  loadedTypeIdentifier: Identifier = .{ type = ._Type, _type = loadFromSpirvType.pointerTo };
-                  currentBaseSSAId.* = Load(data, b, loadedTypeIdentifier, pointerSSAId, loadFromSpirvType.storageClass == .PhysicalStorageBuffer);
+                  case .ARRAY_SUBSCRIPT; {
+                     indexSSAId := GenerateInstructions(data, cbo.right, null, b, currentFunction, .{ spirvShouldHaveBeenType = cast(*Type_Info) u64 });
+                     currentBaseSSAId.* = OffsetPointer(data, b, pointerSSAId, pointerSpirvType, indexSSAId, false, cbo.right);
+                  }
+
+                  case; assert(false);
                }
 
-               case .ARRAY_SUBSCRIPT; {
-                  currentBaseSSAId.* = IndexPointer(data, b, pointerSSAId, loadFromSpirvType, cbo.right, currentFunction);
+               currentBaseSpirvType.* = pointerSpirvType;
+            } else {
+               loadFromSpirvType: *TypeInfoPointer;
+               loadFromSpirvType = pointerSpirvType;
+
+               // pointerSSAId is the address where the pointer is stored
+               if cbo.operator_type == {
+                  case #char "."; {
+                     loadedTypeIdentifier: Identifier = .{ type = ._Type, _type = loadFromSpirvType.pointerTo };
+                     currentBaseSSAId.* = Load(data, b, loadedTypeIdentifier, pointerSSAId, loadFromSpirvType.storageClass == .PhysicalStorageBuffer);
+                  }
+
+                  case .ARRAY_SUBSCRIPT; {
+                     currentBaseSSAId.* = IndexPointer(data, b, pointerSSAId, loadFromSpirvType, cbo.right, currentFunction);
+                  }
+
+                  case; assert(false);
                }
 
-               case; assert(false);
+               currentBaseSpirvType.* = loadFromSpirvType.pointerTo;
             }
-
-            currentBaseSpirvType.* = loadFromSpirvType.pointerTo;
 
             if (cbo.operator_type == #char ".") {
                assert(tip.pointerTo.type == .STRUCT, "type: %", tip.pointerTo.type);
