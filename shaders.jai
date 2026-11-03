@@ -2800,6 +2800,21 @@ TestComputeRayQuery :: (data: *TestRayQueryData) {
    RayQueryTerminate(*q);
 } @compute @1
 
+// the code after a return that isnt in a runtime if is unreachable. its variables must still be declared since the loop after them starts new blocks that use them.
+TestRayQueryAfterReturnHelper :: (data: *TestRayQueryData, $EARLY := false) -> f32 {
+   #if EARLY {
+      return 1;
+   }
+   q: RayQuery;
+   RayQueryInitialize(*q, data.tlas, .Opaque, 0xFF, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);
+   while RayQueryProceed(*q) {}
+   return RayQueryGetIntersectionT(*q, true);
+}
+
+TestRayQueryAfterReturn :: (data: *TestRayQueryData) {
+   data.t = TestRayQueryAfterReturnHelper(data, true) + TestRayQueryAfterReturnHelper(data, false);
+} @compute @1
+
 TestHitObjectData :: struct {
    tlas:    u32;
    hint:    u32;

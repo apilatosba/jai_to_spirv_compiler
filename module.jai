@@ -8655,10 +8655,14 @@ GenerateBlock :: (data: *CompilationData, node: *Code_Node, general: *BuilderTyp
    deferBase := data.deferStack.count;
 
    for cb.statements {
+      // after a return, break or continue the rest of the block is dead (jai has no labels to jump into it).
+      // generating it anyway would write the blocks of its loops and ifs while the instructions before them were dropped.
+      if (!data.isBlockReachable) break;
       GenerateInstructions(data, it, general, function, currentFunction);
    }
 
-   GenerateDefers(data, deferBase, general, function, currentFunction);
+   // the exits out of the block already ran its defers
+   if (data.isBlockReachable) GenerateDefers(data, deferBase, general, function, currentFunction);
    data.deferStack.count = deferBase;
    return 0;
 }
@@ -9169,9 +9173,8 @@ GenerateBinaryOperator :: (data: *CompilationData, node: *Code_Node, general: *B
 
          storageClass := SpvStorageClass.Function;
          resultVariableSSAId := GetNextSSAId(data);
-         WriteSingleInstructionIfReachable(
+         WriteSingleInstruction(
             general,
-            *data.isBlockReachable,
             .Variable,
             GetSSAId(data, .{ type = ._Type, _type = GetPointerType(boolType, storageClass) }),
             resultVariableSSAId,
@@ -9517,9 +9520,8 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
       if (returnsValue) {
          storageClass := SpvStorageClass.Function;
          resultVariableSSAId = GetNextSSAId(data);
-         WriteSingleInstructionIfReachable(
+         WriteSingleInstruction(
             general,
-            *data.isBlockReachable,
             .Variable,
             GetSSAId(data, .{ type = ._Type, _type = GetPointerType(resultVariableType, storageClass) }),
             resultVariableSSAId,
@@ -9546,6 +9548,7 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
       WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Label, bodyLabelSSAId);
 
       for expansion.statements {
+         if (!data.isBlockReachable) break; // see GenerateBlock
          isReturn := !GenerateMacroStatement(data, it, general, function, currentFunction);
          if (isReturn) GenerateInstructions(data, it, general, function, currentFunction); // see the .RETURN case
       }
@@ -9897,9 +9900,8 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
          spirvType := GetPointerType(argumentType, storageClass);
 
          parameterVariableSSAId := GetNextSSAId(data);
-         WriteSingleInstructionIfReachable(
+         WriteSingleInstruction(
             general,
-            *data.isBlockReachable,
             .Variable,
             GetSSAId(data, .{ type = ._Type, _type = spirvType }),
             parameterVariableSSAId,
@@ -10068,9 +10070,8 @@ GenerateIf :: (data: *CompilationData, node: *Code_Node, general: *BuilderType, 
       variableType := GetFunctionStorageClassType(resultType);
       storageClass := SpvStorageClass.Function;
       resultVariableSSAId := GetNextSSAId(data);
-      WriteSingleInstructionIfReachable(
+      WriteSingleInstruction(
          general,
-         *data.isBlockReachable,
          .Variable,
          GetSSAId(data, .{ type = ._Type, _type = GetPointerType(variableType, storageClass) }),
          resultVariableSSAId,
@@ -10515,9 +10516,8 @@ GenerateDeclaration :: (data: *CompilationData, node: *Code_Node, general: *Buil
          print_to_builder(general, "; %\n", GetVariableName(variableIdentifier));
       }
 
-      WriteSingleInstructionIfReachable(
+      WriteSingleInstruction(
          general,
-         *data.isBlockReachable,
          .Variable,
          .. operands
       );
@@ -13613,7 +13613,7 @@ GeneratePointerArgument :: (data: *CompilationData, argument: *Code_Node, parame
 
    storageClass := SpvStorageClass.Function;
    copySSAId := GetNextSSAId(data);
-   WriteSingleInstructionIfReachable(general, *data.isBlockReachable, .Variable, GetSSAId(data, .{ type = ._Type, _type = GetPointerType(pointee, storageClass) }), copySSAId, storageClass);
+   WriteSingleInstruction(general, .Variable, GetSSAId(data, .{ type = ._Type, _type = GetPointerType(pointee, storageClass) }), copySSAId, storageClass);
 
    valueSSAId := Load(data, function, .{ type = ._Type, _type = pointee }, argumentSSAId, false);
    Store(data, function, copySSAId, valueSSAId, false, pointee);
