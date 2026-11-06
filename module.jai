@@ -219,6 +219,11 @@ MESH_PRIMITIVE_INDICES :: MeshPrimitiveIndices.[
 
 #insert #run sprint("% :: (vertexCount: u32, primitiveCount: u32) {} @%", SET_MESH_OUTPUTS_NAME, INTRINSIC_FUNCTION_NOTE_NAME); // SetMeshOutputsEXT
 
+// OpEmitMeshTasksEXT. ends the invocation, nothing after it runs. every invocation of a task shader has to reach it, in uniform control flow. it is undefined behaviour if one doesnt.
+// the group counts are taken from the first invocation of the workgroup. payload is the address of the @taskpayload variable, the mesh shader reads it from its own @taskpayload variable
+#insert #run sprint("% :: (groupCountX: u32, groupCountY: u32, groupCountZ: u32) { } @%", EMIT_MESH_TASKS_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
+#insert #run sprint("% :: (groupCountX: u32, groupCountY: u32, groupCountZ: u32, payload: *$T) { } @%", EMIT_MESH_TASKS_NAME, INTRINSIC_FUNCTION_NOTE_NAME);
+
 // the resources a function can take, see RESOURCE_FUNCTIONS
 HeapResource :: enum u8 {
    Image;
@@ -1721,6 +1726,7 @@ structDefinitions:            Table(*Type_Info_Struct, *Code_Struct); // needed 
 // the copy is still a Type_Info_Array so the code that handles arrays doesnt need to know about it, only CompareType and HashType do.
 decorationlessArrays:         Table(*Type_Info_Array, *Type_Info_Array);
 
+TASK_SHADER_NOTE_NAME      :: "task";
 MESH_SHADER_NOTE_NAME      :: "mesh";
 FRAGMENT_SHADER_NOTE_NAME  :: "fragment";
 RGEN_SHADER_NOTE_NAME      :: "rgen";
@@ -1803,6 +1809,7 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
    assert(notes.count >= 1, "no notes on entry point!");
    typeNote := notes[0];
    if typeNote == {
+      case TASK_SHADER_NOTE_NAME;      shaderType = .Task;
       case MESH_SHADER_NOTE_NAME;      shaderType = .Mesh;
       case FRAGMENT_SHADER_NOTE_NAME;  shaderType = .Fragment;
       case RGEN_SHADER_NOTE_NAME;      shaderType = .Rgen;
@@ -1816,6 +1823,12 @@ GetParametersFromNotes :: (notes: [] string) -> ShaderType, workgroupSize: [3] u
    }
 
    if shaderType == {
+      // @task @x_y_z
+      case .Task; {
+         assert(notes.count == 2, "[1] = x_y_z workgroup size");
+         workgroupSize = ParseWorkgroupSize(notes[1]);
+      }
+
       case .Mesh; {
          assert(notes.count == 4, "[1] = x_y_z workgroup size, [2] = a_b max vertices and max primitives, [3] = [points, lines, triangles] primitive topology");
 
@@ -1903,6 +1916,8 @@ ParseWorkgroupSize :: (note: string) -> [3] u32 {
 }
 
 // this function doesnt validate the notes
+// task shader:
+//    @task @x_y_z
 // mesh shader:
 //    @mesh @x_y_z @maxV_maxP @topology
 // fragment shader:
@@ -1910,7 +1925,8 @@ ParseWorkgroupSize :: (note: string) -> [3] u32 {
 IsProcedureShaderEntryPoint :: (header: *Code_Procedure_Header) -> bool {
    if (header.notes.count < 1) return false;
 
-   return header.notes[0].text == MESH_SHADER_NOTE_NAME        ||
+   return header.notes[0].text == TASK_SHADER_NOTE_NAME        ||
+          header.notes[0].text == MESH_SHADER_NOTE_NAME        ||
           header.notes[0].text == FRAGMENT_SHADER_NOTE_NAME    ||
           header.notes[0].text == RGEN_SHADER_NOTE_NAME        ||
           header.notes[0].text == RCHIT_SHADER_NOTE_NAME       ||
@@ -1988,6 +2004,7 @@ MESH_VERTICES_NAME                        :: "meshvertices";
 MESH_PRIMITIVES_NAME                      :: "meshprimitives";
 MESH_TRIANGLES_NAME                       :: "meshtriangles";
 SET_MESH_OUTPUTS_NAME                     :: "SetMeshOutputs";
+EMIT_MESH_TASKS_NAME                      :: "EmitMeshTasks";
 MESH_PIPELINE_PUSH_DATA_VARIABLE_NAME     :: "__mesh_push_data__";   // this is not gonna be used by the user.
                                                                      // so i picked a name hoping that it is not gonna clash with other variables
 RTX_PIPELINE_PUSH_DATA_VARIABLE_NAME      :: "__rtx_push_data__";
@@ -2063,6 +2080,7 @@ PHYSICAL_STORAGE_BUFFER_QUALIFIER         :: "physical";
 RAY_PAYLOAD_QUALIFIER                     :: "payload";
 INCOMING_RAY_PAYLOAD_QUALIFIER            :: "payloadin"; // IncomingRayPayloadKHR
 WORKGROUP_QUALIFIER                       :: "workgroup"; // Workgroup storage class, shared by the invocations of a workgroup
+TASK_PAYLOAD_QUALIFIER                    :: "taskpayload"; // TaskPayloadWorkgroupEXT, what a task shader gives to the mesh shaders it launches. the same note in both, it is read only in the mesh shader
 HIT_ATTRIBUTE_QUALIFIER                   :: "hitattribute";   // HitAttributeKHR. the barycentrics of a triangle hit, or what an intersection shader reports
 CALLABLE_DATA_QUALIFIER                   :: "callabledata";   // CallableDataKHR. the data ExecuteCallable gives to the callable shader
 INCOMING_CALLABLE_DATA_QUALIFIER          :: "callabledatain"; // IncomingCallableDataKHR. the data of a callable shader
@@ -2743,6 +2761,10 @@ CompilationData :: struct {
    debugStrings:                             [..] DebugString; // the format strings of DebugPrint (OpString)
    hitAttributeDeclared:                     bool; // there is at most one hit attribute and one incoming callable data variable, see DeclareNotedVariable
    incomingCallableDataDeclared:             bool;
+   taskPayloadVariableIdentifier:            Identifier; // there is at most one, see DeclareNotedVariable
+   endsInvocation:                           bool; // the shader has a reachable EmitMeshTasks, IgnoreIntersection or TerminateRay
+   invocationEndingFunctions:                [..] *Code_Procedure_Header; // the functions that have one of them, see NoteInvocationEnd
+   callsWithPendingDefers:                   [..] CallWithPendingDefer;   // see AssertCallsCantSkipDefers
    capabilities:                             [..] SpvCapability; // the capabilities of the instructions and builtins that are used (besides the ones of the shader type and the uses above), see RequireCapability
    extensions:                               [..] string;        // see RequireExtension
    pendingExitVariableSSAId:                 SSAId;          // see GenerateLoopExit. 0 if the function doesnt have it yet
@@ -2815,6 +2837,13 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
 
    // arguments
    if type == {
+      // data: *TaskData
+      case .Task; {
+         assert(header.arguments.count == 1, "a task shader takes one argument: data: *TaskData");
+         assert(header.arguments[0].type.type == .POINTER, "the argument of a task shader must be a pointer");
+         data.shaderDataPointerVariableIdentifier = .{ type = .Variable, variable.declaration = header.arguments[0] };
+      }
+
       case .Mesh; {
          index := 0;
 
@@ -2947,6 +2976,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
 
    // returns
    if type == {
+      case .Task; assert(header.returns.count == 0, "task shader must return nothing");
       case .Mesh; assert(header.returns.count == 0, "mesh shader must return nothing");
       case .Fragment;
          data.fragmentOutputIdentifiers = NewArray(header.returns.count, Identifier);
@@ -2983,6 +3013,9 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    functionsBuilder: BuilderType;
    GenerateFunctions(*data, body, *functionsBuilder);
 
+   assert(type != .Task || data.endsInvocation, "task shader % never calls %. it is undefined behaviour if an invocation ends without it", functionName, EMIT_MESH_TASKS_NAME);
+   AssertCallsCantSkipDefers(*data);
+
    b: BuilderType;
    #if SPIRV_BUILDER_TYPE == .Byte {
       MAGIC_NUMBER: u32 : 0x07230203;
@@ -3008,6 +3041,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    }
 
    if type == {
+      case .Task;
       case .Mesh;
       case .Fragment;
       case .Rgen;
@@ -3030,6 +3064,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       WriteSingleInstruction(*b, .Capability, SpvCapability.StorageImageWriteWithoutFormat);
 
       if type == {
+         case .Task; #through;
          case .Mesh; {
             WriteSingleInstruction(*b, .Capability, SpvCapability.MeshShadingEXT);
          }
@@ -3067,6 +3102,11 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          for ssaId, identifier: data.identifierToSSAId {
             if (identifier.type == ._Type) CollectNumericUses(identifier._type, *uses, *visited);
          }
+
+         // the type of a noted variable is written lazily, if none of its members are used the type doesnt have an id yet.
+         for data.interfaceVariableIdentifiers  CollectNumericUses(GetNodeType(it.variable.declaration), *uses, *visited);
+         for data.rayPayloadVariableIdentifiers  CollectNumericUses(it.variable.declaration.type, *uses, *visited);
+         if (data.incomingRayPayloadVariableIdentifier.type != .Invalid) CollectNumericUses(data.incomingRayPayloadVariableIdentifier.variable.declaration.type, *uses, *visited);
 
          // Int8 and Int16 dont allow 8 and 16 bit types in buffer, push constant or input/output memory. those need their own capabilities.
          // the pointers are taken from the walk above and not from identifierToSSAId because the pointer types of struct members are not in there yet.
@@ -3132,6 +3172,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       WriteSingleInstruction(*b, .Extension, "SPV_KHR_physical_storage_buffer");
 
       if type == {
+         case .Task; #through;
          case .Fragment; #through;
          case .Mesh; {
             WriteSingleInstruction(*b, .Extension, "SPV_EXT_mesh_shader");
@@ -3162,6 +3203,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       executionModel: SpvExecutionModel;
       name: string;
       if type == {
+         case .Task;       executionModel = .TaskEXT;            name = "ApilaTS";
          case .Mesh;       executionModel = .MeshEXT;            name = "ApilaMS";
          case .Fragment;   executionModel = .Fragment;           name = "ApilaFS";
          case .Compute;    executionModel = .GLCompute;          name = "ApilaCS";
@@ -3185,6 +3227,9 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
       array_add(*operands, GetSSAId(*data, data.shaderDataPointerVariableIdentifier));
 
       if type == {
+         case .Task;
+            array_add(*operands, GetSSAId(*data, meshPipelinePushDataVariableIdentifier));
+
          case .Mesh;
             array_add(*operands, GetSSAId(*data, meshPipelinePushDataVariableIdentifier));
             array_add(*operands, GetSSAId(*data, meshVerticesVariableIdentifier));
@@ -3220,6 +3265,18 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
 
    // execution modes
    if type == {
+      case .Task; {
+         WriteSingleInstruction(
+            *b,
+            .ExecutionModeId,
+            GetSSAId(*data, .{ type = .Function, function = header }),
+            SpvExecutionMode.LocalSizeId,
+            GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[0], bitSize = 32 } }),
+            GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[1], bitSize = 32 } }),
+            GetSSAId(*data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx data.workgroupSize[2], bitSize = 32 } })
+         );
+      }
+
       case .Mesh; {
          WriteSingleInstruction(
             *b,
@@ -3419,6 +3476,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          // nothing i guess. there is no Location stuff in rgen.
       }
 
+      case .Task; #through;
       case .Compute; {
          // no inputs or outputs
       }
@@ -3876,6 +3934,7 @@ IsFunctionTerminationInstruction :: inline (op: SpvOp) -> bool {
       case .TerminateInvocation; return true;
       case .IgnoreIntersectionKHR;  return true;
       case .TerminateRayKHR;        return true;
+      case .EmitMeshTasksEXT;       return true;
       case; return false;
    }
 }
@@ -5375,6 +5434,7 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          case .TerminateRayKHR; #through;
          case .ReportIntersectionKHR; #through;
          case .ExecuteCallableKHR; #through;
+         case .EmitMeshTasksEXT; #through;
          case .TypeHitObjectEXT; #through;
          case .HitObjectTraceRayEXT; #through;
          case .HitObjectTraceReorderExecuteEXT; #through;
@@ -6869,6 +6929,7 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          case .TerminateRayKHR; #through;
          case .ReportIntersectionKHR; #through;
          case .ExecuteCallableKHR; #through;
+         case .EmitMeshTasksEXT; #through;
          case .TypeHitObjectEXT; #through;
          case .HitObjectTraceRayEXT; #through;
          case .HitObjectTraceReorderExecuteEXT; #through;
@@ -7909,6 +7970,7 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
 
    castedExpressionCode: Code;
    if shaderType == {
+      case .Task;       castedExpressionCode = code_of(__mesh_push_data__.taskData);
       case .Mesh;       castedExpressionCode = code_of(__mesh_push_data__.meshData);
       case .Fragment;   castedExpressionCode = code_of(__mesh_push_data__.fragmentData);
       case .Rgen;       castedExpressionCode = code_of(__rtx_push_data__.rgenData);
@@ -7933,6 +7995,7 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
    assert(dot.left.kind == .IDENT);
    ci := cast(*Code_Ident) dot.left;
    if shaderType == {
+      case .Task; #through;
       case .Mesh; #through;
       case .Fragment;
          ci.resolved_declaration = meshPipelinePushDataVariableIdentifier.variable.declaration;
@@ -7967,6 +8030,7 @@ GetStorageClassFromNote :: (note: string) -> SpvStorageClass {
       case RAY_PAYLOAD_QUALIFIER;               return .RayPayloadKHR;
       case INCOMING_RAY_PAYLOAD_QUALIFIER;      return .IncomingRayPayloadKHR;
       case WORKGROUP_QUALIFIER;                 return .Workgroup;
+      case TASK_PAYLOAD_QUALIFIER;              return .TaskPayloadWorkgroupEXT;
       case HIT_ATTRIBUTE_QUALIFIER;             return .HitAttributeKHR;
       case CALLABLE_DATA_QUALIFIER;             return .CallableDataKHR;
       case INCOMING_CALLABLE_DATA_QUALIFIER;    return .IncomingCallableDataKHR;
@@ -9025,11 +9089,12 @@ GenerateUnaryOperator :: (data: *CompilationData, node: *Code_Node, general: *Bu
 
          // RayPayloadKHR is allowed because TraceRay takes the address of the payload. it only uses it to know which payload variable to use.
          // Workgroup is allowed for the atomics and for pointer parameters. (a workgroup pointer cant be stored, DoCast checks the storage classes)
+         // TaskPayloadWorkgroupEXT is allowed for the same reasons and because EmitMeshTasks takes the address of the payload.
          // Function (a local variable) is allowed as the argument of a pointer parameter of a macro or a procedure: it is never stored (see PointerValue and BindPointerArguments).
          storageClass := subexpressionLValueSpirvType.(*TypeInfoPointer).storageClass;
          isRayQuery := storageClass == .Function && IsRayQueryOrHitObject((cast(*TypeInfoPointer) subexpressionLValueSpirvType).pointerTo);
          isLocalArgument := storageClass == .Function && additionalData.isPointerArgument;
-         assert(storageClass == .PhysicalStorageBuffer || storageClass == .RayPayloadKHR || storageClass == .Workgroup || storageClass == .CallableDataKHR || storageClass == .HitObjectAttributeEXT || isRayQuery || isLocalArgument, "taking the address of something in % storage class is not allowed in spirv (for example a local variable). only memory reached through a pointer (PhysicalStorageBuffer) can be addressed, and a local variable can only be passed to a pointer parameter of a macro or a procedure. loc: %", storageClass, GetLocationString(node));
+         assert(storageClass == .PhysicalStorageBuffer || storageClass == .RayPayloadKHR || storageClass == .Workgroup || storageClass == .TaskPayloadWorkgroupEXT || storageClass == .CallableDataKHR || storageClass == .HitObjectAttributeEXT || isRayQuery || isLocalArgument, "taking the address of something in % storage class is not allowed in spirv (for example a local variable). only memory reached through a pointer (PhysicalStorageBuffer) can be addressed, and a local variable can only be passed to a pointer parameter of a macro or a procedure. loc: %", storageClass, GetLocationString(node));
 
          RETURN(subexpressionLValueSSAId, subexpressionLValueSpirvType);
       }
@@ -9377,6 +9442,7 @@ GenerateBinaryOperator :: (data: *CompilationData, node: *Code_Node, general: *B
             resultSSAId := OffsetPointer(data, function, pointerSSAId, cast(*TypeInfoPointer) pointerSpirvType, offsetSSAId, cbo.operator_type == .MINUS_ASSIGN, node);
 
             assert(pointerLValueSSAId != U32_MAX && pointerLValueSpirvType != null, "the pointer cant be assigned. loc: %", GetLocationString(node));
+            AssertWritable(data, cast(*TypeInfoPointer) pointerLValueSpirvType, node);
             Store(data, function, pointerLValueSSAId, resultSSAId, (cast(*TypeInfoPointer) pointerLValueSpirvType).storageClass == .PhysicalStorageBuffer, pointerSpirvType);
             RETURN(resultSSAId, null);
          }
@@ -9396,6 +9462,7 @@ GenerateBinaryOperator :: (data: *CompilationData, node: *Code_Node, general: *B
          assert(leftLValueSpirvType.type == TYPE_INFO_POINTER_TAG);
 
          tipLeftLValue := cast(*TypeInfoPointer) leftLValueSpirvType;
+         AssertWritable(data, tipLeftLValue, node);
 
          binaryArithmeticSpirvType: *Type_Info;
          binaryArithmeticSSAId := DoBinaryArithmetic(data, function, leftType, leftRValueSSAId, rightShouldHaveBeenType, rightId, operatorType, node, spirvType = *binaryArithmeticSpirvType);
@@ -9438,6 +9505,7 @@ GenerateBinaryOperator :: (data: *CompilationData, node: *Code_Node, general: *B
          assert(leftIdSpirvType.type == TYPE_INFO_POINTER_TAG);
 
          tipLeftId := cast(*TypeInfoPointer) leftIdSpirvType;
+         AssertWritable(data, tipLeftId, node);
 
          Store(
             data,
@@ -9680,6 +9748,28 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
          return 42000; // doesnt matter since OpSetMeshOutputsEXT doesnt return
       }
 
+      case EMIT_MESH_TASKS_NAME; {
+         assert(data.shaderType == .Task, "% only exists in task shaders. loc: %", identifierName, GetLocationString(node));
+         NoteInvocationEnd(data, identifierName, node, currentFunction);
+
+         operands: [..] Any;
+         for 0..2 {
+            groupCountSSAId := GenerateInstructions(data, arguments[it], general, function, currentFunction, .{ spirvShouldHaveBeenType = header.arguments[it].type });
+            array_add(*operands, ac(groupCountSSAId));
+         }
+
+         if (arguments.count == 4) {
+            payloadSpirvType: *Type_Info;
+            payloadSSAId := GenerateInstructions(data, arguments[3], general, function, currentFunction, spirvType = *payloadSpirvType);
+            assert(payloadSpirvType != null && payloadSpirvType.type == TYPE_INFO_POINTER_TAG && (cast(*TypeInfoPointer) payloadSpirvType).storageClass == .TaskPayloadWorkgroupEXT, "the payload of % is the address of a @% variable. loc: %", identifierName, TASK_PAYLOAD_QUALIFIER, GetLocationString(node));
+            assert(payloadSSAId == GetSSAId(data, data.taskPayloadVariableIdentifier), "the payload of % is the address of the @% variable itself, not of something in it. loc: %", identifierName, TASK_PAYLOAD_QUALIFIER, GetLocationString(node));
+            array_add(*operands, ac(payloadSSAId));
+         }
+
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .EmitMeshTasksEXT, .. operands);
+         RETURN(0, null);
+      }
+
       case IMAGE_WRITE_FUNCTION_NAME; {
          imageNode := arguments[0];
 
@@ -9734,6 +9824,7 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
       case IGNORE_INTERSECTION_FUNCTION_NAME; #through;
       case TERMINATE_RAY_FUNCTION_NAME; {
          assert(data.shaderType == .Rahit, "% only exists in rahit shaders. loc: %", identifierName, GetLocationString(node));
+         NoteInvocationEnd(data, identifierName, node, currentFunction);
          WriteSingleInstructionIfReachable(function, *data.isBlockReachable, ifx identifierName == IGNORE_INTERSECTION_FUNCTION_NAME then SpvOp.IgnoreIntersectionKHR else .TerminateRayKHR);
          RETURN(0, null);
       }
@@ -9798,14 +9889,15 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
          pointerSSAId := GenerateInstructions(data, argumentNodes[0], general, function, currentFunction, spirvType = *pointerSpirvType);
          assert(pointerSpirvType != null && pointerSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(node));
          tip := cast(*TypeInfoPointer) pointerSpirvType;
-         assert(tip.storageClass == .PhysicalStorageBuffer || tip.storageClass == .Workgroup, "atomics are on buffer memory or workgroup variables, not on % memory. loc: %", tip.storageClass, GetLocationString(node));
+         assert(tip.storageClass == .PhysicalStorageBuffer || tip.storageClass == .Workgroup || tip.storageClass == .TaskPayloadWorkgroupEXT, "atomics are on buffer memory, workgroup variables or the task payload, not on % memory. loc: %", tip.storageClass, GetLocationString(node));
+         AssertWritable(data, tip, node);
 
          valueType := tip.pointerTo;
          info, isNumeric := GetNumericInfo(valueType);
          assert(isNumeric && info.components == 1 && (info.kind == .Signed || info.kind == .Unsigned) && (info.bitSize == 32 || info.bitSize == 64), "type: %, loc: %", TypeName(valueType), GetLocationString(node));
          if (info.bitSize == 64) data.usesInt64Atomics = true;
 
-         scope := ifx tip.storageClass == .Workgroup then SpvScope.Workgroup else SpvScope.Device;
+         scope := ifx tip.storageClass == .PhysicalStorageBuffer then SpvScope.Device else SpvScope.Workgroup;
          scopeSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = xx scope, bitSize = 32 } });
          relaxedSSAId := GetSSAId(data, .{ type = .IntLiteral, intLiteral = .{ unsigned = true, value._u64 = 0, bitSize = 32 } });
 
@@ -9920,6 +10012,10 @@ GenerateProcedureCall :: (data: *CompilationData, node: *Code_Node, general: *Bu
       }
 
       array_add(*operands, ac(argumentSSAId));
+   }
+
+   if (data.isBlockReachable && data.deferStack.count > 0) {
+      array_add(*data.callsWithPendingDefers, .{ callee = header, call = node, defer_ = data.deferStack[data.deferStack.count - 1] });
    }
 
    WriteSingleInstructionIfReachable(
@@ -10191,6 +10287,7 @@ GenerateReturn :: (data: *CompilationData, node: *Code_Node, general: *BuilderTy
    if (currentFunction == data.entryFunction) {
       // the return values are evaluated before the defers run
       if data.shaderType == {
+         case .Task; #through;
          case .Mesh; #through;
          case .Compute; #through;
          case .Rgen; #through;
@@ -10201,6 +10298,12 @@ GenerateReturn :: (data: *CompilationData, node: *Code_Node, general: *BuilderTy
          case .Rcall;
             assert(cr.arguments_unsorted.count == 0, "% shader cant return a value. loc: %", data.shaderType, GetLocationString(node));
             GenerateDefers(data, 0, general, function, currentFunction);
+
+            // a defer can be what ends the invocation
+            if (data.shaderType == .Task && data.isBlockReachable) {
+               assert(false, "a task shader cant return, every invocation has to end with %. it is undefined behaviour if one doesnt. loc: %", EMIT_MESH_TASKS_NAME, GetLocationString(node));
+            }
+
             WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Return);
 
          case .Fragment;
@@ -10469,7 +10572,7 @@ GenerateDeclaration :: (data: *CompilationData, node: *Code_Node, general: *Buil
    variableIdentifier: Identifier = .{ type = .Variable, variable.declaration = cd };
    variableSSAId := GetSSAId(data, variableIdentifier);
 
-   isWorkgroup := IsWorkgroupVariable(cd);
+   isShared := IsWorkgroupVariable(cd) || IsTaskPayloadVariable(cd);
 
    variableType := GetNodeType(node);
 
@@ -10491,10 +10594,10 @@ GenerateDeclaration :: (data: *CompilationData, node: *Code_Node, general: *Buil
 
       // if you just declared something you cant be storing into PhysicalStorageBuffer therefore i dont need to use the dedicated Store function
       WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, variableSSAId, expressionSSAId);
-   } else if (!(cd.flags & .IS_UNINITIALIZED) && !IsNotedInputVariable(cd) && !isWorkgroup && !IsRayQueryOrHitObject(variableType)) {
+   } else if (!(cd.flags & .IS_UNINITIALIZED) && !IsNotedInputVariable(cd) && !isShared && !IsRayQueryOrHitObject(variableType)) {
       // like jai, a declaration without a value gets the default values of the struct, or zero.
       // (IS_UNINITIALIZED is "---" and also the iterators of for loops. the incoming payload is the input of the shader.
-      // a workgroup variable is shared by all the invocations of the workgroup, they would all initialize it.)
+      // a workgroup variable or the task payload is shared by all the invocations of the workgroup, they would all initialize it.)
       defaultSSAId := GenerateDefaultValue(data, general, function, currentFunction, variableType);
       WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .Store, variableSSAId, defaultSSAId);
    }
@@ -10634,6 +10737,7 @@ GenerateCompoundDeclaration :: (data: *CompilationData, node: *Code_Node, genera
       targetSSAId := GenerateInstructions(data, it.node, general, function, currentFunction, .{ isLValue = true }, spirvType = *targetSpirvType);
       assert(targetSpirvType != null && targetSpirvType.type == TYPE_INFO_POINTER_TAG, "loc: %", GetLocationString(it.node));
       tip := cast(*TypeInfoPointer) targetSpirvType;
+      AssertWritable(data, tip, it.node);
 
       valueSSAId := ConvertValue(data, function, values[it_index], valueTypes[it_index], tip.pointerTo, it.node);
       Store(data, function, targetSSAId, valueSSAId, tip.storageClass == .PhysicalStorageBuffer, tip.pointerTo);
@@ -10652,6 +10756,10 @@ IsIncomingPayloadVariable :: (cd: *Code_Declaration) -> bool {
 
 IsWorkgroupVariable :: (cd: *Code_Declaration) -> bool {
    return cd.notes.count == 1 && cd.notes[0].text == WORKGROUP_QUALIFIER;
+}
+
+IsTaskPayloadVariable :: (cd: *Code_Declaration) -> bool {
+   return cd.notes.count == 1 && cd.notes[0].text == TASK_PAYLOAD_QUALIFIER;
 }
 
 IsHitAttributeVariable :: (cd: *Code_Declaration) -> bool {
@@ -10673,7 +10781,7 @@ IsHitObjectAttributeVariable :: (cd: *Code_Declaration) -> bool {
 // the variables that are not private to an invocation (they are not in Function storage class), the note says which memory they are in.
 // a global variable must be one of these, see the .IDENT case of DetermineCodeNodeTypes
 IsNotedVariable :: (cd: *Code_Declaration) -> bool {
-   return IsPayloadVariable(cd) || IsIncomingPayloadVariable(cd) || IsWorkgroupVariable(cd) || IsHitAttributeVariable(cd) || IsCallableDataVariable(cd) || IsIncomingCallableDataVariable(cd) || IsHitObjectAttributeVariable(cd);
+   return IsPayloadVariable(cd) || IsIncomingPayloadVariable(cd) || IsWorkgroupVariable(cd) || IsTaskPayloadVariable(cd) || IsHitAttributeVariable(cd) || IsCallableDataVariable(cd) || IsIncomingCallableDataVariable(cd) || IsHitObjectAttributeVariable(cd);
 }
 
 // the ones that are inputs of the shader, they are not initialized
@@ -10697,6 +10805,11 @@ DeclareNotedVariable :: (data: *CompilationData, cd: *Code_Declaration, variable
       data.incomingRayPayloadVariableIdentifier = variableIdentifier;
    } else if (IsWorkgroupVariable(cd)) {
       array_add(*data.interfaceVariableIdentifiers, variableIdentifier);
+   } else if (IsTaskPayloadVariable(cd)) {
+      assert(InStages(.Task | .Mesh), "a @% variable only exists in task and mesh shaders. loc: %", TASK_PAYLOAD_QUALIFIER, GetLocationString(cd));
+      assert(data.taskPayloadVariableIdentifier.type == .Invalid, "only one @% variable is allowed. loc: %", TASK_PAYLOAD_QUALIFIER, GetLocationString(cd));
+      data.taskPayloadVariableIdentifier = variableIdentifier;
+      array_add(*data.interfaceVariableIdentifiers, variableIdentifier);
    } else if (IsHitAttributeVariable(cd)) {
       assert(InStages(.Rchit | .Rahit | .Rint), "a @% variable only exists in rchit, rahit and rint shaders. loc: %", HIT_ATTRIBUTE_QUALIFIER, GetLocationString(cd));
       assert(!data.hitAttributeDeclared, "only one @% variable is allowed. loc: %", HIT_ATTRIBUTE_QUALIFIER, GetLocationString(cd));
@@ -10719,6 +10832,59 @@ DeclareNotedVariable :: (data: *CompilationData, cd: *Code_Declaration, variable
 
    TableAdd(*data.declaredVariables, cd, .{});
    return true;
+}
+
+// EmitMeshTasks, IgnoreIntersection and TerminateRay are not like return, they end the invocation like abort() from any function.
+// the defers that are pending at that point cant run: the ones of the current function could be generated, but the ones of the functions above it cant.
+// so all of them are errors. a defer that has already run (it is out of scope, or the function it is in has returned) is fine.
+// the terminator itself can be in a deferred block, the defers that have run are not in deferStack then (see GenerateDefers).
+NoteInvocationEnd :: (data: *CompilationData, name: string, node: *Code_Node, currentFunction: *Code_Procedure_Header) {
+   if (!data.isBlockReachable) return;
+
+   if (data.deferStack.count > 0) {
+      assert(false, "% ends the invocation from any function, the pending defer wouldnt run. end the scope of the defer before it. defer: %, loc: %", name, GetLocationString(data.deferStack[data.deferStack.count - 1]), GetLocationString(node));
+   }
+
+   data.endsInvocation = true;
+   array_add_if_unique(*data.invocationEndingFunctions, currentFunction);
+}
+
+// a call that is made while a defer is pending. it is checked after all the functions are generated, the callee might not have been generated yet.
+CallWithPendingDefer :: struct {
+   callee:  *Code_Procedure_Header;
+   call:    *Code_Node;
+   defer_:  *Code_Defer;
+}
+
+AssertCallsCantSkipDefers :: (data: *CompilationData) {
+   visited: Table(*Code_Procedure_Header, bool);
+   defer deinit(*visited);
+
+   for data.callsWithPendingDefers {
+      if (CanEndInvocation(data, it.callee, *visited)) {
+         assert(false, "% can end the invocation (with %, % or %, maybe in a function it calls), the pending defer wouldnt run. end the scope of the defer before the call. defer: %, loc: %", it.callee.name, EMIT_MESH_TASKS_NAME, IGNORE_INTERSECTION_FUNCTION_NAME, TERMINATE_RAY_FUNCTION_NAME, GetLocationString(it.defer_), GetLocationString(it.call));
+      }
+   }
+}
+
+// visited is only the functions that cant, it can be shared between the calls.
+CanEndInvocation :: (data: *CompilationData, function: *Code_Procedure_Header, visited: *Table(*Code_Procedure_Header, bool)) -> bool {
+   if (array_find(data.invocationEndingFunctions, function)) return true;
+   if (table_contains(visited, function)) return false;
+   table_add(visited, function, true);
+
+   found, dependencies := table_find(*functionDependencyTable, function);
+   assert(found, "function: %", function.name);
+   for dependencies {
+      if (CanEndInvocation(data, it, visited)) return true;
+   }
+
+   return false;
+}
+
+// the task payload is read only in mesh shaders. spirv-val doesnt check this.
+AssertWritable :: (data: *CompilationData, pointerType: *TypeInfoPointer, node: *Code_Node) {
+   assert(data.shaderType != .Mesh || pointerType.storageClass != .TaskPayloadWorkgroupEXT, "a @% variable is read only in mesh shaders. loc: %", TASK_PAYLOAD_QUALIFIER, GetLocationString(node));
 }
 
 // the capabilities and extensions that are declared only if something that needs them is used
@@ -11601,7 +11767,7 @@ DetermineIdentType :: (data: *CompilationData, node: *Code_Node) -> *Type_Info {
    // a variable that is private to an invocation has to be declared in the shader.
    if ((declaration.flags & .IS_GLOBAL) && !(declaration.flags & .IS_CONSTANT) && !IsModuleGlobalVariable(declaration)) {
       if (!IsNotedVariable(declaration)) {
-         assert(false, "% is a global variable without a note. a global variable has to be @%, @%, @%, @%, @%, @% or @%, other variables have to be declared in the shader. loc: %, declaration: %", ci.name, RAY_PAYLOAD_QUALIFIER, INCOMING_RAY_PAYLOAD_QUALIFIER, WORKGROUP_QUALIFIER, HIT_ATTRIBUTE_QUALIFIER, CALLABLE_DATA_QUALIFIER, INCOMING_CALLABLE_DATA_QUALIFIER, HIT_OBJECT_ATTRIBUTE_QUALIFIER, GetLocationString(ci), GetLocationString(declaration));
+         assert(false, "% is a global variable without a note. a global variable has to be @%, @%, @%, @%, @%, @%, @% or @%, other variables have to be declared in the shader. loc: %, declaration: %", ci.name, RAY_PAYLOAD_QUALIFIER, INCOMING_RAY_PAYLOAD_QUALIFIER, WORKGROUP_QUALIFIER, TASK_PAYLOAD_QUALIFIER, HIT_ATTRIBUTE_QUALIFIER, CALLABLE_DATA_QUALIFIER, INCOMING_CALLABLE_DATA_QUALIFIER, HIT_OBJECT_ATTRIBUTE_QUALIFIER, GetLocationString(ci), GetLocationString(declaration));
       }
 
       if (!table_contains(*data.declaredVariables, declaration))  DeclareNotedVariable(data, declaration, .{ type = .Variable, variable.declaration = declaration });
@@ -12002,11 +12168,16 @@ DetermineDeclarationType :: (data: *CompilationData, node: *Code_Node) -> *Type_
    storageClass := GetVariableStorageClass(data, .{ type = .Variable, variable.declaration = cd });
 
    // workgroup variables dont have an explicit layout either (that would need WorkgroupMemoryExplicitLayoutKHR)
-   isLocalDeclaration := storageClass == .Function || storageClass == .Workgroup;
+   // the task payload is workgroup memory too. the task and the mesh shader declare the same type so they agree on the layout.
+   isLocalDeclaration := storageClass == .Function || storageClass == .Workgroup || storageClass == .TaskPayloadWorkgroupEXT;
 
    if (storageClass == .Workgroup) {
       assert(data.shaderType == .Compute || data.shaderType == .Mesh || data.shaderType == .Task, "workgroup variables only exist in compute, mesh and task shaders. loc: %", GetLocationString(node));
       assert(cd.expression == null, "a workgroup variable cant be initialized, it is shared by all the invocations of the workgroup. loc: %", GetLocationString(node));
+   }
+
+   if (storageClass == .TaskPayloadWorkgroupEXT) {
+      assert(cd.expression == null, "a @% variable cant be initialized, it is shared by all the invocations of the workgroup and read only in mesh shaders. loc: %", TASK_PAYLOAD_QUALIFIER, GetLocationString(node));
    }
 
    // i am not sure but this might need to be recursive.
@@ -12410,10 +12581,17 @@ EndLoop :: (data: *CompilationData, function: *BuilderType) {
 }
 
 // generates the deferred blocks above "downTo" in CompilationData.deferStack, the last one first. they are not popped, the scope that pushed them pops them when it ends.
+// while a block is generated it and the ones above it have run, so they are not in the stack: the stack is what is still pending (see NoteInvocationEnd).
 GenerateDefers :: (data: *CompilationData, downTo: int, general: *BuilderType, function: *BuilderType, currentFunction: *Code_Procedure_Header) {
-   for < i: downTo..data.deferStack.count - 1 {
-      GenerateInstructions(data, data.deferStack[i].block, general, function, currentFunction);
+   stack := array_copy(data.deferStack);
+   defer array_free(stack);
+
+   for < i: downTo..stack.count - 1 {
+      data.deferStack.count = i;
+      GenerateInstructions(data, stack[i].block, general, function, currentFunction);
    }
+
+   array_copy(*data.deferStack, stack);
 }
 
 // a top level statement of a macro expansion. returns false if it is a return, the caller handles it.
@@ -13780,6 +13958,7 @@ GetVariableStorageClass :: (data: *CompilationData, variable: Identifier) -> Spv
       return .Workgroup;
    }
 
+   if (IsTaskPayloadVariable(declaration.declaration))           return .TaskPayloadWorkgroupEXT;
    if (IsHitAttributeVariable(declaration.declaration))          return .HitAttributeKHR;
    if (IsCallableDataVariable(declaration.declaration))          return .CallableDataKHR;
    if (IsIncomingCallableDataVariable(declaration.declaration))  return .IncomingCallableDataKHR;

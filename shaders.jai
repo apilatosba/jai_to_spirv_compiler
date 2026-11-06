@@ -4779,6 +4779,234 @@ TestByValuePointerParameter :: (data: *TestData) {
 } @compute @1
 
 //
+TestTaskData :: struct {
+   values:  *u32;
+   count:   u32;
+}
+
+TestTaskPayload :: struct {
+   ids:     [4] u32;
+   color:   f32x4;
+   model:   mat4;
+   count:   u32;
+   small:   u8;
+   medium:  u16;
+   visible: bool;
+   values:  *u32;
+}
+
+testGlobalTaskPayload: TestTaskPayload; @taskpayload
+
+TestTaskNoPayload :: (data: *TestTaskData) {
+   EmitMeshTasks(1, 1, 1);
+} @task @1
+
+TestTaskLiteralsAndRuntimeCounts :: (data: *TestTaskData) {
+   EmitMeshTasks(data.count, data.values[0] + 1, 1);
+} @task @32_2_1
+
+TestTaskNamedArguments :: (data: *TestTaskData) {
+   EmitMeshTasks(groupCountZ = 1, groupCountX = data.count, groupCountY = 2);
+} @task @32
+
+TestTaskLocalPayload :: (data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   payload.ids[localinvocationid.x] = data.values[localinvocationid.x];
+   payload.count = data.count;
+   payload.small = 3;
+   payload.medium = 4;
+   payload.visible = data.count > 0;
+   payload.color = .{ 1, 2, 3, 4 };
+   payload.values = data.values;
+   Barrier();
+   EmitMeshTasks(payload.count, 1, 1, *payload);
+} @task @4
+
+TestTaskGlobalPayload :: (data: *TestTaskData) {
+   testGlobalTaskPayload.count = 7;
+   EmitMeshTasks(1, 1, 1, *testGlobalTaskPayload);
+} @task @1_1_1
+
+TestTaskPayloadNamedArgument :: (data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   EmitMeshTasks(payload = *payload, groupCountX = 1, groupCountY = 1, groupCountZ = 1);
+} @task @1
+
+TestTaskAtomicOnPayload :: (data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   slot := AtomicAdd(*payload.count, 1);
+   payload.ids[slot] = localinvocationindex.(u32);
+   Barrier();
+   EmitMeshTasks(payload.count, 1, 1, *payload);
+} @task @4
+
+TestTaskBothBranches :: (data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   if (data.count > 3) {
+      EmitMeshTasks(3, 1, 1, *payload);
+   } else {
+      EmitMeshTasks(data.count, 1, 1, *payload);
+   }
+} @task @1
+
+TestTaskCodeAfterEmit :: (data: *TestTaskData) {
+   EmitMeshTasks(1, 1, 1);
+   data.count = 2;
+   return;
+} @task @1
+
+TestTaskFillPayloadMacro :: (payload: *TestTaskPayload, count: u32) #expand {
+   payload.count = count;
+}
+
+TestTaskPayloadThroughMacro :: (data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   TestTaskFillPayloadMacro(*payload, 5);
+   EmitMeshTasks(1, 1, 1, *payload);
+} @task @1
+
+TestTaskEmitMacro :: (payload: *TestTaskPayload) #expand {
+   EmitMeshTasks(1, 1, 1, payload);
+}
+
+TestTaskEmitThroughMacro :: (data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   TestTaskEmitMacro(*payload);
+} @task @1
+
+TestTaskFinish :: () {
+   testGlobalTaskPayload.count += 1;
+   EmitMeshTasks(1, 1, 1, *testGlobalTaskPayload);
+}
+
+TestTaskEmitInProcedure :: (data: *TestTaskData) {
+   TestTaskFinish();
+} @task @1
+
+TestTaskBuiltins :: (data: *TestTaskData) {
+   id := workgroupid.x + numworkgroups.y + globalinvocationid.z + localinvocationid.x;
+   sharedValue: u32; @workgroup
+   sharedValue = id;
+   EmitMeshTasks(sharedValue, 1, 1);
+} @task @2
+
+TestTaskMeshOut :: struct {
+   value: f32;
+}
+
+TestTaskMeshPrimitive :: struct { }
+
+TestMeshLocalTaskPayload :: (o: [] TestTaskMeshOut, p: [] TestTaskMeshPrimitive, data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   SetMeshOutputs(payload.count, 1);
+   meshvertices[0].position = payload.color;
+   o[0].value = cast(f32) payload.ids[workgroupid.x];
+   meshtriangles[0] = .{ 0, 0, 0 };
+} @mesh @1 @3_1 @triangles
+
+TestMeshGlobalTaskPayload :: (o: [] TestTaskMeshOut, p: [] TestTaskMeshPrimitive, data: *TestTaskData) {
+   SetMeshOutputs(testGlobalTaskPayload.count, 1);
+   count := testGlobalTaskPayload.values[0];
+   meshvertices[0].position = testGlobalTaskPayload.model * f32x4.{ 0, 0, 0, cast(f32) count };
+} @mesh @1 @3_1 @triangles
+
+TestWorkgroupStructWithUnusedSmallInteger :: struct {
+   used:    u32;
+   unused:  u16;
+}
+
+// the capability of the type of a workgroup variable is needed even if the member is never used
+TestWorkgroupUnusedSmallInteger :: (data: *TestComputeData) {
+   value: TestWorkgroupStructWithUnusedSmallInteger; @workgroup
+   value.used = 1;
+} @compute @1
+
+TestRayPayloadWithUnusedSmallInteger :: struct {
+   used:    u32;
+   unused:  u16;
+}
+
+// the capability of the type of a ray payload is needed even if the member is never used
+TestRgenUnusedSmallInteger :: (data: *TestRgenData) {
+   payload: TestRayPayloadWithUnusedSmallInteger; @payload
+   payload.used = 1;
+   TraceRay(tlases[data.tlas], .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+} @rgen
+
+TestRmissUnusedSmallInteger :: (data: *TestRgenData) {
+   payload: TestRayPayloadWithUnusedSmallInteger; @payloadin
+   payload.used = 1;
+} @rmiss
+
+// a defer that has run when the invocation ends is fine
+TestTaskDeferScopeEnded :: (data: *TestTaskData) {
+   {
+      defer data.count = 1;
+      data.values[0] = 2;
+   }
+   for 0..3 {
+      defer data.count += 1;
+      if (it == 2) continue;
+      data.values[it] = 3;
+   }
+   EmitMeshTasks(data.count, 1, 1);
+} @task @1
+
+TestTaskDeferHelper :: (data: *TestTaskData) {
+   defer data.count += 1;
+   data.values[0] = 1;
+}
+
+TestTaskDeferInProcedureThatReturned :: (data: *TestTaskData) {
+   TestTaskDeferHelper(data);
+   EmitMeshTasks(data.count, 1, 1);
+} @task @1
+
+// the procedure cant end the invocation, so the defer is still going to run
+TestTaskDeferWithCallThatCantEnd :: (data: *TestTaskData) {
+   {
+      defer data.count = 1;
+      TestTaskDeferHelper(data);
+   }
+   EmitMeshTasks(1, 1, 1);
+} @task @1
+
+TestTaskBacktickedDeferHelper :: (data: *TestTaskData) #expand {
+   `defer data.count = 1;
+}
+
+TestTaskBacktickedDeferScopeEnded :: (data: *TestTaskData) {
+   {
+      TestTaskBacktickedDeferHelper(data);
+   }
+   EmitMeshTasks(1, 1, 1);
+} @task @1
+
+// the defers run in reverse, nothing is pending when the deferred EmitMeshTasks runs. it runs on the return too.
+TestTaskDeferredEmitMeshTasks :: (data: *TestTaskData) {
+   defer EmitMeshTasks(data.count, 1, 1);
+   defer data.values[0] = 1;
+   if (data.count > 3) return;
+   data.count = 2;
+} @task @1
+
+// the defer hasnt been reached on the path where the invocation ends
+TestTaskDeferAfterEmitMeshTasks :: (data: *TestTaskData) {
+   if (data.count > 3) EmitMeshTasks(3, 1, 1);
+   defer EmitMeshTasks(1, 1, 1);
+   data.count = 2;
+} @task @1
+
+TestRahitDeferScopeEnded :: (data: *TestRgenData) {
+   payload: TestRayPayload; @payloadin
+   {
+      defer payload.hit = true;
+      payload.color = .{ 1, 0, 0, 1 };
+   }
+   if raytmax > 100  TerminateRay();
+   IgnoreIntersection();
+} @rahit
+
 // Unsupported.
 // Each entry point below is valid Jai that the backend rejects on purpose, with an error message that explains why.
 // They either need information the jai compiler doesnt give to the metaprogram, or something spirv doesnt allow.
@@ -4869,5 +5097,136 @@ UnsupportedPointerToLocal :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    px.* = 2;
    data.f = px.*;
 } @mesh @1_1_1 @1_1 @triangles
+
+
+// the task payload is read only in mesh shaders
+UnsupportedTaskPayloadWriteInMesh :: (o: [] TestTaskMeshOut, p: [] TestTaskMeshPrimitive, data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   payload.count = 1;
+} @mesh @1 @3_1 @triangles
+
+UnsupportedTaskPayloadCompoundWriteInMesh :: (o: [] TestTaskMeshOut, p: [] TestTaskMeshPrimitive, data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   payload.count += 1;
+} @mesh @1 @3_1 @triangles
+
+UnsupportedTaskPayloadAtomicInMesh :: (o: [] TestTaskMeshOut, p: [] TestTaskMeshPrimitive, data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   AtomicAdd(*payload.count, 1);
+} @mesh @1 @3_1 @triangles
+
+// a task payload is shared by all the invocations of the workgroup
+UnsupportedTaskPayloadInitializer :: (data: *TestTaskData) {
+   payload: TestTaskPayload = .{}; @taskpayload
+   EmitMeshTasks(1, 1, 1, *payload);
+} @task @1
+
+// an entry point can have one task payload
+UnsupportedTwoTaskPayloads :: (data: *TestTaskData) {
+   a: TestTaskPayload; @taskpayload
+   b: TestTaskPayload; @taskpayload
+   EmitMeshTasks(1, 1, 1, *a);
+} @task @1
+
+// the task payload only exists in task and mesh shaders
+UnsupportedTaskPayloadInCompute :: (data: *TestComputeData) {
+   payload: TestTaskPayload; @taskpayload
+} @compute @1
+
+// EmitMeshTasks only exists in task shaders
+UnsupportedEmitMeshTasksInMesh :: (o: [] TestTaskMeshOut, p: [] TestTaskMeshPrimitive, data: *TestTaskData) {
+   EmitMeshTasks(1, 1, 1);
+} @mesh @1 @3_1 @triangles
+
+// the payload of EmitMeshTasks has to be the variable itself (spirv requires the result of an OpVariable)
+UnsupportedEmitMeshTasksMemberOfPayload :: (data: *TestTaskData) {
+   payload: TestTaskPayload; @taskpayload
+   EmitMeshTasks(1, 1, 1, *payload.count);
+} @task @1
+
+// the payload of EmitMeshTasks has to be a @taskpayload variable
+UnsupportedEmitMeshTasksBufferPayload :: (data: *TestTaskData) {
+   EmitMeshTasks(1, 1, 1, data.values);
+} @task @1
+
+// a task shader must end with EmitMeshTasks
+UnsupportedTaskWithoutEmitMeshTasks :: (data: *TestTaskData) {
+   data.count = 1;
+} @task @1
+
+UnsupportedTaskReturn :: (data: *TestTaskData) {
+   if (data.count == 0) return;
+   EmitMeshTasks(1, 1, 1);
+} @task @1
+
+// a task shader takes only the data pointer
+UnsupportedTaskParameters :: (a: *TestTaskData, b: *TestTaskData) {
+   EmitMeshTasks(1, 1, 1);
+} @task @1
+
+
+// the instructions that end the invocation (other than return) work like abort(), they cant run the defers that are pending
+UnsupportedDeferBeforeEmitMeshTasks :: (data: *TestTaskData) {
+   defer data.count = 1;
+   EmitMeshTasks(1, 1, 1);
+} @task @1
+
+UnsupportedDeferBeforeConditionalEmitMeshTasks :: (data: *TestTaskData) {
+   defer data.count = 1;
+   if (data.count > 3) EmitMeshTasks(3, 1, 1);
+   EmitMeshTasks(1, 1, 1);
+} @task @1
+
+UnsupportedEmitsHelper :: () {
+   EmitMeshTasks(1, 1, 1);
+}
+
+UnsupportedDeferInCallerOfEmitMeshTasks :: (data: *TestTaskData) {
+   defer data.count = 1;
+   UnsupportedEmitsHelper();
+} @task @1
+
+UnsupportedEmitsThroughHelper :: () {
+   UnsupportedEmitsHelper();
+}
+
+UnsupportedDeferInCallerOfCallerOfEmitMeshTasks :: (data: *TestTaskData) {
+   defer data.count = 1;
+   UnsupportedEmitsThroughHelper();
+} @task @1
+
+UnsupportedDeferInHelperOfEmitMeshTasks :: (data: *TestTaskData) {
+   defer data.count = 1;
+   EmitMeshTasks(1, 1, 1);
+}
+
+UnsupportedDeferInCalledProcedure :: (data: *TestTaskData) {
+   UnsupportedDeferInHelperOfEmitMeshTasks(data);
+} @task @1
+
+UnsupportedBacktickedDeferHelper :: (data: *TestTaskData) #expand {
+   `defer data.count = 1;
+}
+
+UnsupportedBacktickedDefer :: (data: *TestTaskData) {
+   UnsupportedBacktickedDeferHelper(data);
+   EmitMeshTasks(1, 1, 1);
+} @task @1
+
+// the deferred EmitMeshTasks runs first, the other defer would still be pending
+UnsupportedDeferredEmitMeshTasksBeforeDefer :: (data: *TestTaskData) {
+   defer data.count = 1;
+   defer EmitMeshTasks(1, 1, 1);
+} @task @1
+
+UnsupportedDeferWithIgnoreIntersection :: (data: *TestTaskData) {
+   defer data.count = 1;
+   IgnoreIntersection();
+} @rahit
+
+UnsupportedDeferWithTerminateRay :: (data: *TestTaskData) {
+   defer data.count = 1;
+   TerminateRay();
+} @rahit
 
 }
