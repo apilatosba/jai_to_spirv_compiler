@@ -4,7 +4,7 @@
 #import "File";
 #import "File_Utilities";
 #import "Basic";
-#import "ApilaSpirv";
+#import "ApilaSpirv"(METAPROGRAM = true);
 #import "Process";
 #import "String";
 

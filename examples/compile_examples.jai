@@ -2,7 +2,7 @@
 #import "File";
 #import "File_Utilities";
 #import "Basic";
-#import,file "../module.jai";
+#import,file "../module.jai"(METAPROGRAM = true);
 #import "Process";
 
 #run {
