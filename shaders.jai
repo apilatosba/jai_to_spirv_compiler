@@ -9,6 +9,7 @@ FixedArrayTest :: (data: *RgenData) {
 
 ArrayShaderData :: struct {
    lights: [] s32;
+   tlases: [] u64;
 }
 
 ArrayShader :: (data: *ArrayShaderData) {
@@ -17,11 +18,11 @@ ArrayShader :: (data: *ArrayShaderData) {
    light := data.lights[2];
    count := data.lights.count;
    light2 := data.lights.data.*;
-   TraceRay(tlases[light], xx count, xx light2, 0, 0, 0, f32x3.{0,0,0}, 0, f32x3.{0,0,0}, 0, *payload);
+   TraceRay(data.tlases[light], xx count, xx light2, 0, 0, 0, f32x3.{0,0,0}, 0, f32x3.{0,0,0}, 0, *payload);
 } @rgen
 
 RgenData :: struct {
-   tlasOffset: s32;
+   tlas:        u64;
    imageOffset: s32;
    lights: *s32;
 }
@@ -50,7 +51,7 @@ RgenShader :: (data: *RgenData) {
 
    // // this doesnt terminate (program behaves the same if i put an infinite loop here instead)
    // traceRayEXT(
-   //    tlas[rgenData.tlasOffset],           // acceleration structure
+   //    tlas[rgenData.tlas],                 // acceleration structure
    //    rayFlags,       // rayFlags
    //    0xFF,           // cullMask
    //    0,              // sbtRecordOffset
@@ -78,7 +79,7 @@ RgenShader :: (data: *RgenData) {
    tMax := 1000.0;
 
    payload.hitColor = f32x4.{1,0,1,1};
-   TraceRay(tlases[data.tlasOffset], rayFlags, 0xFF, 0, 0, 0, origin, tMin, direction, tMax, *payload);
+   TraceRay(data.tlas, rayFlags, 0xFF, 0, 0, 0, origin, tMin, direction, tMax, *payload);
    ImageWrite(images[data.imageOffset], pixelCoordinates, payload.hitColor);
 } @rgen
 
@@ -2636,8 +2637,8 @@ TestFragmentTextures :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
    return f32x4.{ a.x + b.y, a.y, a.z, b.w };
 } @fragment
 
-// the offsets in the heaps instead of the heap accesses
-TestFragmentTextureOffsets :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
+// the indices in the heaps instead of the heap accesses
+TestFragmentTextureIndices :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
    a := texture(data.u, data.u + 1, v.uv);
    b := texturelod(cast(u32) data.i, data.u, v.uv, data.f);
    c := texturei(data.u, 0, v.uv);
@@ -2656,7 +2657,7 @@ TestFragmentBranching :: (v: TestOut, p: TestPrim, data: *TestData) -> f32x4 {
 } @fragment
 
 TestRgenData :: struct {
-   tlas:   s32;
+   tlas:   u64;
    image:  s32;
    values: *f32;
 }
@@ -2671,27 +2672,27 @@ TestRgenTraceRay :: (data: *TestRgenData) {
    coordinates := s32x2.{ xx launchid.x, xx launchid.y };
    size := launchsize.x * launchsize.y;
    payload.color = f32x4.{ 0, 0, 0, 0 };
-   TraceRay(tlases[data.tlas], .Opaque | .TerminateOnFirstHit, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   TraceRay(data.tlas, .Opaque | .TerminateOnFirstHit, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
    ImageWrite(images[data.image], coordinates, payload.color);
 } @rgen
 
-TestRgenTraceRayOffset :: (data: *TestRgenData) {
+TestRgenImageIndex :: (data: *TestRgenData) {
    payload: TestRayPayload; @payload
-   TraceRay(cast(u32) data.tlas, .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   TraceRay(data.tlas, .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
    ImageWrite(cast(u32) data.image, .{ 0, 0 }, payload.color);
 } @rgen
 
 TestRgenTraceRayNamedArguments :: (data: *TestRgenData) {
    payload: TestRayPayload; @payload
-   TraceRay(tlases[data.tlas], .Opaque, 0xFF, 0, 0, 0, rayDirection = f32x3.{ 0, 0, 1 }, rayOrigin = f32x3.{ 1, 2, 3 }, rayTMax = 500, rayTMin = 0.25, payload = *payload);
+   TraceRay(data.tlas, .Opaque, 0xFF, 0, 0, 0, rayDirection = f32x3.{ 0, 0, 1 }, rayOrigin = f32x3.{ 1, 2, 3 }, rayTMax = 500, rayTMin = 0.25, payload = *payload);
    ImageWrite(texel = payload.color, image = images[data.image], coordinate = .{ 0, 0 });
 } @rgen
 
 TestRgenTwoPayloads :: (data: *TestRgenData) {
    first: TestRayPayload; @payload
    second: TestRgenPayloadB; @payload
-   TraceRay(tlases[data.tlas], 1, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *first);
-   TraceRay(tlases[data.tlas], 1, 0xFF, 0, 0, 1, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 1, 0 }, 1000, *second);
+   TraceRay(data.tlas, 1, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *first);
+   TraceRay(data.tlas, 1, 0xFF, 0, 0, 1, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 1, 0 }, 1000, *second);
    data.values[0] = second.distance;
 } @rgen
 
@@ -2700,7 +2701,7 @@ testGlobalPayloadIn: TestRayPayload; @payloadin
 
 TestRgenGlobalPayload :: (data: *TestRgenData) {
    testGlobalPayload.color = f32x4.{ 0, 0, 0, 0 };
-   TraceRay(tlases[data.tlas], .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *testGlobalPayload);
+   TraceRay(data.tlas, .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *testGlobalPayload);
    ImageWrite(images[data.image], .{ 0, 0 }, testGlobalPayload.color);
 } @rgen
 
@@ -2760,14 +2761,14 @@ TestRcall :: (data: *TestRgenData) {
 // a ray traced inline: a shadow ray from a fragment shader
 TestFragmentRayQuery :: (v: TestOut, p: TestPrim, data: *TestRgenData) -> f32x4 {
    q: RayQuery;
-   RayQueryInitialize(*q, tlases[data.tlas], .Opaque | .TerminateOnFirstHit, 0xFF, f32x3.{ v.uv.x, v.uv.y, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);
+   RayQueryInitialize(*q, data.tlas, .Opaque | .TerminateOnFirstHit, 0xFF, f32x3.{ v.uv.x, v.uv.y, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);
    while RayQueryProceed(*q) {}
    shadow := ifx RayQueryGetCommittedType(*q) == .Triangle then 0.2 else 1.0;
    return f32x4.{ shadow, shadow, shadow, 1 };
 } @fragment
 
 TestRayQueryData :: struct {
-   tlas:    u32;
+   tlas:    u64;
    t:       f32;
    bary:    f32x2;
    indices: s32x4;
@@ -2779,7 +2780,7 @@ TestRayQueryData :: struct {
 // every function of a ray query. the committed argument says which intersection (the committed one or the candidate one)
 TestComputeRayQuery :: (data: *TestRayQueryData) {
    q: RayQuery;
-   RayQueryInitialize(*q, data.tlas, .Opaque, 0xFF, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);   // the offset of the tlas in the heap
+   RayQueryInitialize(*q, data.tlas, .Opaque, 0xFF, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);
    while RayQueryProceed(*q) {
       if RayQueryGetCandidateType(*q) == .Triangle {
          if RayQueryGetIntersectionFrontFace(*q, false) && RayQueryGetIntersectionT(*q, false) > 0  RayQueryConfirmIntersection(*q);
@@ -2816,7 +2817,7 @@ TestRayQueryAfterReturn :: (data: *TestRayQueryData) {
 } @compute @1
 
 TestHitObjectData :: struct {
-   tlas:    u32;
+   tlas:    u64;
    hint:    u32;
    t:       f32;
    bary:    f32x2;
@@ -2834,7 +2835,7 @@ TestRgenHitObject :: (data: *TestHitObjectData) {
    payload: TestRayPayload; @payload
    attribs: f32x2; @hitobjectattribute
    h: HitObject;
-   HitObjectTraceRay(*h, tlases[data.tlas], .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   HitObjectTraceRay(*h, data.tlas, .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
    ReorderThread(*h);
 
    if HitObjectIsHit(*h) {
@@ -2857,17 +2858,17 @@ TestRgenHitObject :: (data: *TestHitObjectData) {
    HitObjectExecuteShader(*h, *payload);
 } @rgen
 
-// the overloads: the tlas offset, the hint and its bits
+// the overloads: the hint and its bits
 TestRgenHitObjectReorder :: (data: *TestHitObjectData) {
    payload: TestRayPayload; @payload
    h: HitObject;
-   HitObjectTraceRay(*h, data.tlas, .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);   // the offset of the tlas in the heap
+   HitObjectTraceRay(*h, data.tlas, .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
    ReorderThread(*h, data.hint, 4);
    ReorderThread(data.hint, 2);
    HitObjectReorderExecuteShader(*h, *payload);
    HitObjectReorderExecuteShader(*h, *payload, data.hint, 4);
 
-   HitObjectTraceReorderExecute(*h, tlases[data.tlas], .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   HitObjectTraceReorderExecute(*h, data.tlas, .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
    HitObjectTraceReorderExecute(*h, data.tlas, .Opaque, 0xFF, 0, 1, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload, data.hint, 4);
    ImageWrite(0, .{ 0, 0 }, payload.color);
 } @rgen
@@ -2895,7 +2896,7 @@ TestRchitHitObject :: (data: *TestHitObjectData) {
    incoming: TestRayPayload; @payloadin
    payload: TestRayPayload; @payload
    h: HitObject;
-   HitObjectTraceRay(*h, tlases[data.tlas], .Opaque, 0xFF, 0, 1, 0, worldrayorigin, 0.001, worldraydirection, 1000, *payload);
+   HitObjectTraceRay(*h, data.tlas, .Opaque, 0xFF, 0, 1, 0, worldrayorigin, 0.001, worldraydirection, 1000, *payload);
    if HitObjectIsHit(*h)  HitObjectExecuteShader(*h, *payload);
    incoming.color = payload.color;
 } @rchit
@@ -2920,7 +2921,7 @@ TestRchit :: (data: *TestRgenData) {
 TestRmiss :: (data: *TestRgenData) {
    payload: TestRayPayload; @payloadin
    payload.hit = false;
-   if (data.tlas < 0)  payload.color = f32x4.{ 0, 0, 0, 1 };
+   if (data.image < 0)  payload.color = f32x4.{ 0, 0, 0, 1 };
 } @rmiss
 
 TestCompileTimeConstant :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
@@ -4527,8 +4528,8 @@ TestTextureFunctions :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32
    return c;
 } @fragment
 
-// the offsets in the heaps instead of the heap accesses. the offsets are u32, the s32 ones are cast.
-TestTextureOffsetFunctions :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
+// the indices in the heaps instead of the heap accesses. the indices are u32, the s32 ones are cast.
+TestTextureIndexFunctions :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
    image   := cast(u32) data.image;
    sampler := cast(u32) data.sampler;
    c := texturebias(image, sampler, v.uv, 0.5);
@@ -4546,7 +4547,7 @@ TestTextureNamedArguments :: (v: TestOut, p: TestPrim, data: *TestTextureData) -
    c := texture(uv = v.uv, sampler = samplers[data.sampler], image = images[data.image]);
    c += texturelod(lod = data.f, uv = v.uv, image = images[data.image], sampler = samplers[data.sampler]);
    c += texturegrad(images[data.image], samplers[data.sampler], ddy = ddy(v.uv), ddx = ddx(v.uv), uv = v.uv);
-   c += texture(uv = v.uv, samplerOffset = cast(u32) data.sampler, imageOffset = cast(u32) data.image);
+   c += texture(uv = v.uv, samplerIndex = cast(u32) data.sampler, imageIndex = cast(u32) data.image);
    return c;
 } @fragment
 
@@ -4581,7 +4582,7 @@ TestTextureKinds :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
    size3 := texturesize3d(images[data.image], 0) + texturesizearray(images[data.image], 0);
    data.size = texturesizecube(images[data.image], 0) + s32x2.{ size3.x, size3.z };
    data.count = texturelevels3d(images[data.image]) + texturelevelscube(images[data.image]) + texturelevelsarray(images[data.image]);
-   c += texturecube(cast(u32) data.image, cast(u32) data.sampler, uvw);   // the offsets in the heaps
+   c += texturecube(cast(u32) data.image, cast(u32) data.sampler, uvw);   // the indices in the heaps
    return c;
 } @fragment
 
@@ -4930,7 +4931,7 @@ TestRayPayloadWithUnusedSmallInteger :: struct {
 TestRgenUnusedSmallInteger :: (data: *TestRgenData) {
    payload: TestRayPayloadWithUnusedSmallInteger; @payload
    payload.used = 1;
-   TraceRay(tlases[data.tlas], .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   TraceRay(data.tlas, .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
 } @rgen
 
 TestRmissUnusedSmallInteger :: (data: *TestRgenData) {
@@ -5230,3 +5231,32 @@ UnsupportedDeferWithTerminateRay :: (data: *TestTaskData) {
 } @rahit
 
 }
+
+TestTlasAddressData :: struct {
+   tlases: *u64;
+   index:  s32;
+   hit:    bool;
+}
+
+// the tlas is any expression that gives a u64, not only a member of the shader data
+TestRgenTlasAddressExpressions :: (data: *TestTlasAddressData) {
+   payload: TestRayPayload; @payload
+   TraceRay(data.tlases[data.index], .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+
+   address := data.tlases[0];
+   TraceRay(address, .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   TraceRay(ifx data.index > 0 then address else data.tlases[1], .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+   TraceRay(0x1234_5678_9ABC, .Opaque, 0xFF, 0, 0, 0, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000, *payload);
+} @rgen
+
+TestRayQueryTlasHelper :: (tlas: u64) -> bool {
+   q: RayQuery;
+   RayQueryInitialize(*q, tlas, .Opaque, 0xFF, f32x3.{ 0, 0, 0 }, 0.001, f32x3.{ 0, 0, 1 }, 1000);
+   while RayQueryProceed(*q) {}
+   return RayQueryGetCommittedType(*q) == .Triangle;
+}
+
+// the address of the tlas goes through a procedure
+TestComputeRayQueryTlasParameter :: (data: *TestTlasAddressData) {
+   data.hit = TestRayQueryTlasHelper(data.tlases[data.index]);
+} @compute @1
