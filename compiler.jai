@@ -114,7 +114,8 @@ ProcessMessage :: (message: *Message) {
          for _, header: entryPoints {
             // top tier formatting right there
                                             shaderType, workgroupSize, maxVertices, maxPrimitives, topology := GetParametersFromNotes(header.notes);
-            spirv := CompileToSpirv(header, shaderType, workgroupSize, maxVertices, maxPrimitives, topology);
+            spirv, untypechecked := CompileToSpirv(header, shaderType, workgroupSize, maxVertices, maxPrimitives, topology);
+            if (untypechecked != null)  assert(false, "the body of % is not typechecked. loc: %", untypechecked.name, GetLocationString(untypechecked));
 
             buildOptions := GetBuildOptions(message.workspace);
             fileName := sprint("%.spv", header.name);
@@ -170,11 +171,13 @@ SetBuildOptions :: (options: BuildOptions, w: Workspace) {
 
 // compiles one entry point, for a metaprogram that finds the entry points itself instead of from the notes (VulkanJai2 finds them from the calls of its Create...Pipeline functions).
 // the parameters are what the notes of an entry point say: the workgroup size is for the compute, task and mesh shaders, maxVertices, maxPrimitives and topology for the mesh shaders.
-// every TYPECHECKED message of the workspace has to be given to ProcessMessage before (call this at TYPECHECKED_ALL_WE_CAN), and the body of the header has to be typechecked.
+// every TYPECHECKED message of the workspace has to be given to ProcessMessage before (call this at TYPECHECKED_ALL_WE_CAN).
 // the same header can be compiled more than once (with a different workgroup size for example).
-CompileEntryPoint :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSize: [3] u32 = .[1, 1, 1], maxVertices: u32 = 0, maxPrimitives: u32 = 0, topology := PrimitiveTopology.Triangles) -> [] u8 {
+//
+// if the body of the entry point or of a procedure it calls is not typechecked, nothing is compiled and that procedure is returned.
+// it has an error that jai reports when the metaprogram is done (an undefined name...), so dont report one yourself, let the compilation go on and fail with it.
+CompileEntryPoint :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSize: [3] u32 = .[1, 1, 1], maxVertices: u32 = 0, maxPrimitives: u32 = 0, topology := PrimitiveTopology.Triangles) -> [] u8, untypechecked: *Code_Procedure_Header {
    AssertModuleVariablesFound();
-   assert(header.body_or_null != null, "the body of % is not typechecked", header.name);
    for workgroupSize  assert(it > 0, "workgroupSize: %, every dimension has to be greater than zero", workgroupSize);
 
    // ProcessMessage took it for a user function since it has no notes. the arguments of the entry point are not passed like the arguments of a user function.
@@ -182,7 +185,8 @@ CompileEntryPoint :: (header: *Code_Procedure_Header, type: ShaderType, workgrou
    for header.arguments  table_remove(*userFunctionArguments, it);
    CreateFunctionDependencyEntryIfNotExists(*functionDependencyTable, header);
 
-   return CompileToSpirv(header, type, workgroupSize, maxVertices, maxPrimitives, topology);
+   spirv, untypechecked := CompileToSpirv(header, type, workgroupSize, maxVertices, maxPrimitives, topology);
+   return spirv, untypechecked;
 }
 
 #scope_module
@@ -1705,6 +1709,7 @@ CompilationData :: struct {
    generalBuilder:                           *BuilderType;   // the "general" builder of the function being generated, where its OpVariables go. for code that doesnt have it at hand (access chains)
    multipleReturnValues:                     Table(*Code_Procedure_Call, SSAId); // the struct returned by a call of a procedure with more than one return value
    proceduresBeingTyped:                     [..] *Code_Procedure_Header; // see the .PROCEDURE_HEADER case of DetermineCodeNodeTypes
+   untypecheckedProcedure:                   *Code_Procedure_Header; // the first procedure the shader calls whose body jai hasnt typechecked, see DetermineProcedureHeaderType
    usingStack:                               [..] *Code_Node;  // the expressions of the using statements in scope while typing, the innermost last. see GetUsingAccess
    usingAccesses:                            Table(*Code_Ident, *Code_Binary_Operator); // an identifier that is a member reached through using is generated as this access (base.member)
    pointerIterators:                         Table(*Code_Declaration, *Code_For); // the it of a for * loop. it is the address of the element, see the .FOR case of DetermineCodeNodeTypes
@@ -1773,7 +1778,8 @@ LoopData :: struct {
 //
 // the function must be provided using code_of otherwise jai doesnt compile the body of the function
 // and body_or_null is always null even if i wait in a loop until it is not null anymore
-CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSize: [3] u32 = .[1, 1, 1], maxVertices: u32 = 0, maxPrimitives: u32 = 0, primitiveTopology: PrimitiveTopology = .Triangles) -> [] u8 {
+// returns the procedure whose body is not typechecked if there is one (the entry point or a procedure it calls), the spirv is empty then
+CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSize: [3] u32 = .[1, 1, 1], maxVertices: u32 = 0, maxPrimitives: u32 = 0, primitiveTopology: PrimitiveTopology = .Triangles) -> [] u8, untypechecked: *Code_Procedure_Header {
    // parameter validation
    if (type == .Mesh) {
       assert(maxVertices > 0, "max vertices must be greater than zero.");
@@ -1781,7 +1787,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    }
 
    body := header.body_or_null;
-   assert(body != null, "body_or_null is null! idk how to solve this, maybe loop until it is not null anymore. if you passed the function directly that wont work. pass using code_of");
+   if (body == null) return .[], header;
    block := body.block;
    functionName := header.name;
 
@@ -1969,6 +1975,8 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
    }
 
    DetermineCodeNodeTypes(*data, body.block);
+   if (data.untypecheckedProcedure != null) return .[], data.untypecheckedProcedure;
+
    functionsBuilder: BuilderType;
    GenerateFunctions(*data, body, *functionsBuilder);
 
@@ -2719,7 +2727,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          return .{
             data = xx spirvOut.code,
             count = xx spirvOut.wordCount * WORD_LENGTH
-         };
+         }, null;
 
       case .Byte;
          assert(b[3] == SSA_ID_BOUND_PLACEHOLDER);
@@ -2728,7 +2736,7 @@ CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSi
          return .{
             data = xx b.data,
             count = b.count * size_of(type_of(b[69])),
-         };
+         }, null;
 
       case; assert(false, "not yet implemented! type: %", SPIRV_BUILDER_TYPE);
    }
@@ -10971,7 +10979,13 @@ DetermineProcedureHeaderType :: (data: *CompilationData, node: *Code_Node) -> *T
       return node.type;
    }
 
-   assert(cph.body_or_null != null, "loc: %:%", node.location.enclosing_load.fully_pathed_filename, node.location);
+   // jai hasnt typechecked the body: it has an error jai reports later (an undefined name...), or it waits for something.
+   // the shader cant be compiled, the caller of CompileEntryPoint is told which procedure it is so jai can report the error instead of this.
+   if (cph.body_or_null == null) {
+      if (data.untypecheckedProcedure == null) data.untypecheckedProcedure = cph;
+      TableAdd(*data.codeNodeTypes, node, node.type);
+      return node.type;
+   }
    assert(cph.body_or_null.block != null);
    DetermineCodeNodeTypes(data, cph.body_or_null.block);
 
@@ -11705,7 +11719,7 @@ EvaluateConstant :: (data: *CompilationData, node: *Code_Node) -> ConstantValue,
          if cuo.operator_type == {
             case #char "."; return value, true; // .A, a value of an enum
             case #char "-";
-               if (value.kind == .Int)   return ConvertConstant(INT(xx -cast,no_check(s64) value.bits), node.type), true;
+               if (value.kind == .Int)   return ConvertConstant(INT(cast,no_check(u64) -cast,no_check(s64) value.bits), node.type), true;
                if (value.kind == .Float) return FLOAT(-value._float64), true;
             case #char "~";
                if (value.kind == .Int)   return ConvertConstant(INT(~value.bits), node.type), true;

@@ -3970,6 +3970,14 @@ TestConstantExpressions :: (o: [] TestOut, p: [] TestPrim, data: *TestData) {
    data.f += d.b * cast(f32) TEST_N;
    x: s32 = xx (size_of(f32x4) / 4);
    data.i += x / TEST_N;
+   TAPS :: 6;
+   TYPED_TAPS : s32 : 6;
+   k: s32 = -TEST_N;
+   k += -TAPS;
+   k += -TYPED_TAPS;
+   for -TAPS..TAPS  k += cast(s32) it;
+   for i: -TYPED_TAPS..TYPED_TAPS  k += i;
+   data.i += k;
 } @mesh @1_1_1 @1_1 @triangles
 
 TestDeferHelper :: (data: *TestData) -> s32 {
