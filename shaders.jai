@@ -4594,6 +4594,18 @@ TestTextureKinds :: (v: TestOut, p: TestPrim, data: *TestTextureData) -> f32x4 {
    return c;
 } @fragment
 
+// multisampled 2D images: one sample of a texel. the sample index takes the place of the lod
+TestTexelFetchMultisampled :: (data: *TestTextureData) {
+   coordinate := s32x2.{ xx globalinvocationid.x, xx globalinvocationid.y };
+   c := f32x4.{};
+   for 0..3  c += texelfetchms(images[data.image], coordinate, xx it);
+   c += texelfetchms(cast(u32) data.image, coordinate, data.count);   // the index in the heap
+   data.count = texelfetchims(images[data.depth], coordinate, 2).x;
+   data.size = texturesizems(images[data.image]) + texturesizems(cast(u32) data.depth);
+   data.count += texturesamplesms(images[data.image]) + texturesamplesms(cast(u32) data.depth);
+   data.f = c.x;
+} @compute @8_8
+
 TestStorageImageOffsetReadWrite :: (data: *TestTextureData) {
    coordinate := s32x2.{ xx globalinvocationid.x, xx globalinvocationid.y };
    ImageWrite(cast(u32) data.storage, coordinate, ImageRead(cast(u32) data.storage, coordinate));

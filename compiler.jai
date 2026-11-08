@@ -695,7 +695,7 @@ GenerateTextureFunction :: (data: *CompilationData, textureFunction: *ResourceFu
       dimensionality    = dimensionality,
       depth             = xx isDepth,
       arrayed           = xx (kind == .Array),
-      ms                = 0,
+      ms                = xx (kind == .MS),
       sampled           = ifx isStorage then 2 else 1,
       imageFormat       = .Unknown,
    };
@@ -757,15 +757,23 @@ GenerateTextureFunction :: (data: *CompilationData, textureFunction: *ResourceFu
       case .Fetch;
          coordinateSSAId := Argument(1);
          if (kind == .Array)  coordinateSSAId = CoordinateWithLayer(coordinateSSAId, Argument(2), cast(*Type_Info) s32x3);
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageFetch, resultTypeSSAId, resultSSAId, imageSSAId, coordinateSSAId, SpvImageOperandsMask.LodMask, Argument(1 + coordinateCount));
+         // a multisampled image has no lod, its operand is the index of the sample
+         operandMask := ifx kind == .MS then SpvImageOperandsMask.SampleMask else .LodMask;
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageFetch, resultTypeSSAId, resultSSAId, imageSSAId, coordinateSSAId, operandMask, Argument(1 + coordinateCount));
 
       case .Size;
          data.usesImageQuery = true;
-         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageQuerySizeLod, resultTypeSSAId, resultSSAId, imageSSAId, Argument(1));
+         // OpImageQuerySizeLod isnt allowed on multisampled images (they have no mips)
+         if (kind == .MS)  WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageQuerySize, resultTypeSSAId, resultSSAId, imageSSAId);
+         else              WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageQuerySizeLod, resultTypeSSAId, resultSSAId, imageSSAId, Argument(1));
 
       case .Levels;
          data.usesImageQuery = true;
          WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageQueryLevels, resultTypeSSAId, resultSSAId, imageSSAId);
+
+      case .Samples;
+         data.usesImageQuery = true;
+         WriteSingleInstructionIfReachable(function, *data.isBlockReachable, .ImageQuerySamples, resultTypeSSAId, resultSSAId, imageSSAId);
 
       case .Read;
          data.usesImageReadWithoutFormat = true;
@@ -4017,6 +4025,7 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          case .ImageRead; #through;
          case .ImageQuerySizeLod; #through;
          case .ImageQueryLevels; #through;
+         case .ImageQuerySamples; #through;
          case .ImageQuerySize; {
             print_to_builder(b, "\%% = Op% \%%", operands[1].value_pointer.(*SSAId).*, op, operands[0].value_pointer.(*SSAId).*);
             for 2..operands.count - 1 {
@@ -5482,6 +5491,7 @@ WriteSingleInstruction :: (b: *BuilderType, op: SpvOp, operands: ..Any) {
          case .ImageRead; #through;
          case .ImageQuerySizeLod; #through;
          case .ImageQueryLevels; #through;
+         case .ImageQuerySamples; #through;
          case .ImageQuerySize; {
             array_add(b, OpWordCount(op, operands.count));
             for operands {
