@@ -1773,7 +1773,7 @@ LoopData :: struct {
 //
 // the function must be provided using code_of otherwise jai doesnt compile the body of the function
 // and body_or_null is always null even if i wait in a loop until it is not null anymore
-CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSize: [3] u32 = .[1, 1, 1], maxVertices: u32 = 0, maxPrimitives: u32 = 0, primitiveTopology: PrimitiveTopology = .Triangles) -> [] u8 #compile_time {
+CompileToSpirv :: (header: *Code_Procedure_Header, type: ShaderType, workgroupSize: [3] u32 = .[1, 1, 1], maxVertices: u32 = 0, maxPrimitives: u32 = 0, primitiveTopology: PrimitiveTopology = .Triangles) -> [] u8 {
    // parameter validation
    if (type == .Mesh) {
       assert(maxVertices > 0, "max vertices must be greater than zero.");
@@ -6921,48 +6921,53 @@ MakeShaderDataPointerAssignmentStatement :: (shaderDataPointerDeclaration: *Code
 
    right.target_type = shaderDataPointerDeclaration.type_inst;
 
-   castedExpressionCode: Code;
+   // the push data variable of the stage, and its member that has the address of the shader's data
+   pushData: *Code_Declaration;
+   memberName: string;
    if shaderType == {
-      case .Task;       castedExpressionCode = code_of(__mesh_push_data__.taskData);
-      case .Mesh;       castedExpressionCode = code_of(__mesh_push_data__.meshData);
-      case .Fragment;   castedExpressionCode = code_of(__mesh_push_data__.fragmentData);
-      case .Rgen;       castedExpressionCode = code_of(__rtx_push_data__.rgenData);
-      case .Rchit;      castedExpressionCode = code_of(__rtx_push_data__.rchitData);
-      case .Rmiss;      castedExpressionCode = code_of(__rtx_push_data__.rmissData);
-      case .Rahit;      castedExpressionCode = code_of(__rtx_push_data__.rahitData);
-      case .Rint;       castedExpressionCode = code_of(__rtx_push_data__.rintData);
-      case .Rcall;      castedExpressionCode = code_of(__rtx_push_data__.rcallData);
-      case .Compute;    castedExpressionCode = code_of(__compute_push_data__.computeData);
+      case .Task;       pushData = meshPipelinePushDataVariableIdentifier.variable.declaration;     memberName = "taskData";
+      case .Mesh;       pushData = meshPipelinePushDataVariableIdentifier.variable.declaration;     memberName = "meshData";
+      case .Fragment;   pushData = meshPipelinePushDataVariableIdentifier.variable.declaration;     memberName = "fragmentData";
+      case .Rgen;       pushData = rtxPipelinePushDataVariableIdentifier.variable.declaration;      memberName = "rgenData";
+      case .Rchit;      pushData = rtxPipelinePushDataVariableIdentifier.variable.declaration;      memberName = "rchitData";
+      case .Rmiss;      pushData = rtxPipelinePushDataVariableIdentifier.variable.declaration;      memberName = "rmissData";
+      case .Rahit;      pushData = rtxPipelinePushDataVariableIdentifier.variable.declaration;      memberName = "rahitData";
+      case .Rint;       pushData = rtxPipelinePushDataVariableIdentifier.variable.declaration;      memberName = "rintData";
+      case .Rcall;      pushData = rtxPipelinePushDataVariableIdentifier.variable.declaration;      memberName = "rcallData";
+      case .Compute;    pushData = computePipelinePushDataVariableIdentifier.variable.declaration;  memberName = "computeData";
       case; assert(false, "not yet implemented! type: %", shaderType);
    }
 
-   right.expression = compiler_get_nodes(castedExpressionCode);
+   // the tree of "__push_data__.member", typed, made from the program's declarations. it isnt made with compiler_get_nodes(code_of(...)):
+   // that only exists at compile time, and the compiler can be built as a native library (VulkanJai does it) since compile time code is slow.
+   pushDataType := cast(*Type_Info_Struct) pushData.type;
+   assert(pushData.type.type == .STRUCT, "% isnt a struct", pushData.name);
+   found, pushDataStruct := table_find(*structDefinitions, pushDataType);
+   assert(found, "the definition of % (the type of %) isnt known", pushDataType.name, pushData.name);
 
-   // i am being a cheeky bastard here. code_of creates new Code_Nodes. it doesnt refer to the ones that are already created
-   // by the compiler during the compilation of this file. and i do variable compare, which is just pointer equality, so
-   // pointers must be the same. this is what i "fix". i know i only use the variable declaration so i only fix that.
-   // i think a better way to do this would be i think idk. maybe just emit the spirv directly rather than trying to create jai syntax tree.
-   //          - apila, 19/09/26
-   assert(right.expression.kind == .BINARY_OPERATOR);
-   dot := cast(*Code_Binary_Operator) right.expression;
-   assert(dot.left.kind == .IDENT);
-   ci := cast(*Code_Ident) dot.left;
-   if shaderType == {
-      case .Task; #through;
-      case .Mesh; #through;
-      case .Fragment;
-         ci.resolved_declaration = meshPipelinePushDataVariableIdentifier.variable.declaration;
-      case .Rgen; #through;
-      case .Rchit; #through;
-      case .Rmiss; #through;
-      case .Rahit; #through;
-      case .Rint; #through;
-      case .Rcall;
-         ci.resolved_declaration = rtxPipelinePushDataVariableIdentifier.variable.declaration;
-      case .Compute;
-         ci.resolved_declaration = computePipelinePushDataVariableIdentifier.variable.declaration;
-      case; assert(false, "not yet implemented! type: %", shaderType);
+   member: *Code_Declaration;
+   for pushDataStruct.block.members {
+      if (it.kind == .DECLARATION && it.name == memberName)  member = cast(*Code_Declaration) it;
    }
+   assert(member != null, "% has no member %", pushDataType.name, memberName);
+
+   pushDataIdent := New(Code_Ident);
+   pushDataIdent.name = pushData.name;
+   pushDataIdent.type = pushData.type;
+   pushDataIdent.resolved_declaration = pushData;
+
+   memberIdent := New(Code_Ident);
+   memberIdent.name = member.name;
+   memberIdent.type = member.type;
+   memberIdent.resolved_declaration = member;
+
+   dot := New(Code_Binary_Operator);
+   dot.operator_type = #char ".";
+   dot.left = pushDataIdent;
+   dot.right = memberIdent;
+   dot.type = member.type;
+
+   right.expression = dot;
 
    return assignment;
 }
